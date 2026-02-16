@@ -2075,10 +2075,13 @@ class TextualTerminalDisplay(TerminalDisplay):
                 modal = FinalAnswerModal(data=data)
 
                 def handle_result(result: ReviewResult) -> None:
-                    # Update the card's review status indicator immediately.
-                    # This callback runs inside Textual's event loop, so
-                    # we can safely access widgets here.
-                    self._update_card_review_status(result)
+                    # Only update review status when there were actual
+                    # reviewed changes. Workspace-only and answer-only modal
+                    # paths should not surface "changes approved/rejected".
+                    if data.changes:
+                        # This callback runs inside Textual's event loop, so
+                        # we can safely access widgets here.
+                        self._update_card_review_status(result)
                     try:
                         card = self._get_active_final_card()
                         if card is not None:

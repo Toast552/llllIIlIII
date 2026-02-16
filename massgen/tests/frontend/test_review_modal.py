@@ -846,3 +846,64 @@ class TestOrchestratorSafety:
 
         result = await display.show_change_review_modal([])
         assert result.approved is False
+
+    @pytest.mark.asyncio
+    async def test_show_final_answer_modal_workspace_only_skips_review_status_update(self, monkeypatch):
+        """Workspace-only final modal should not mark changes as approved/applied."""
+        from massgen.frontend.displays.textual_terminal_display import (
+            TextualTerminalDisplay,
+        )
+
+        class FakeApp:
+            def call_from_thread(self, fn):
+                fn()
+
+            def push_screen(self, _modal, callback):
+                callback(ReviewResult(approved=True))
+
+        display = TextualTerminalDisplay.__new__(TextualTerminalDisplay)
+        display._app = FakeApp()
+
+        update_calls = []
+        monkeypatch.setattr(display, "_update_card_review_status", lambda _result: update_calls.append(True))
+
+        result = await display.show_final_answer_modal(
+            changes=[],
+            answer_content="final answer",
+            vote_results={},
+            agent_id="agent_a",
+            workspace_path="/tmp/workspace",
+        )
+
+        assert result.approved is True
+        assert update_calls == []
+
+    @pytest.mark.asyncio
+    async def test_show_final_answer_modal_with_changes_updates_review_status(self, monkeypatch):
+        """Real reviewed changes should still update review status."""
+        from massgen.frontend.displays.textual_terminal_display import (
+            TextualTerminalDisplay,
+        )
+
+        class FakeApp:
+            def call_from_thread(self, fn):
+                fn()
+
+            def push_screen(self, _modal, callback):
+                callback(ReviewResult(approved=True))
+
+        display = TextualTerminalDisplay.__new__(TextualTerminalDisplay)
+        display._app = FakeApp()
+
+        update_calls = []
+        monkeypatch.setattr(display, "_update_card_review_status", lambda _result: update_calls.append(True))
+
+        result = await display.show_final_answer_modal(
+            changes=_make_changes(),
+            answer_content="final answer",
+            vote_results={},
+            agent_id="agent_a",
+        )
+
+        assert result.approved is True
+        assert update_calls == [True]
