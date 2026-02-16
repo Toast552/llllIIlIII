@@ -1061,11 +1061,12 @@ class TimelineSection(ScrollableContainer):
         except Exception as e:
             tui_log(f"[ContentSections] {e}")
 
+        self._item_count += 1
         card = ToolCallCard(
             tool_name=tool_data.tool_name,
             tool_type=tool_data.tool_type,
             call_id=tool_data.tool_id,
-            id=f"{self._id_prefix}tl_card_{_sanitize_widget_id(tool_data.tool_id)}",
+            id=f"{self._id_prefix}tl_card_{self._item_count}",
         )
 
         if tool_data.args_summary:
@@ -1074,9 +1075,12 @@ class TimelineSection(ScrollableContainer):
         # Tag with round class for navigation (scroll-to behavior)
         card.add_class(f"round-{round_number}")
 
+        tui_log(
+            f"[TOOL_CARD] tool={tool_data.tool_name} collapsed={card._collapsed} " f"is_terminal={card._is_terminal} is_subagent={card._is_subagent} " f"classes={' '.join(card.classes)}",
+        )
+
         self._tools[tool_data.tool_id] = card
         self._tool_rounds[tool_data.tool_id] = round_number
-        self._item_count += 1
 
         try:
             insert_before = self._find_insert_before_for_round(round_number)
@@ -1086,6 +1090,12 @@ class TimelineSection(ScrollableContainer):
             def trim_and_scroll():
                 self._trim_old_items()
                 self._auto_scroll()
+                # Debug: dump all children and their sizes after mount
+                if tui_debug_enabled():
+                    for i, child in enumerate(self.children):
+                        tui_log(
+                            f"[TIMELINE_DUMP] [{i}] {type(child).__name__} " f"id={child.id} classes={' '.join(child.classes)} " f"size={child.size} display={child.display}",
+                        )
 
             self.call_after_refresh(trim_and_scroll)
         except Exception as e:
@@ -2650,6 +2660,7 @@ class FinalPresentationCard(Vertical):
         self._cached_full_text: Optional[str] = None  # Cache to avoid repeated joins
         self._answer_content: Optional[str] = None
         self._pending_finalize = False
+        self._review_status: Optional[str] = None  # "approved" | "rejected" | None
         self._workspace_open_cooldown_s = 0.75
         self._last_workspace_open_at = 0.0
         self._markdown_render_max_chars = self._DEFAULT_MARKDOWN_RENDER_MAX_CHARS
@@ -2730,6 +2741,8 @@ class FinalPresentationCard(Vertical):
             with Horizontal(id="final_card_buttons"):
                 # View Full Answer button - opens FinalAnswerModal
                 yield Static("▶ View Full Answer", id="final_card_view_btn", classes="footer-link")
+                # Review status indicator - shown after approve/reject decision
+                yield Static("", id="final_card_review_status", classes="review-status-indicator hidden")
                 # Verified indicator - faded, shown when post-eval verified
                 verified = Static("✓ Verified", id="final_card_verified", classes="verified-indicator")
                 yield verified
@@ -2981,6 +2994,10 @@ class FinalPresentationCard(Vertical):
         if self.has_class("completion-only"):
             self.complete()
 
+        # If a review decision was set before mount (for example, from an async
+        # modal callback), apply it now that widgets are available.
+        self._apply_review_status()
+
     def _on_compose(self) -> None:
         """Called after compose() completes - use this to flush content."""
         # Try to update after compose completes
@@ -2989,6 +3006,28 @@ class FinalPresentationCard(Vertical):
         if self._pending_finalize:
             if self._finalize_markdown():
                 self._pending_finalize = False
+
+    def _apply_review_status(self) -> None:
+        """Apply a previously stored review status to the indicator.
+
+        No-op when no status is set yet.
+        """
+        if not self._review_status:
+            return
+        try:
+            from textual.widgets import Static
+
+            indicator = self.query_one("#final_card_review_status", Static)
+            if self._review_status == "approved":
+                indicator.update("✓ Changes applied")
+                indicator.remove_class("hidden", "status-rejected")
+                indicator.add_class("status-approved")
+            elif self._review_status == "rejected":
+                indicator.update("✗ Changes rejected")
+                indicator.remove_class("hidden", "status-approved")
+                indicator.add_class("status-rejected")
+        except Exception as e:
+            logger.warning(f"[FinalCard] _apply_review_status({self._review_status!r}) failed: {e}")
 
     def complete(self) -> None:
         """Mark the presentation as complete and show action buttons."""
@@ -3058,6 +3097,15 @@ class FinalPresentationCard(Vertical):
 
         preview = "\n".join(lines[: self._PREVIEW_MAX_LINES]) + "\n..."
         self._render_static_content(preview)
+
+    def set_review_status(self, status: str) -> None:
+        """Update the review status indicator on the card footer.
+
+        Args:
+            status: "approved" or "rejected"
+        """
+        self._review_status = status
+        self._apply_review_status()
 
     def get_content(self) -> str:
         """Get the full content for copy operation."""

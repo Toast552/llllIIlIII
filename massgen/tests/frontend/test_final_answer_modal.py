@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Unit tests for FinalAnswerModal — the tabbed final answer + review changes modal."""
 
+from unittest.mock import MagicMock, patch
 
 from massgen.filesystem_manager import ReviewResult
 from massgen.frontend.displays.textual.widgets.modals.final_answer_modal import (
@@ -224,17 +225,23 @@ class TestFinalAnswerModalConstruction:
 
 
 class TestDismissBehavior:
-    def _capture_dismiss(self, modal):
+    def _capture_super_dismiss(self, modal):
+        """Patch super().dismiss() to capture calls without bypassing the guard."""
         captured = {}
-        modal.dismiss = lambda result: captured.update({"result": result})
-        return captured
+
+        def mock_super_dismiss(self_inner, result=None):
+            captured["result"] = result
+
+        patch_ctx = patch.object(type(modal).__mro__[1], "dismiss", mock_super_dismiss)
+        return captured, patch_ctx
 
     def test_close_from_answer_approves_all(self):
         """Closing from answer tab should approve all changes."""
         data = _make_data(changes=_make_changes())
         modal = FinalAnswerModal(data=data)
-        captured = self._capture_dismiss(modal)
-        modal._close_with_approve_all()
+        captured, ctx = self._capture_super_dismiss(modal)
+        with ctx:
+            modal._close_with_approve_all()
         result = captured["result"]
         assert isinstance(result, ReviewResult)
         assert result.approved is True
@@ -245,19 +252,35 @@ class TestDismissBehavior:
         """Closing with no changes should still return approved=True."""
         data = _make_data(changes=None)
         modal = FinalAnswerModal(data=data)
-        captured = self._capture_dismiss(modal)
-        modal._close_with_approve_all()
+        captured, ctx = self._capture_super_dismiss(modal)
+        with ctx:
+            modal._close_with_approve_all()
         result = captured["result"]
         assert result.approved is True
 
-    def test_esc_action_approves_all(self):
-        """ESC action should approve all."""
+    def test_esc_action_blocked_when_changes_pending(self):
+        """ESC action should be blocked when changes need review."""
         data = _make_data(changes=_make_changes())
         modal = FinalAnswerModal(data=data)
-        captured = self._capture_dismiss(modal)
-        modal.action_close_modal()
-        result = captured["result"]
-        assert result.approved is True
+        captured, ctx = self._capture_super_dismiss(modal)
+        mock_app = MagicMock()
+        with patch.object(type(modal), "app", new_callable=lambda: property(lambda self: mock_app)):
+            with ctx:
+                modal.action_close_modal()
+        # Should NOT have dismissed
+        assert "result" not in captured
+        # Should have notified
+        mock_app.notify.assert_called_once()
+
+    def test_esc_action_approves_when_no_changes(self):
+        """ESC action should approve when no changes are present."""
+        data = _make_data(changes=None)
+        modal = FinalAnswerModal(data=data)
+        captured, ctx = self._capture_super_dismiss(modal)
+        with ctx:
+            modal.action_close_modal()
+        # dismiss() called without arguments (no pending changes)
+        assert "result" in captured
 
 
 # ---------------------------------------------------------------------------
@@ -457,14 +480,15 @@ class TestPriorActionMode:
         assert captured["result"].approved is True
 
     def test_prior_action_esc_dismisses(self):
-        """ESC in prior_action mode should dismiss just like normal."""
+        """ESC in prior_action mode should dismiss (no decision needed)."""
         data = _make_data(changes=_make_changes())
         data.prior_action = "rejected"
         modal = FinalAnswerModal(data=data)
         captured = {}
-        modal.dismiss = lambda result: captured.update({"result": result})
+        modal.dismiss = lambda result=None: captured.update({"result": result})
         modal.action_close_modal()
-        assert captured["result"].approved is True
+        # Should have dismissed (prior_action means no decision required)
+        assert "result" in captured
 
     def test_panel_dimmed_when_prior_action_set(self):
         """Panel should have review-approved-dim class when prior_action is set."""
@@ -480,3 +504,105 @@ class TestPriorActionMode:
         data.prior_action = "approved"
         modal = FinalAnswerModal(data=data)
         assert modal._panel._show_rework is False
+
+
+# ---------------------------------------------------------------------------
+# Review panel keyboard bindings delegation
+# ---------------------------------------------------------------------------
+
+
+class TestReviewPanelBindings:
+    """Verify FinalAnswerModal exposes all review panel keyboard actions."""
+
+    def _make_modal_with_panel(self):
+        data = _make_data(changes=_make_changes())
+        modal = FinalAnswerModal(data=data)
+        assert modal._panel is not None
+        return modal
+
+    def test_bindings_include_review_keys(self):
+        """BINDINGS should include space, enter, arrows, h, [, ], e (not a/r — buttons only)."""
+        binding_keys = {b.key for b in FinalAnswerModal.BINDINGS}
+        expected = {"space", "enter", "h", "[", "]", "up", "down", "e"}
+        assert expected.issubset(binding_keys), f"Missing bindings: {expected - binding_keys}"
+        # a and r removed — approve/reject only via panel buttons
+        assert "a" not in binding_keys
+        assert "r" not in binding_keys
+
+    def test_action_toggle_selected_delegates(self):
+        """space → action_toggle_selected should call panel._toggle_file_approval."""
+        modal = self._make_modal_with_panel()
+        # Select first file so toggle has a target
+        first_file = modal._panel._all_file_paths[0]
+        modal._panel._selected_file = first_file
+        original = modal._panel.file_approvals[first_file]
+        modal.action_toggle_selected()
+        assert modal._panel.file_approvals[first_file] != original
+
+    def test_action_select_next_file_delegates(self):
+        """down → action_select_next_file should call panel._move_selection."""
+        modal = self._make_modal_with_panel()
+        first_file = modal._panel._all_file_paths[0]
+        modal._panel._selected_file = first_file
+        modal.action_select_next_file()
+        # With only 1 file it wraps around, but the method should not raise
+        assert modal._panel._selected_file is not None
+
+    def test_action_select_previous_file_delegates(self):
+        """up → action_select_previous_file should call panel._move_selection."""
+        modal = self._make_modal_with_panel()
+        first_file = modal._panel._all_file_paths[0]
+        modal._panel._selected_file = first_file
+        modal.action_select_previous_file()
+        assert modal._panel._selected_file is not None
+
+    def test_no_panel_actions_are_noop(self):
+        """Review actions should be no-ops when there is no panel."""
+        data = _make_data(changes=None)
+        modal = FinalAnswerModal(data=data)
+        assert modal._panel is None
+        # Should not raise
+        modal.action_toggle_selected()
+        modal.action_select_next_file()
+        modal.action_select_previous_file()
+        modal.action_toggle_selected_hunk()
+        modal.action_select_next_hunk()
+        modal.action_select_previous_hunk()
+        modal.action_edit_file()
+
+
+# ---------------------------------------------------------------------------
+# Review status on FinalPresentationCard
+# ---------------------------------------------------------------------------
+
+
+class TestFinalPresentationCardReviewStatus:
+    """Tests for showing approved/rejected status on the timeline card."""
+
+    def _make_card(self):
+        from massgen.frontend.displays.textual_widgets.content_sections import (
+            FinalPresentationCard,
+        )
+
+        return FinalPresentationCard(
+            agent_id="agent_a",
+            model_name="test-model",
+            vote_results=MOCK_VOTES,
+        )
+
+    def test_review_status_default_none(self):
+        """Card should have no review status by default."""
+        card = self._make_card()
+        assert card._review_status is None
+
+    def test_set_review_status_approved(self):
+        """set_review_status('approved') should store the status."""
+        card = self._make_card()
+        card.set_review_status("approved")
+        assert card._review_status == "approved"
+
+    def test_set_review_status_rejected(self):
+        """set_review_status('rejected') should store the status."""
+        card = self._make_card()
+        card.set_review_status("rejected")
+        assert card._review_status == "rejected"

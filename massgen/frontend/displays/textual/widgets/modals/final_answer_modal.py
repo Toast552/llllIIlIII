@@ -9,11 +9,13 @@ answer, post-eval) and a conditional "Review Changes" tab (diff review
 panel reused from ReviewChangesPanel).
 """
 
+import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 try:
     from textual.app import ComposeResult
+    from textual.binding import Binding
     from textual.containers import Container, Horizontal, Vertical, VerticalScroll
     from textual.widgets import Button, Label, Markdown, Static, TabbedContent, TabPane
 
@@ -180,31 +182,73 @@ class FinalAnswerModal(BaseModal):
     diff review UI from ReviewChangesPanel.
 
     Dismiss behavior:
-    - Close/ESC from Answer tab -> ReviewResult(approved=True) (accept all)
+    - Close/ESC when changes are pending (initial modal) -> blocked with notification
+    - Close/ESC on answer-only or re-opened modal -> dismiss normally
     - Apply/Reject from Review tab -> standard ReviewResult
     """
 
+    # All bindings use priority=True so they override app-level bindings
+    # (prevents keys like 'h' from leaking to the TUI behind the modal).
     BINDINGS = [
-        ("escape", "close_modal", "Close"),
-        ("ctrl+c", "close_modal", "Close"),
-        ("1", "switch_answer_tab", "Answer"),
-        ("2", "switch_review_tab", "Review"),
+        Binding("escape", "close_modal", "Close", priority=True),
+        Binding("ctrl+c", "force_close", "Reject & Close", priority=True, show=False),
+        Binding("1", "switch_answer_tab", "Answer", priority=True),
+        Binding("2", "switch_review_tab", "Review", priority=True),
+        # Review panel bindings (delegated to self._panel when present)
+        Binding("space", "toggle_selected", "Toggle File", priority=True),
+        Binding("enter", "approve_selected", "Approve Selected", priority=True),
+        Binding("h", "toggle_selected_hunk", "Toggle Hunk", priority=True),
+        Binding("[", "select_previous_hunk", "Prev Hunk", priority=True),
+        Binding("]", "select_next_hunk", "Next Hunk", priority=True),
+        Binding("up", "select_previous_file", "Prev File", priority=True),
+        Binding("down", "select_next_file", "Next File", priority=True),
+        Binding("e", "edit_file", "Edit", priority=True),
     ]
+
+    # Keys with bindings — stopped in on_key to prevent app-level leaking
+    _MODAL_KEYS = frozenset(
+        {
+            "escape",
+            "ctrl+c",
+            "space",
+            "h",
+            "e",
+            "enter",
+            "up",
+            "down",
+            "1",
+            "2",
+            "left_square_bracket",
+            "right_square_bracket",
+        },
+    )
 
     def __init__(self, data: FinalAnswerModalData, **kwargs):
         super().__init__(**kwargs)
         self._data = data
         self._prior_action = data.prior_action  # None | "approved" | "rejected"
+        self._ctrl_c_warned = False
+        self._last_notify_time = 0.0
         self._panel: Optional[ReviewChangesPanel] = None
         if data.changes:
             self._panel = ReviewChangesPanel(
                 changes=data.changes,
                 show_footer=True,
                 show_rework=not self._prior_action,
+                show_all_keyboard_hints=False,
                 id="final_review_panel",
             )
             if self._prior_action:
                 self._panel.add_class("review-approved-dim")
+
+    @property
+    def _requires_decision(self) -> bool:
+        """Whether this modal requires an explicit approve/reject decision.
+
+        True only on the initial modal when there are pending changes
+        and no prior action has been taken.
+        """
+        return bool(self._data.changes) and self._prior_action is None
 
     def _build_header_title(self) -> str:
         """Build a combined header title with winner/vote info inline."""
@@ -276,8 +320,12 @@ class FinalAnswerModal(BaseModal):
             event.stop()
             event.prevent_default()
             self.call_later(self.action_switch_review_tab)
+        elif event.button.id == "close_modal_button":
+            # Handle X button explicitly and stop the event so BaseModal's
+            # handler doesn't also fire (Textual dispatches to each MRO class).
+            event.stop()
+            self.dismiss()
         else:
-            # Let panel handle its own buttons, or fall through to base
             super().on_button_pressed(event)
 
     # ------------------------------------------------------------------
@@ -296,9 +344,61 @@ class FinalAnswerModal(BaseModal):
     # Actions
     # ------------------------------------------------------------------
 
+    def dismiss(self, result=None) -> None:
+        """Guard dismiss: block bare dismiss() when a decision is required.
+
+        This is the single chokepoint for all dismiss pathways (ESC, X button,
+        bindings, ModalScreen-level handlers). Only an explicit ReviewResult
+        (from the Review tab buttons) is allowed through when changes are pending.
+        """
+        if self._requires_decision and not isinstance(result, ReviewResult):
+            self._notify_decision_required()
+            return
+        super().dismiss(result)
+
+    def on_key(self, event) -> None:
+        """Consume all bound keys to prevent them leaking to the app.
+
+        Bindings fire before on_key, so the action is already dispatched.
+        We just stop propagation here to prevent app-level handlers
+        (e.g. 'h' for conversation history) from also firing.
+        """
+        if event.key in self._MODAL_KEYS:
+            event.stop()
+            return
+        # Don't call super — BaseModal.on_key only handles ESC which
+        # we already consume above.
+
+    def key_escape(self) -> None:
+        """No-op: ESC is handled by the binding via action_close_modal."""
+
     def action_close_modal(self) -> None:
-        """ESC key: approve all changes (accept default)."""
-        self._close_with_approve_all()
+        """ESC key: routes through dismiss() guard."""
+        self.dismiss()
+
+    def action_force_close(self) -> None:
+        """Ctrl+C: warn on first press, auto-reject on second."""
+        if not self._requires_decision:
+            self.dismiss()
+            return
+        if self._ctrl_c_warned:
+            self.dismiss(
+                ReviewResult(
+                    approved=False,
+                    metadata={"selection_mode": "force_close"},
+                    action="reject",
+                ),
+            )
+        else:
+            self._ctrl_c_warned = True
+            try:
+                self.app.notify(
+                    "Press Ctrl+C again to reject all changes and close",
+                    severity="warning",
+                    timeout=3,
+                )
+            except Exception:
+                pass
 
     def action_switch_answer_tab(self) -> None:
         """Switch to Answer tab via keyboard shortcut."""
@@ -320,6 +420,65 @@ class FinalAnswerModal(BaseModal):
             tabs.active = "review_tab"
         except Exception:
             pass  # No tabs in answer-only mode
+
+    # ------------------------------------------------------------------
+    # Review panel keyboard actions — delegate to self._panel
+    # ------------------------------------------------------------------
+
+    def action_toggle_selected(self) -> None:
+        if self._panel and self._panel._selected_file:
+            self._panel._toggle_file_approval(self._panel._selected_file)
+
+    def action_approve_selected(self) -> None:
+        if self._panel:
+            self._panel._approve_selected()
+
+    def action_toggle_selected_hunk(self) -> None:
+        if self._panel:
+            self._panel._toggle_selected_hunk()
+
+    def action_select_previous_hunk(self) -> None:
+        if self._panel:
+            self._panel._move_selected_hunk(-1)
+
+    def action_select_next_hunk(self) -> None:
+        if self._panel:
+            self._panel._move_selected_hunk(1)
+
+    def action_select_previous_file(self) -> None:
+        if self._panel:
+            self._panel._move_selection(-1)
+
+    def action_select_next_file(self) -> None:
+        if self._panel:
+            self._panel._move_selection(1)
+
+    def action_edit_file(self) -> None:
+        if self._panel:
+            self._panel.action_edit_file()
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _notify_decision_required(self) -> None:
+        """Show a notification that the user must approve or reject changes.
+
+        Debounced: ignores calls within 0.5s of the previous notification
+        to prevent double-toast when multiple dismiss pathways fire.
+        """
+        now = time.monotonic()
+        if now - self._last_notify_time < 0.5:
+            return
+        self._last_notify_time = now
+        try:
+            self.app.notify(
+                "Please approve or review changes before closing",
+                severity="warning",
+                timeout=3,
+            )
+        except Exception:
+            pass  # No app context (e.g. in tests)
 
     def _close_with_approve_all(self) -> None:
         """Close the modal, approving all changes."""

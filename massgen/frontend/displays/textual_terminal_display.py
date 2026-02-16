@@ -333,8 +333,10 @@ class TextualTerminalDisplay(TerminalDisplay):
         self._final_stream_active = False
         self._final_stream_buffer: str = ""
         self._final_presentation_agent: Optional[str] = None
+        self._final_presentation_card = None
         self._routing_to_post_eval_card = False  # Bug 2 fix: prevent timeline routing during post-eval
         self._in_final_presentation = False  # Prevent duplicate timeline content during final presentation
+        self._pending_final_review_status: Optional[str] = None
 
         self._app_ready = threading.Event()
         self._input_handler: Optional[Callable[[str], None]] = None
@@ -400,9 +402,11 @@ class TextualTerminalDisplay(TerminalDisplay):
         self._final_answer_metadata.clear()
         self._final_stream_buffer = ""
         self._final_presentation_agent = None
+        self._final_presentation_card = None
         self._final_stream_active = False
         self._routing_to_post_eval_card = False
         self._in_final_presentation = False
+        self._pending_final_review_status = None
 
         # Post-evaluation content - clear for new turn
         self._post_evaluation_lines.clear()
@@ -2067,6 +2071,16 @@ class TextualTerminalDisplay(TerminalDisplay):
                 modal = FinalAnswerModal(data=data)
 
                 def handle_result(result: ReviewResult) -> None:
+                    # Update the card's review status indicator immediately.
+                    # This callback runs inside Textual's event loop, so
+                    # we can safely access widgets here.
+                    self._update_card_review_status(result)
+                    try:
+                        card = self._get_active_final_card()
+                        if card is not None:
+                            card.scroll_visible(animate=True, top=False)
+                    except Exception:
+                        logger.exception("[FinalAnswer] Failed to scroll final card into view")
                     if not result_future.done():
                         loop.call_soon_threadsafe(result_future.set_result, result)
 
@@ -2097,7 +2111,60 @@ class TextualTerminalDisplay(TerminalDisplay):
 
         # Store the result so re-opening from "View Full Answer" knows the action taken
         self._last_final_answer_result = result
+
         return result
+
+    def _get_active_final_card(self) -> Optional["FinalPresentationCard"]:
+        """Return the most relevant final card currently mounted."""
+        card = getattr(self, "_final_presentation_card", None)
+        if card is not None:
+            return card
+
+        if self._app is None:
+            return None
+
+        app_card = getattr(self._app, "_final_presentation_card", None)
+        if app_card is not None:
+            return app_card
+
+        from .textual_widgets.content_sections import FinalPresentationCard
+
+        try:
+            cards = list(self._app.query(FinalPresentationCard))
+            return cards[-1] if cards else None
+        except Exception:
+            return None
+
+    def _apply_pending_review_status(self, card: Optional["FinalPresentationCard"]) -> None:
+        """Apply a cached review status to the card and clear cache."""
+        pending_status = getattr(self, "_pending_final_review_status", None)
+        if card is None or not pending_status:
+            return
+        try:
+            card.set_review_status(pending_status)
+            self._pending_final_review_status = None
+        except Exception:
+            logger.exception("[FinalAnswer] Failed to apply pending review status")
+
+    def _update_card_review_status(self, result: Optional["ReviewResult"] = None) -> None:
+        """Update the FinalPresentationCard's review status indicator.
+
+        Must be called from within Textual's event loop (e.g. from a
+        push_screen callback or event handler).
+        """
+        if result is None:
+            return
+
+        status = "approved" if result.approved else "rejected"
+        if getattr(self, "_pending_final_review_status", None) != status:
+            self._pending_final_review_status = status
+
+        card = self._get_active_final_card()
+        if card is None:
+            tui_log("[FinalAnswer] No final card available yet; caching review status")
+            return
+
+        self._apply_pending_review_status(card)
 
     def _dispatch_review_rework(self, rework_info: Dict[str, Any]) -> None:
         """Dispatch a review rework by submitting feedback as a new question.
@@ -3116,6 +3183,7 @@ if TEXTUAL_AVAILABLE:
             # Final presentation state (streams into winner's AgentPanel)
             self._final_presentation_agent: Optional[str] = None
             self._final_presentation_card: Optional[FinalPresentationCard] = None
+            self._pending_final_review_status: Optional[str] = None
             self._welcome_screen: Optional["WelcomeScreen"] = None
             self._status_bar: Optional["StatusBar"] = None
             # Show welcome if no real question (detect placeholder strings)
@@ -3260,6 +3328,7 @@ if TEXTUAL_AVAILABLE:
             # Final presentation state - clear winner's presentation
             self._final_presentation_agent = None
             self._final_presentation_card = None
+            self._pending_final_review_status = None
 
             # Decomposition generation modal/runtime state
             self._runtime_decomposition_subtasks = {}
@@ -6200,6 +6269,7 @@ Type your question and press Enter to ask the agents.
                     tui_log("[TextualDisplay] Final card already exists, reusing it")
                     card = existing_cards[0]
                     self._final_presentation_card = card
+                    self.coordination_display._apply_pending_review_status(card)
                     if answer and not getattr(card, "_final_content", []):
                         card.append_chunk(answer)
                     card.complete()
@@ -6222,6 +6292,7 @@ Type your question and press Enter to ask the agents.
                 # (add_widget uses round-based insertion which can place card before later content)
                 timeline.mount(card)
                 self._final_presentation_card = card
+                self.coordination_display._apply_pending_review_status(card)
 
                 # Stop the round timer - final presentation is the end state
                 if self._status_ribbon:
@@ -6462,6 +6533,7 @@ Type your question and press Enter to ask the agents.
                     if existing_cards:
                         tui_log("[TextualDisplay] begin_final_stream: card already exists, reusing")
                         self._final_presentation_card = existing_cards[0]
+                        self.coordination_display._apply_pending_review_status(existing_cards[0])
                         timeline.scroll_to_widget("final_presentation_card")
                         return
 
@@ -6508,6 +6580,7 @@ Type your question and press Enter to ask the agents.
                     # Use mount() directly to ensure card is always at the END of timeline
                     timeline.mount(card)
                     self._final_presentation_card = card
+                    self.coordination_display._apply_pending_review_status(card)
 
                     # Scroll to show the card
                     timeline.scroll_to_widget("final_presentation_card")
@@ -6652,6 +6725,7 @@ Type your question and press Enter to ask the agents.
                     # Use mount() directly to ensure card is always at the END of timeline
                     timeline.mount(card)
                     self._final_presentation_card = card
+                    self.coordination_display._apply_pending_review_status(card)
 
                     # Auto-collapse task plan and update input after card is added
                     def after_card_add():
@@ -8889,7 +8963,7 @@ Type your question and press Enter to ask the agents.
             if stored_result is not None:
                 prior_action = "approved" if stored_result.approved else "rejected"
             else:
-                prior_action = "approved"  # Default if no result stored yet
+                prior_action = None  # No decision was made yet
 
             if stored is not None:
                 data = FinalAnswerModalData(
@@ -8915,6 +8989,20 @@ Type your question and press Enter to ask the agents.
             modal = FinalAnswerModal(data=data)
 
             def _on_modal_dismissed(_result=None):
+                # Update card review status if a new decision was made
+                if _result is not None and display is not None:
+                    # Prefer updating the card that launched the modal so the
+                    # indicator is guaranteed to reflect the same decision.
+                    try:
+                        status = "approved" if _result.approved else "rejected"
+                        card.set_review_status(status)
+                    except Exception:
+                        logger.exception(
+                            "[TextualDisplay] Failed to update clicked final card review status",
+                        )
+
+                    display._update_card_review_status(_result)
+                    display._last_final_answer_result = _result
                 # Scroll the final card into view after modal closes
                 try:
                     card.scroll_visible(animate=True, top=False)

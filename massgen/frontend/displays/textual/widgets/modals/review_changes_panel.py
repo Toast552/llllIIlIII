@@ -89,12 +89,14 @@ class ReviewChangesPanel(ReworkControlsMixin, Vertical):
         changes: List[Dict[str, Any]],
         show_footer: bool = True,
         show_rework: bool = True,
+        show_all_keyboard_hints: bool = True,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self.changes = changes
         self._show_footer = show_footer
         self._show_rework = show_rework
+        self._show_all_keyboard_hints = show_all_keyboard_hints
         self.file_approvals: Dict[str, bool] = {}
         self._file_key_to_context: Dict[str, str] = {}
         self._file_key_to_path: Dict[str, str] = {}
@@ -172,22 +174,14 @@ class ReviewChangesPanel(ReworkControlsMixin, Vertical):
             classes="modal-summary",
             markup=True,
         )
-        yield Static(
-            "[dim]"
-            "[bold]\u2191\u2193[/bold] navigate  "
-            "[bold]Space[/bold] toggle  "
-            "[bold]h[/bold] hunk  "
-            "[bold]\\[[/bold] [bold]\\][/bold] prev/next"
-            "  \u2502  "
-            "[bold]e[/bold] edit  "
-            "[bold]a[/bold] all  "
-            "[bold]r[/bold] reject  "
-            "[bold]Enter[/bold] apply  "
-            "[bold]Esc[/bold] cancel"
-            "[/]",
-            classes="modal-instructions",
-            markup=True,
-        )
+        hints = "[dim]" "[bold]\u2191\u2193[/bold] navigate  " "[bold]Space[/bold] toggle  " "[bold]h[/bold] hunk  " "[bold]\\[[/bold] [bold]\\][/bold] prev/next" "  \u2502  " "[bold]e[/bold] edit  "
+        if self._show_all_keyboard_hints:
+            hints += "[bold]a[/bold] all  " "[bold]r[/bold] reject  "
+        hints += "[bold]Enter[/bold] apply  "
+        if self._show_all_keyboard_hints:
+            hints += "[bold]Esc[/bold] cancel"
+        hints += "[/]"
+        yield Static(hints, classes="modal-instructions", markup=True)
 
         # Main two-panel content area
         with Horizontal(id="review_content", classes="review-content"):

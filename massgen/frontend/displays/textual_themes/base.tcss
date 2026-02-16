@@ -6930,6 +6930,21 @@ FinalPresentationCard .footer-link:hover {
     text-style: bold underline;
 }
 
+/* Review status indicator - shown after approve/reject decision */
+FinalPresentationCard .review-status-indicator {
+    width: auto;
+    height: 1;
+    padding: 0 1;
+}
+
+FinalPresentationCard .review-status-indicator.status-approved {
+    color: $primary;
+}
+
+FinalPresentationCard .review-status-indicator.status-rejected {
+    color: $error;
+}
+
 /* Verified indicator - faded, non-clickable, hidden by default */
 FinalPresentationCard .verified-indicator {
     display: none;
