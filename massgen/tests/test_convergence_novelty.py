@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Tests for convergence and novelty mechanisms.
+"""Tests for convergence and ambition/craft mechanisms.
 
 Tests cover:
 - Rationale preservation rules in changedoc subsequent round prompt
-- Updated T5 novelty definition distinguishing synthesis from genuine novelty
+- T4 ambition/craft definition (depth over breadth, synthesis with improvement counts)
 - Substantiveness test in checklist gated evaluation
 - Fresh approach enhancements (FEWER decisions restraint)
 - Substantiveness classification in changedoc analysis
@@ -62,31 +62,31 @@ class TestRationalePreservation:
 
 
 # ---------------------------------------------------------------------------
-# Updated T5 Novelty Definition
+# T4 Ambition/Craft Definition
 # ---------------------------------------------------------------------------
 
 
-class TestT5NoveltyDefinition:
-    """Tests for updated T5 checklist item distinguishing synthesis from novelty."""
+class TestT4AmbitionDefinition:
+    """Tests for T4 checklist item covering ambition/craft (replaces old T5 novelty)."""
 
-    def test_t5_mentions_synthesis_not_novel(self):
-        """T5 item must clarify that pure synthesis does not count as novel."""
-        t5_item = _CHECKLIST_ITEMS_CHANGEDOC[4]
-        assert "does not count" in t5_item.lower()
+    def test_t4_mentions_synthesis_with_improvement(self):
+        """T4 item must clarify that synthesis with improvement counts."""
+        t4_item = _CHECKLIST_ITEMS_CHANGEDOC[3]
+        assert "synthesis" in t4_item.lower()
 
-    def test_t5_distinguishes_synthesis_from_novelty(self):
-        """T5 item must address the synthesis != novelty distinction."""
-        t5_item = _CHECKLIST_ITEMS_CHANGEDOC[4]
-        assert "synthesis" in t5_item.lower()
+    def test_t4_covers_ambition_or_craft(self):
+        """T4 item must address creative ambition or meaningful craft."""
+        t4_item = _CHECKLIST_ITEMS_CHANGEDOC[3]
+        assert "ambition" in t4_item.lower() or "craft" in t4_item.lower()
 
-    def test_changedoc_checklist_still_has_5_items(self):
-        """Changedoc checklist must still have exactly 5 items."""
-        assert len(_CHECKLIST_ITEMS_CHANGEDOC) == 5
+    def test_changedoc_checklist_has_4_items(self):
+        """Changedoc checklist must have exactly 4 items."""
+        assert len(_CHECKLIST_ITEMS_CHANGEDOC) == 4
 
-    def test_t5_still_mentions_new_markers(self):
-        """T5 still references NEW markers as one indicator of novelty."""
-        t5_item = _CHECKLIST_ITEMS_CHANGEDOC[4]
-        assert "NEW" in t5_item
+    def test_t4_values_depth_not_just_novelty(self):
+        """T4 rewards depth (richer existing elements) not just novel additions."""
+        t4_item = _CHECKLIST_ITEMS_CHANGEDOC[3]
+        assert "richer" in t4_item.lower() or "elegant" in t4_item.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -119,7 +119,8 @@ class TestSubstantivenessTest:
         """Gated decision must instruct agents to provide a substantiveness object."""
         decision = _build_checklist_gated_decision(_CHECKLIST_ITEMS_CHANGEDOC)
         assert "substantiveness" in decision.lower()
-        assert "transformative_count" in decision
+        # Should use list-based format keys, not count-based
+        assert '"transformative"' in decision or "'transformative'" in decision
         assert "decision_space_exhausted" in decision
 
     def test_gated_decision_has_diverse_examples(self):

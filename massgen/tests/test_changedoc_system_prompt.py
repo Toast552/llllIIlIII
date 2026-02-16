@@ -224,8 +224,8 @@ class TestChangedocChecklist:
     """Tests for changedoc-anchored evaluation checklist items and analysis."""
 
     def test_changedoc_checklist_items_count(self):
-        """_CHECKLIST_ITEMS_CHANGEDOC has exactly 5 items."""
-        assert len(_CHECKLIST_ITEMS_CHANGEDOC) == 5
+        """_CHECKLIST_ITEMS_CHANGEDOC has exactly 4 items."""
+        assert len(_CHECKLIST_ITEMS_CHANGEDOC) == 4
 
     def test_changedoc_checklist_items_content(self):
         """Changedoc items mention changedoc, rationale, and traceability."""
@@ -586,12 +586,12 @@ class TestAntiGlazingAndSynthesis:
         prompt = _build_changedoc_subsequent_round_prompt()
         assert "synthesized from" in prompt
 
-    def test_open_gaps_not_novel(self):
-        """T5 checklist item clarifies that implementing open gaps is not novel."""
+    def test_t4_ambition_craft(self):
+        """T4 checklist item covers creative ambition or meaningful craft."""
         from massgen.system_prompt_sections import _CHECKLIST_ITEMS_CHANGEDOC
 
-        t5_text = _CHECKLIST_ITEMS_CHANGEDOC[4]  # 0-indexed, T5 is the 5th item
-        assert "open gap" in t5_text.lower() or "Open Gap" in t5_text
+        t4_text = _CHECKLIST_ITEMS_CHANGEDOC[3]  # 0-indexed, T4 is the 4th item
+        assert "ambition" in t4_text.lower() or "craft" in t4_text.lower()
 
     def test_subsequent_prompt_has_rationale_preservation_rule(self):
         """Subsequent-round prompt must contain Rationale Preservation Rule."""
@@ -658,11 +658,11 @@ class TestAntiGlazingAndSynthesis:
 class TestOutputIntegrityPrinciple:
     """Tests that system prompts emphasize working output over feature accumulation."""
 
-    def test_t4_mentions_functioning_or_working(self):
-        """T4 checklist item must require the deliverable actually functions, not just has features."""
-        t4_text = _CHECKLIST_ITEMS_CHANGEDOC[3]  # 0-indexed, T4 is the 4th item
-        lower = t4_text.lower()
-        assert "function" in lower or "works" in lower or "working" in lower or "internally consistent" in lower, f"T4 must require deliverable actually functions. Got: {t4_text}"
+    def test_t1_mentions_functioning_or_working(self):
+        """T1 checklist item must require the deliverable actually functions, not just has features."""
+        t1_text = _CHECKLIST_ITEMS_CHANGEDOC[0]  # 0-indexed, T1 is the 1st item
+        lower = t1_text.lower()
+        assert "function" in lower or "works" in lower or "working" in lower or "internally consistent" in lower, f"T1 must require deliverable actually functions. Got: {t1_text}"
 
     def test_decision_section_verify_before_extend(self):
         """Decision/improvement section must instruct verifying existing before adding new."""

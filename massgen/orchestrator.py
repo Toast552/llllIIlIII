@@ -645,7 +645,7 @@ class Orchestrator(ChatAgent):
                     None,
                 ),
                 # Pre-computed so stdio server doesn't need massgen imports
-                "required": _checklist_required_true(effective_t),
+                "required": _checklist_required_true(effective_t, num_items=len(items)),
                 "cutoff": _checklist_confidence_cutoff(effective_t),
             }
             backend._checklist_state = checklist_state
@@ -707,7 +707,7 @@ class Orchestrator(ChatAgent):
                     "type": "object",
                     "description": (
                         "Your confidence scores with reasoning for each checklist item. "
-                        "Keys are item IDs (T1-T5), values are objects with 'score' (0-100) "
+                        "Keys are item IDs (T1-T4), values are objects with 'score' (0-100) "
                         "and 'reasoning' (justification for that score)."
                     ),
                     "properties": {f"T{i+1}": score_entry_schema for i in range(len(checklist_items))},
@@ -723,22 +723,22 @@ class Orchestrator(ChatAgent):
                 },
                 "substantiveness": {
                     "type": "object",
-                    "description": ("Structured summary of planned change depth used to enforce " "substantive iteration and natural convergence."),
+                    "description": ("Structured summary of planned changes. List specific items " "for each category so the system can verify what you commit to."),
                     "properties": {
-                        "transformative_count": {
-                            "type": "integer",
-                            "minimum": 0,
-                            "description": "Number of transformative changes planned.",
+                        "transformative": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "List of transformative changes planned (fundamentally different approach/architecture).",
                         },
-                        "structural_count": {
-                            "type": "integer",
-                            "minimum": 0,
-                            "description": "Number of structural changes planned.",
+                        "structural": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "List of structural changes planned (meaningful redesign, new capability).",
                         },
-                        "incremental_count": {
-                            "type": "integer",
-                            "minimum": 0,
-                            "description": "Number of incremental-only changes planned.",
+                        "incremental": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "List of incremental-only changes planned (polish, formatting).",
                         },
                         "decision_space_exhausted": {
                             "type": "boolean",
@@ -746,13 +746,13 @@ class Orchestrator(ChatAgent):
                         },
                         "notes": {
                             "type": "string",
-                            "description": "Short justification for the counts.",
+                            "description": "Short justification for the classifications.",
                         },
                     },
                     "required": [
-                        "transformative_count",
-                        "structural_count",
-                        "incremental_count",
+                        "transformative",
+                        "structural",
+                        "incremental",
                         "decision_space_exhausted",
                     ],
                 },
@@ -928,7 +928,10 @@ class Orchestrator(ChatAgent):
             {
                 "remaining": _cl_remaining,
                 "has_existing_answers": _has_answers,
-                "required": _checklist_required_true(effective_t),
+                "required": _checklist_required_true(
+                    effective_t,
+                    num_items=len(getattr(agent.backend, "_checklist_items", [])) or 4,
+                ),
                 "cutoff": _checklist_confidence_cutoff(effective_t),
                 "require_gap_report": bool(
                     getattr(self.config, "checklist_require_gap_report", True),

@@ -124,28 +124,58 @@ A good first draft is rarely perfect. Look for what can be *better*, not just wh
 # ---------------------------------------------------------------------------
 
 _CHECKLIST_ITEMS = [
-    "The best answer comprehensively addresses all important aspects of the question.",
-    "Looking at the actual output or deliverable — not the code — it achieves a high level of quality, depth, and polish that goes well beyond adequacy.",
-    "I cannot identify specific, concrete improvements that would make the answer meaningfully better.",
-    "The best answer would genuinely impress the person who asked — they would not wish it were better.",
-    "Any remaining ideas for improvement are truly minor or cosmetic, not substantive.",
+    ("The output genuinely impresses — quality, depth, and polish go well" " beyond adequacy. Would make the person who asked say" ' "this is exceptional."'),
+    (
+        "The most impactful weaknesses were addressed — including this"
+        " answer's own known gaps, strengths from other answers that this one"
+        " lacks, and problems other answers identified but didn't solve."
+        " Critical problems (broken functionality, performance issues, missing"
+        " core requirements) were fixed before lower-value additions. Effort"
+        " went to the highest-value improvements, not just the easiest."
+    ),
+    ("The output would genuinely satisfy a demanding user — they would not" " wish it were better in any significant way."),
+    (
+        "At least one element shows creative ambition or meaningful craft that"
+        " goes beyond the safe, obvious approach. Thoughtful synthesis that"
+        " combines the best of multiple approaches and improves on them"
+        " counts."
+    ),
 ]
 
 _CHECKLIST_ITEMS_CHANGEDOC = [
-    "The changedoc captures every significant decision the task demands. No important " "choices were made implicitly in code but missing from the changedoc.",
-    "Each decision has strong, specific rationale tied to task requirements. No weak " '"Why" fields or strawman alternatives.',
-    "Every decision is traceable to specific artifacts — Implementation fields reference "
-    "actual code locations that must exist and be verified. Documenting features, text, "
-    "or code that does not actually exist in the output is a critical failure.",
-    "The actual deliverable functions correctly and is internally consistent. A working "
-    "output with fewer features is better than a broken output with more. Achieves "
-    "genuine quality, depth, and polish. Would impress the person who asked.",
-    "At least one genuinely novel or ambitious element (NEW markers or evident in output). "
-    "Goes beyond the safe, obvious approach. Pure synthesis — combining existing agents' "
-    "approaches without original thinking — does not count as novel. Synthesis is competent "
-    "refinement, not novelty. Implementing open gaps listed in a prior changedoc does not "
-    "count as novel — those are known issues, not original thinking. Novel means a NEW "
-    "decision, architectural challenge, or unexplored direction not present in ANY prior answer.",
+    (
+        "The deliverable works, impresses, and shows genuine depth. Output is"
+        " functional and internally consistent. Quality, polish, and content"
+        " depth go beyond adequacy — would genuinely impress the person who"
+        " asked. A working output with fewer features beats a broken one with"
+        " more."
+    ),
+    (
+        "The most impactful gaps were addressed — or justified as not worth"
+        " the cost. Gaps come from three sources: (1) open gaps identified in"
+        " this answer's own changedoc, (2) strengths from other agents'"
+        " answers that this one lacks, and (3) open gaps identified in other"
+        " agents' changedocs — problems they spotted but didn't solve."
+        " Critical gaps (broken functionality, severe performance problems,"
+        " accessibility failures) that persist unaddressed are a failure here,"
+        " regardless of what new features were added. If a gap was"
+        " deliberately skipped, the changedoc explains why."
+    ),
+    (
+        "Changedoc is honest, complete, and traceable. Every significant"
+        " decision is documented with genuine rationale. Implementation"
+        " references point to code that actually exists. No fabricated claims."
+        " Alternatives are real, not strawmen."
+    ),
+    (
+        "At least one element shows creative ambition or meaningful craft."
+        " Something goes beyond the safe, obvious approach. This can be a"
+        " novel feature, an existing element made significantly richer, an"
+        " elegant solution to a known hard problem, or a distinctive design"
+        " choice. Synthesis that combines the best of multiple approaches AND"
+        " improves on them counts. Mechanical copying does not — but"
+        " thoughtful synthesis with creative improvement does."
+    ),
 ]
 
 
@@ -180,13 +210,21 @@ def _checklist_effective_threshold(T: int, remaining: int, total: int) -> int:
     return max(0, min(10, et))
 
 
-def _checklist_required_true(effective_threshold: int, num_items: int = 5) -> int:
+def _checklist_required_true(effective_threshold: int, num_items: int = 4) -> int:
     """How many TRUE items needed to justify vote/stop.
 
-    Always requires all items to pass. The only lever is the confidence
-    cutoff, which gets easier as threshold increases.
+    Relaxes with higher thresholds so agents can pass via quality
+    instead of only stopping when hitting max_new_answers_per_agent.
+
+    - Floor: max(1, (num_items + 1) // 2) — e.g. 2 for 4 items
+    - Formula: max(floor, num_items - effective_threshold // 30)
+    - At threshold 0:  max(2, 4-0) = 4 (strict)
+    - At threshold 50: max(2, 4-1) = 3
+    - At threshold 70+: max(2, 4-2) = 2 (lenient)
     """
-    return num_items
+    floor = max(1, (num_items + 1) // 2)
+    relaxation = effective_threshold // 30
+    return max(floor, num_items - relaxation)
 
 
 def _checklist_confidence_cutoff(effective_threshold: int) -> int:
@@ -352,6 +390,8 @@ For each non-best answer:
 - Are there NEW-marked decisions that represent genuinely original thinking?
 - "Worse overall" does not mean "has nothing to offer." Look carefully at the
   decision journal, not just the output.
+- What valuable elements from other answers should be incorporated into the best
+  answer? Be specific about what to adopt and how it would improve the result.
 
 If no answer has meaningful unique content beyond the best, say so explicitly.
 
@@ -397,8 +437,11 @@ Focus exclusively on what is missing, weak, or falls short.
   earlier rounds still functioning after new features were added? Adding features that
   break existing functionality is regression, not improvement. A working output with fewer
   features is better than a broken output with more.
-- **Novelty deficit**: Is there at least one genuinely novel or ambitious element, or
-  does everything take the safe, obvious path?
+- **Ambition or craft deficit**: Is there at least one element showing creative ambition
+  or meaningful craft, or does everything take the safe, obvious path? Depth counts —
+  an existing element made significantly richer qualifies, not just novel additions.
+- **Gap prioritization**: Which gaps matter most to the end user? A critical functional
+  or performance problem outweighs adding new features. Rank your gaps by user impact.
 
 Do not confuse *correctness fixes* with *quality improvements*. An answer can be
 technically correct and still have a shallow decision journal.
@@ -698,13 +741,14 @@ and a **substantiveness** object.
 The **substantiveness** object is required so the system can:
 - Continue iteration only when there is meaningful (transformative/structural) work left
 - Naturally terminate when decision space is exhausted and remaining ideas are incremental-only
+- Verify your commitments by name — list each specific change, not just a count
 
 Use:
-- `transformative_count`: fundamentally different approach/architecture changes planned
-- `structural_count`: major capability/experience redesign changes planned
-- `incremental_count`: polish-level changes planned
-- `decision_space_exhausted`: `true` only if no meaningful structural/transformative improvements remain
-- `notes`: short justification
+- `"transformative"`: list of fundamentally different approach/architecture changes planned
+- `"structural"`: list of major capability/experience redesign changes planned
+- `"incremental"`: list of polish-level changes planned
+- `"decision_space_exhausted"`: `true` only if no meaningful structural/transformative improvements remain
+- `"notes"`: short justification
 
 Set `decision_space_exhausted` to `true` ONLY if you have genuinely considered
 at least 3 fundamentally different approaches to the core problem and none would
@@ -726,17 +770,16 @@ tells you to iterate, you are expected to implement what you identified.
       "T1": {{"score": <0-100>, "reasoning": "<why — cite specific evidence>"}},
       "T2": {{"score": <0-100>, "reasoning": "<why>"}},
       "T3": {{"score": <0-100>, "reasoning": "<why>"}},
-      "T4": {{"score": <0-100>, "reasoning": "<why>"}},
-      "T5": {{"score": <0-100>, "reasoning": "<why>"}}
+      "T4": {{"score": <0-100>, "reasoning": "<why>"}}
     }},
     report_path="<path to your markdown gap report>",
     improvements="<specific gaps from your Ideal Version / Gap Analysis that would make the answer substantially better>",
     substantiveness={{
-      "transformative_count": <int>,
-      "structural_count": <int>,
-      "incremental_count": <int>,
+      "transformative": ["<specific change description>", ...],
+      "structural": ["<specific change description>", ...],
+      "incremental": ["<specific change description>", ...],
       "decision_space_exhausted": <true|false>,
-      "notes": "<why these counts are accurate>"
+      "notes": "<why these classifications are accurate>"
     }}
   )
 

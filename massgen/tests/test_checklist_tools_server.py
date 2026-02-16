@@ -18,6 +18,7 @@ import pytest
 
 from massgen.mcp_tools.checklist_tools_server import (
     _extract_score,
+    _normalize_substantiveness,
     _read_specs,
     build_server_config,
     evaluate_checklist_submission,
@@ -309,7 +310,7 @@ class TestWriteChecklistSpecs:
 
 
 class TestGapReportGateRemoval:
-    """Tests for gap report gate removal — verdict determined solely by T1-T5 scores."""
+    """Tests for gap report gate removal — verdict determined solely by T-item scores."""
 
     def test_verdict_not_overridden_by_poor_report(self, tmp_path):
         """Checklist passes -> vote verdict, regardless of report quality."""
@@ -400,12 +401,12 @@ class TestSubstantivenessGating:
     @pytest.mark.asyncio
     async def test_substantiveness_required_forces_iterate_when_missing(self, tmp_path):
         """When substantiveness is required, missing payload should force iterate."""
-        items = ["Check 1", "Check 2", "Check 3", "Check 4", "Check 5"]
+        items = ["Check 1", "Check 2", "Check 3", "Check 4"]
         state = {
             "terminate_action": "vote",
             "iterate_action": "new_answer",
             "has_existing_answers": True,
-            "required": 5,
+            "required": 4,
             "cutoff": 70,
             "require_gap_report": False,
             "require_substantiveness": True,
@@ -419,7 +420,6 @@ class TestSubstantivenessGating:
                     "T2": {"score": 95, "reasoning": "strong"},
                     "T3": {"score": 95, "reasoning": "strong"},
                     "T4": {"score": 95, "reasoning": "strong"},
-                    "T5": {"score": 95, "reasoning": "strong"},
                 },
                 improvements="No critical gaps",
             ),
@@ -430,13 +430,13 @@ class TestSubstantivenessGating:
 
     @pytest.mark.asyncio
     async def test_convergence_offramp_terminates_incremental_only_tail_failures(self, tmp_path):
-        """Allow natural termination when only T3/T5 fail and no substantive plan remains."""
-        items = ["Check 1", "Check 2", "Check 3", "Check 4", "Check 5"]
+        """Allow natural termination when only T4 fails and no substantive plan remains."""
+        items = ["Check 1", "Check 2", "Check 3", "Check 4"]
         state = {
             "terminate_action": "vote",
             "iterate_action": "new_answer",
             "has_existing_answers": True,
-            "required": 5,
+            "required": 4,
             "cutoff": 70,
             "require_gap_report": False,
             "require_substantiveness": True,
@@ -448,15 +448,14 @@ class TestSubstantivenessGating:
                 scores={
                     "T1": {"score": 90, "reasoning": "core quality strong"},
                     "T2": {"score": 88, "reasoning": "core quality strong"},
-                    "T3": {"score": 55, "reasoning": "remaining gaps exist"},
-                    "T4": {"score": 92, "reasoning": "deliverable strong"},
-                    "T5": {"score": 58, "reasoning": "novelty limited"},
+                    "T3": {"score": 85, "reasoning": "core quality strong"},
+                    "T4": {"score": 58, "reasoning": "ambition limited"},
                 },
                 improvements="Only polish-level tweaks remain",
                 substantiveness={
-                    "transformative_count": 0,
-                    "structural_count": 0,
-                    "incremental_count": 2,
+                    "transformative": [],
+                    "structural": [],
+                    "incremental": ["fix spacing", "adjust colors"],
                     "decision_space_exhausted": True,
                     "notes": "No meaningful structural moves left",
                 },
@@ -469,12 +468,12 @@ class TestSubstantivenessGating:
     @pytest.mark.asyncio
     async def test_convergence_offramp_does_not_trigger_with_structural_plan(self, tmp_path):
         """Do not terminate early when a structural plan still exists."""
-        items = ["Check 1", "Check 2", "Check 3", "Check 4", "Check 5"]
+        items = ["Check 1", "Check 2", "Check 3", "Check 4"]
         state = {
             "terminate_action": "vote",
             "iterate_action": "new_answer",
             "has_existing_answers": True,
-            "required": 5,
+            "required": 4,
             "cutoff": 70,
             "require_gap_report": False,
             "require_substantiveness": True,
@@ -486,15 +485,14 @@ class TestSubstantivenessGating:
                 scores={
                     "T1": {"score": 90, "reasoning": "core quality strong"},
                     "T2": {"score": 88, "reasoning": "core quality strong"},
-                    "T3": {"score": 55, "reasoning": "remaining gaps exist"},
-                    "T4": {"score": 92, "reasoning": "deliverable strong"},
-                    "T5": {"score": 58, "reasoning": "novelty limited"},
+                    "T3": {"score": 85, "reasoning": "core quality strong"},
+                    "T4": {"score": 58, "reasoning": "ambition limited"},
                 },
                 improvements="Need one major architecture revision",
                 substantiveness={
-                    "transformative_count": 0,
-                    "structural_count": 1,
-                    "incremental_count": 0,
+                    "transformative": [],
+                    "structural": ["redesign navigation architecture"],
+                    "incremental": [],
                     "decision_space_exhausted": False,
                     "notes": "A structural redesign remains feasible",
                 },
@@ -506,12 +504,12 @@ class TestSubstantivenessGating:
     @pytest.mark.asyncio
     async def test_changedoc_offramp_does_not_treat_t3_as_tail_failure(self, tmp_path):
         """In changedoc mode, failing T3 (traceability) should block off-ramp termination."""
-        items = ["Check 1", "Check 2", "Check 3", "Check 4", "Check 5"]
+        items = ["Check 1", "Check 2", "Check 3", "Check 4"]
         state = {
             "terminate_action": "vote",
             "iterate_action": "new_answer",
             "has_existing_answers": True,
-            "required": 5,
+            "required": 4,
             "cutoff": 70,
             "require_gap_report": False,
             "require_substantiveness": True,
@@ -522,17 +520,16 @@ class TestSubstantivenessGating:
         result = json.loads(
             await handler(
                 scores={
-                    "T1": {"score": 90, "reasoning": "decision coverage strong"},
-                    "T2": {"score": 88, "reasoning": "rationale strong"},
+                    "T1": {"score": 90, "reasoning": "deliverable strong"},
+                    "T2": {"score": 88, "reasoning": "gaps addressed"},
                     "T3": {"score": 55, "reasoning": "traceability gaps remain"},
-                    "T4": {"score": 92, "reasoning": "deliverable strong"},
-                    "T5": {"score": 58, "reasoning": "novelty limited"},
+                    "T4": {"score": 58, "reasoning": "ambition limited"},
                 },
                 improvements="Need to fix traceability mappings",
                 substantiveness={
-                    "transformative_count": 0,
-                    "structural_count": 0,
-                    "incremental_count": 1,
+                    "transformative": [],
+                    "structural": [],
+                    "incremental": ["fix traceability"],
                     "decision_space_exhausted": True,
                     "notes": "No architectural changes left",
                 },
@@ -542,14 +539,14 @@ class TestSubstantivenessGating:
         assert result["convergence_offramp_triggered"] is False
 
     @pytest.mark.asyncio
-    async def test_changedoc_offramp_can_trigger_when_only_t5_fails(self, tmp_path):
-        """In changedoc mode, off-ramp may trigger only when T1-T4 pass and only T5 fails."""
-        items = ["Check 1", "Check 2", "Check 3", "Check 4", "Check 5"]
+    async def test_changedoc_offramp_can_trigger_when_only_t4_fails(self, tmp_path):
+        """In changedoc mode, off-ramp may trigger when T1-T3 pass and only T4 fails."""
+        items = ["Check 1", "Check 2", "Check 3", "Check 4"]
         state = {
             "terminate_action": "vote",
             "iterate_action": "new_answer",
             "has_existing_answers": True,
-            "required": 5,
+            "required": 4,
             "cutoff": 70,
             "require_gap_report": False,
             "require_substantiveness": True,
@@ -560,17 +557,16 @@ class TestSubstantivenessGating:
         result = json.loads(
             await handler(
                 scores={
-                    "T1": {"score": 90, "reasoning": "decision coverage strong"},
-                    "T2": {"score": 88, "reasoning": "rationale strong"},
+                    "T1": {"score": 90, "reasoning": "deliverable strong"},
+                    "T2": {"score": 88, "reasoning": "gaps addressed"},
                     "T3": {"score": 89, "reasoning": "traceability is complete"},
-                    "T4": {"score": 92, "reasoning": "deliverable strong"},
-                    "T5": {"score": 58, "reasoning": "novelty limited"},
+                    "T4": {"score": 58, "reasoning": "ambition limited"},
                 },
-                improvements="No substantive novelty paths remain",
+                improvements="No substantive ambition paths remain",
                 substantiveness={
-                    "transformative_count": 0,
-                    "structural_count": 0,
-                    "incremental_count": 1,
+                    "transformative": [],
+                    "structural": [],
+                    "incremental": ["minor polish"],
                     "decision_space_exhausted": True,
                     "notes": "Only polish options remain",
                 },
@@ -580,14 +576,14 @@ class TestSubstantivenessGating:
         assert result["convergence_offramp_triggered"] is True
 
     @pytest.mark.asyncio
-    async def test_t5_novelty_guidance_when_exhausted(self, tmp_path):
-        """When T5 fails and decision space is exhausted, give specific novelty guidance."""
-        items = ["Check 1", "Check 2", "Check 3", "Check 4", "Check 5"]
+    async def test_t4_ambition_guidance_when_exhausted(self, tmp_path):
+        """When T4 fails and decision space is exhausted, give specific ambition guidance."""
+        items = ["Check 1", "Check 2", "Check 3", "Check 4"]
         state = {
             "terminate_action": "vote",
             "iterate_action": "new_answer",
             "has_existing_answers": True,
-            "required": 5,
+            "required": 4,
             "cutoff": 90,
             "require_gap_report": False,
             "require_substantiveness": True,
@@ -600,34 +596,32 @@ class TestSubstantivenessGating:
                     "T1": {"score": 78, "reasoning": "decent coverage"},
                     "T2": {"score": 76, "reasoning": "decent rationale"},
                     "T3": {"score": 85, "reasoning": "good traceability"},
-                    "T4": {"score": 88, "reasoning": "polished output"},
-                    "T5": {"score": 38, "reasoning": "no genuine novelty"},
+                    "T4": {"score": 38, "reasoning": "no genuine ambition"},
                 },
                 improvements="Add attribution and fallback UX",
                 substantiveness={
-                    "transformative_count": 0,
-                    "structural_count": 0,
-                    "incremental_count": 3,
+                    "transformative": [],
+                    "structural": [],
+                    "incremental": ["add attribution", "fallback UX", "polish"],
                     "decision_space_exhausted": True,
                     "notes": "Only incremental polish remains",
                 },
             ),
         )
         assert result["verdict"] == "new_answer"
-        # Should contain T5-specific novelty guidance, not just "T5 needs improvement"
-        assert "T5 (novelty) failed" in result["explanation"]
-        assert "genuinely NEW element" in result["explanation"]
-        assert "creative direction" in result["explanation"]
+        # Should contain T4-specific ambition guidance
+        assert "T4 (ambition/craft) failed" in result["explanation"]
+        assert "ambition deficit" in result["explanation"]
 
     @pytest.mark.asyncio
-    async def test_t5_novelty_guidance_when_substantive_plan_exists(self, tmp_path):
-        """When T5 fails but structural work remains, give different novelty guidance."""
-        items = ["Check 1", "Check 2", "Check 3", "Check 4", "Check 5"]
+    async def test_t4_ambition_guidance_when_substantive_plan_exists(self, tmp_path):
+        """When T4 fails but structural work remains, give different ambition guidance."""
+        items = ["Check 1", "Check 2", "Check 3", "Check 4"]
         state = {
             "terminate_action": "vote",
             "iterate_action": "new_answer",
             "has_existing_answers": True,
-            "required": 5,
+            "required": 4,
             "cutoff": 90,
             "require_gap_report": False,
             "require_substantiveness": True,
@@ -640,23 +634,22 @@ class TestSubstantivenessGating:
                     "T1": {"score": 78, "reasoning": "decent coverage"},
                     "T2": {"score": 76, "reasoning": "decent rationale"},
                     "T3": {"score": 85, "reasoning": "good traceability"},
-                    "T4": {"score": 88, "reasoning": "polished output"},
-                    "T5": {"score": 38, "reasoning": "no genuine novelty"},
+                    "T4": {"score": 38, "reasoning": "no genuine ambition"},
                 },
                 improvements="Add interactive timeline and fallback UX",
                 substantiveness={
-                    "transformative_count": 0,
-                    "structural_count": 1,
-                    "incremental_count": 2,
+                    "transformative": [],
+                    "structural": ["add interactive timeline"],
+                    "incremental": ["fallback UX", "polish"],
                     "decision_space_exhausted": False,
                     "notes": "Interactive timeline would be structural",
                 },
             ),
         )
         assert result["verdict"] == "new_answer"
-        # Should still get novelty guidance but the non-exhausted variant
-        assert "T5 (novelty) failed" in result["explanation"]
-        assert "not synthesis" in result["explanation"]
+        # Should still get ambition guidance but the non-exhausted variant
+        assert "T4 (ambition/craft) failed" in result["explanation"]
+        assert "creative ambition" in result["explanation"]
 
 
 class TestIterateVerdictBreadth:
@@ -664,7 +657,7 @@ class TestIterateVerdictBreadth:
 
     def test_iterate_verdict_says_implement_all(self, tmp_path):
         """When iterating, verdict must tell agent to implement ALL improvements, not just one."""
-        items = ["Coverage", "Quality", "Polish", "Depth", "Novelty"]
+        items = ["Coverage", "Quality", "Polish", "Depth"]
         state = {
             "terminate_action": "vote",
             "iterate_action": "new_answer",
@@ -679,16 +672,15 @@ class TestIterateVerdictBreadth:
                 "T2": {"score": 55, "reasoning": "weak quality"},
                 "T3": {"score": 70, "reasoning": "decent polish"},
                 "T4": {"score": 50, "reasoning": "shallow"},
-                "T5": {"score": 40, "reasoning": "no novelty"},
             },
             improvements="Add interactive timeline, redesign navigation, add real data sources",
             report_path="",
             items=items,
             state=state,
             substantiveness={
-                "transformative_count": 0,
-                "structural_count": 3,
-                "incremental_count": 1,
+                "transformative": [],
+                "structural": ["interactive timeline", "redesign navigation", "real data sources"],
+                "incremental": ["minor polish"],
                 "decision_space_exhausted": False,
                 "notes": "Three structural improvements identified",
             },
@@ -698,6 +690,210 @@ class TestIterateVerdictBreadth:
         normalized = " ".join(explanation_lower.split())
         # Must tell agent to implement all improvements, not just pick one
         assert "implement all" in normalized or "address all" in normalized or "all identified" in normalized
+
+
+# ---------------------------------------------------------------------------
+# Substantiveness list format and backward compatibility
+# ---------------------------------------------------------------------------
+
+
+class TestSubstantivenessListFormat:
+    """Tests for structured list-based substantiveness format."""
+
+    def test_list_format_derives_counts_from_lengths(self):
+        """List format should derive counts from len() of each list."""
+        state = {"require_substantiveness": True}
+        result = _normalize_substantiveness(
+            {
+                "transformative": ["rewrite nav as SPA router"],
+                "structural": ["add timeline", "add search"],
+                "incremental": ["fix typos", "adjust colors", "add alt text"],
+                "decision_space_exhausted": False,
+                "notes": "test",
+            },
+            state,
+        )
+        assert result["transformative_count"] == 1
+        assert result["structural_count"] == 2
+        assert result["incremental_count"] == 3
+        assert result["has_substantive_plan"] is True
+        assert result["incremental_only"] is False
+
+    def test_list_format_stores_items(self):
+        """List format should store the actual item lists in result."""
+        state = {"require_substantiveness": True}
+        result = _normalize_substantiveness(
+            {
+                "transformative": ["rewrite as SPA"],
+                "structural": ["add caching layer"],
+                "incremental": ["fix typos"],
+                "decision_space_exhausted": False,
+            },
+            state,
+        )
+        assert result["transformative_items"] == ["rewrite as SPA"]
+        assert result["structural_items"] == ["add caching layer"]
+        assert result["incremental_items"] == ["fix typos"]
+
+    def test_legacy_count_format_still_works(self):
+        """Old count-based format should still be accepted for backward compat."""
+        state = {"require_substantiveness": True}
+        result = _normalize_substantiveness(
+            {
+                "transformative_count": 1,
+                "structural_count": 2,
+                "incremental_count": 3,
+                "decision_space_exhausted": False,
+                "notes": "legacy",
+            },
+            state,
+        )
+        assert result["transformative_count"] == 1
+        assert result["structural_count"] == 2
+        assert result["incremental_count"] == 3
+        assert result["has_substantive_plan"] is True
+        # Legacy format should have empty item lists
+        assert result["transformative_items"] == []
+        assert result["structural_items"] == []
+        assert result["incremental_items"] == []
+
+    def test_empty_lists_mean_zero_counts(self):
+        """Empty lists should produce zero counts."""
+        state = {"require_substantiveness": True}
+        result = _normalize_substantiveness(
+            {
+                "transformative": [],
+                "structural": [],
+                "incremental": [],
+                "decision_space_exhausted": True,
+            },
+            state,
+        )
+        assert result["transformative_count"] == 0
+        assert result["structural_count"] == 0
+        assert result["incremental_count"] == 0
+        assert result["has_substantive_plan"] is False
+
+
+class TestVerdictEchoWithItems:
+    """Tests for echoing specific item names in iterate verdict."""
+
+    def test_iterate_verdict_echoes_structural_items(self):
+        """When iterating with structural items, echo them by name."""
+        items = ["Check 1", "Check 2", "Check 3", "Check 4"]
+        state = {
+            "terminate_action": "vote",
+            "iterate_action": "new_answer",
+            "has_existing_answers": True,
+            "required": 4,
+            "cutoff": 70,
+            "require_substantiveness": True,
+        }
+        result = evaluate_checklist_submission(
+            scores={
+                "T1": {"score": 60, "reasoning": "gaps"},
+                "T2": {"score": 55, "reasoning": "weak"},
+                "T3": {"score": 70, "reasoning": "ok"},
+                "T4": {"score": 50, "reasoning": "shallow"},
+            },
+            improvements="Various improvements needed",
+            report_path="",
+            items=items,
+            state=state,
+            substantiveness={
+                "transformative": [],
+                "structural": ["add interactive timeline", "redesign navigation"],
+                "incremental": ["fix typos"],
+                "decision_space_exhausted": False,
+                "notes": "Two structural changes",
+            },
+        )
+        assert result["verdict"] == "new_answer"
+        # Must echo specific structural items by name
+        assert "add interactive timeline" in result["explanation"]
+        assert "redesign navigation" in result["explanation"]
+
+    def test_iterate_verdict_echoes_transformative_items(self):
+        """When iterating with transformative items, echo them by name."""
+        items = ["Check 1", "Check 2", "Check 3", "Check 4"]
+        state = {
+            "terminate_action": "vote",
+            "iterate_action": "new_answer",
+            "has_existing_answers": True,
+            "required": 4,
+            "cutoff": 70,
+            "require_substantiveness": True,
+        }
+        result = evaluate_checklist_submission(
+            scores={
+                "T1": {"score": 60, "reasoning": "gaps"},
+                "T2": {"score": 55, "reasoning": "weak"},
+                "T3": {"score": 70, "reasoning": "ok"},
+                "T4": {"score": 50, "reasoning": "shallow"},
+            },
+            improvements="Major rework needed",
+            report_path="",
+            items=items,
+            state=state,
+            substantiveness={
+                "transformative": ["rewrite as event-driven architecture"],
+                "structural": [],
+                "incremental": [],
+                "decision_space_exhausted": False,
+                "notes": "One transformative change",
+            },
+        )
+        assert result["verdict"] == "new_answer"
+        assert "rewrite as event-driven architecture" in result["explanation"]
+
+
+class TestChecklistRequiredTrue:
+    """Tests for _checklist_required_true threshold relaxation."""
+
+    def test_threshold_0_requires_all_4_items(self):
+        """At threshold 0, all 4 items should be required (default)."""
+        from massgen.system_prompt_sections import _checklist_required_true
+
+        assert _checklist_required_true(0) == 4
+        assert _checklist_required_true(0, num_items=4) == 4
+
+    def test_threshold_50_relaxes_to_3(self):
+        """At threshold 50, requirement should relax to 3 for 4 items."""
+        from massgen.system_prompt_sections import _checklist_required_true
+
+        assert _checklist_required_true(50, num_items=4) == 3
+
+    def test_threshold_70_relaxes_to_2(self):
+        """At threshold 70+, requirement should relax to floor (2 for 4 items)."""
+        from massgen.system_prompt_sections import _checklist_required_true
+
+        assert _checklist_required_true(70, num_items=4) == 2
+
+    def test_threshold_100_respects_floor(self):
+        """Even at max threshold, never go below floor."""
+        from massgen.system_prompt_sections import _checklist_required_true
+
+        result = _checklist_required_true(100, num_items=4)
+        assert result >= 2  # floor = max(1, (4+1)//2) = 2
+
+    def test_threshold_0_requires_all_5_items(self):
+        """At threshold 0 with 5 items, all items should be required."""
+        from massgen.system_prompt_sections import _checklist_required_true
+
+        assert _checklist_required_true(0, num_items=5) == 5
+
+    def test_threshold_50_relaxes_to_4_for_5_items(self):
+        """At threshold 50, requirement should relax to 4 for 5 items."""
+        from massgen.system_prompt_sections import _checklist_required_true
+
+        assert _checklist_required_true(50, num_items=5) == 4
+
+    def test_floor_for_3_items(self):
+        """Floor for 3 items should be 2."""
+        from massgen.system_prompt_sections import _checklist_required_true
+
+        assert _checklist_required_true(0, num_items=3) == 3  # strict at 0
+        assert _checklist_required_true(70, num_items=3) >= 2  # floor = max(1, (3+1)//2) = 2
 
 
 class TestBuildServerConfig:

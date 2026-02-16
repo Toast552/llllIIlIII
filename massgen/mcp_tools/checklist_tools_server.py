@@ -82,7 +82,18 @@ def _normalize_substantiveness(
 ) -> Dict[str, Any]:
     """Normalize structured substantiveness payload for checklist gating.
 
-    Expected payload shape:
+    Accepts two payload formats:
+
+    **List format** (preferred — prevents satisficing by naming specific items):
+    {
+      "transformative": ["rewrite nav as SPA router"],
+      "structural": ["add timeline", "add search"],
+      "incremental": ["fix typos", "adjust colors"],
+      "decision_space_exhausted": bool,
+      "notes": str (optional)
+    }
+
+    **Legacy count format** (backward compatible):
     {
       "transformative_count": int >= 0,
       "structural_count": int >= 0,
@@ -90,6 +101,9 @@ def _normalize_substantiveness(
       "decision_space_exhausted": bool,
       "notes": str (optional)
     }
+
+    List format is detected by the presence of a "transformative" key with a list value.
+    Counts are derived via len() for list format.
     """
     require_substantiveness = bool(state.get("require_substantiveness", False))
     result: Dict[str, Any] = {
@@ -100,6 +114,9 @@ def _normalize_substantiveness(
         "transformative_count": 0,
         "structural_count": 0,
         "incremental_count": 0,
+        "transformative_items": [],
+        "structural_items": [],
+        "incremental_items": [],
         "decision_space_exhausted": False,
         "notes": "",
         "has_substantive_plan": False,
@@ -125,15 +142,29 @@ def _normalize_substantiveness(
         result["issues"].append("`substantiveness` must be an object.")
         return result
 
-    result["transformative_count"] = _as_non_negative_int(
-        substantiveness.get("transformative_count", 0),
-    )
-    result["structural_count"] = _as_non_negative_int(
-        substantiveness.get("structural_count", 0),
-    )
-    result["incremental_count"] = _as_non_negative_int(
-        substantiveness.get("incremental_count", 0),
-    )
+    # Detect format: list-based if "transformative" key holds a list
+    uses_list_format = isinstance(substantiveness.get("transformative"), list)
+
+    if uses_list_format:
+        # List format: extract items, derive counts
+        result["transformative_items"] = [str(x) for x in (substantiveness.get("transformative") or [])]
+        result["structural_items"] = [str(x) for x in (substantiveness.get("structural") or [])]
+        result["incremental_items"] = [str(x) for x in (substantiveness.get("incremental") or [])]
+        result["transformative_count"] = len(result["transformative_items"])
+        result["structural_count"] = len(result["structural_items"])
+        result["incremental_count"] = len(result["incremental_items"])
+    else:
+        # Legacy count format: keep counts, empty item lists
+        result["transformative_count"] = _as_non_negative_int(
+            substantiveness.get("transformative_count", 0),
+        )
+        result["structural_count"] = _as_non_negative_int(
+            substantiveness.get("structural_count", 0),
+        )
+        result["incremental_count"] = _as_non_negative_int(
+            substantiveness.get("incremental_count", 0),
+        )
+
     result["decision_space_exhausted"] = bool(
         substantiveness.get("decision_space_exhausted", False),
     )
@@ -144,7 +175,7 @@ def _normalize_substantiveness(
     if require_substantiveness and not result["decision_space_exhausted"] and (result["transformative_count"] + result["structural_count"] + result["incremental_count"]) == 0:
         result["valid"] = False
         result["issues"].append(
-            "Substantiveness is required: provide change counts or mark decision space as exhausted.",
+            "Substantiveness is required: provide change lists or mark decision space as exhausted.",
         )
 
     return result
@@ -257,7 +288,7 @@ def evaluate_checklist_submission(
         verdict = iterate_action
         explanation = f"First answer — no existing answers to evaluate. Verdict: {verdict}."
     else:
-        # Verdict determined solely by T1-T5 scores — no report gate
+        # Verdict determined solely by T-item scores — no report gate
         verdict = terminate_action if true_count >= required else iterate_action
 
         # Substantiveness gate: require payload when configured
@@ -279,11 +310,11 @@ def evaluate_checklist_submission(
 
         changedoc_mode = bool(state.get("changedoc_mode", False))
         if changedoc_mode:
-            core_item_candidates = ("T1", "T2", "T3", "T4")
-            tail_failure_ids = {"T5"}
+            core_item_candidates = ("T1", "T2", "T3")
+            tail_failure_ids = {"T4"}
         else:
-            core_item_candidates = ("T1", "T2", "T4")
-            tail_failure_ids = {"T3", "T5"}
+            core_item_candidates = ("T1", "T2", "T3")
+            tail_failure_ids = {"T4"}
 
         core_quality_ids = [item_id for item_id in core_item_candidates if item_id in passed_map]
         core_quality_strong = all(passed_map[item_id] for item_id in core_quality_ids)
@@ -305,7 +336,7 @@ def evaluate_checklist_submission(
                 explanation += f"Items that need improvement: {', '.join(failed_ids)}. "
             if substantiveness_gate_triggered:
                 explanation += (
-                    "Substantiveness details are required before iterating: provide counts for "
+                    "Substantiveness details are required before iterating: provide lists of "
                     "transformative/structural/incremental changes, or mark "
                     "`decision_space_exhausted=true` when no meaningful improvements remain. "
                 )
@@ -318,26 +349,39 @@ def evaluate_checklist_submission(
                 explanation += (
                     "You have not identified any structural or transformative work yet. " "Do not spend another round on cosmetic changes — either define a " "substantive plan or terminate. "
                 )
-            # T5-specific novelty guidance: when novelty fails, give the agent
-            # concrete direction instead of just listing T5 as a failed item.
-            t5_failed = "T5" in failed_set
-            if t5_failed and substantiveness_eval.get("valid", False):
+
+            # Echo specific structural/transformative items when available
+            structural_items = substantiveness_eval.get("structural_items", [])
+            transformative_items = substantiveness_eval.get("transformative_items", [])
+            if structural_items or transformative_items:
+                if transformative_items:
+                    items_str = ", ".join(transformative_items)
+                    explanation += f"Your own analysis identified these transformative changes: {items_str}. " f"Implement ALL of them. "
+                if structural_items:
+                    items_str = ", ".join(structural_items)
+                    explanation += f"Your own analysis identified these structural changes: {items_str}. " f"Implement ALL of them. "
+
+            # T4-specific ambition/craft guidance: when ambition fails, give the agent
+            # concrete direction instead of just listing T4 as a failed item.
+            t4_failed = "T4" in failed_set
+            if t4_failed and substantiveness_eval.get("valid", False):
                 if substantiveness_eval.get("decision_space_exhausted", False) or substantiveness_eval.get("incremental_only", False):
                     explanation += (
-                        "T5 (novelty) failed and you reported no structural/transformative "
-                        "work remaining. Incremental polish will not fix a novelty deficit. "
-                        "To pass T5 you must introduce a genuinely NEW element — a different "
-                        "creative direction, an unexplored interaction model, a decision that "
-                        "no prior answer has attempted, or a fundamentally different way to "
-                        "solve part of the problem. If no such move exists, mark "
-                        "`decision_space_exhausted=true` and let the system converge. "
+                        "T4 (ambition/craft) failed and you reported no structural/transformative "
+                        "work remaining. Incremental polish will not fix an ambition deficit. "
+                        "To pass T4 you must go beyond the safe, obvious approach — make an "
+                        "existing element significantly richer, find an elegant solution to a "
+                        "known hard problem, or introduce a distinctive design choice. Depth "
+                        "counts: improving what exists can satisfy this. If no such move exists, "
+                        "mark `decision_space_exhausted=true` and let the system converge. "
                     )
                 else:
                     explanation += (
-                        "T5 (novelty) failed. Your next answer needs at least one genuinely "
-                        "novel element — not synthesis of existing approaches, but a NEW "
-                        "decision, architectural choice, or creative direction not present "
-                        "in any prior answer. "
+                        "T4 (ambition/craft) failed. Your next answer needs at least one "
+                        "element showing creative ambition or meaningful craft — not just "
+                        "mechanical execution. This can be a novel feature, an existing "
+                        "element made significantly richer, or thoughtful synthesis that "
+                        "combines the best of multiple approaches and improves on them. "
                     )
             explanation += "Your new answer MUST make material changes — do NOT simply copy or " "resubmit the same content."
             if improvements_text:
