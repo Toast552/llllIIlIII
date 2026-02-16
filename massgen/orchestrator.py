@@ -660,12 +660,15 @@ class Orchestrator(ChatAgent):
                     items,
                 )
             else:
-                # Stdio path: backend writes specs file at execution time.
-                # Just storing _checklist_state and _checklist_items is enough;
-                # the backend's config-writing step picks them up.
-                logger.info(
-                    f"[Orchestrator] Checklist tool for agent {agent_id}: " f"stdio mode (specs written at execution time)",
-                )
+                # Stdio path for backends with standard MCP infrastructure.
+                # Write specs and register stdio MCP so the agent gets submit_checklist.
+                if hasattr(backend, "mcp_servers"):
+                    self._init_checklist_tool_stdio(agent_id, backend, checklist_state, items)
+                else:
+                    # Codex-like backends handle their own config writing.
+                    logger.info(
+                        f"[Orchestrator] Checklist tool for agent {agent_id}: " f"stdio mode (specs written at execution time)",
+                    )
 
     def _init_checklist_tool_sdk(
         self,
@@ -844,6 +847,32 @@ class Orchestrator(ChatAgent):
             f"[Orchestrator] Registered submit_checklist SDK MCP tool for agent {agent_id}",
         )
 
+    def _init_checklist_tool_stdio(self, agent_id, backend, checklist_state, items):
+        """Write checklist specs and add stdio MCP for standard MCP backends."""
+        import tempfile
+
+        from .mcp_tools.checklist_tools_server import (
+            build_server_config as build_checklist_config,
+        )
+        from .mcp_tools.checklist_tools_server import write_checklist_specs
+
+        # Write specs to a temp directory (persists for session lifetime)
+        specs_dir = Path(tempfile.mkdtemp(prefix=f"massgen_checklist_{agent_id}_"))
+        specs_path = specs_dir / "checklist_specs.json"
+        write_checklist_specs(items=items, state=checklist_state, output_path=specs_path)
+
+        # Store path so we can re-write on state refresh
+        backend._checklist_specs_path = specs_path
+
+        # Add stdio MCP server config (replacing any existing checklist entry)
+        checklist_mcp = build_checklist_config(specs_path)
+        backend.mcp_servers = [s for s in backend.mcp_servers if not (isinstance(s, dict) and s.get("name") == "massgen_checklist")]
+        backend.mcp_servers.append(checklist_mcp)
+
+        logger.info(
+            f"[Orchestrator] Registered submit_checklist stdio MCP for agent {agent_id} " f"(specs: {specs_path})",
+        )
+
     def _detect_convergence(self, agent_id: str) -> tuple:
         """Detect whether an agent is converging (incremental-only iterations).
 
@@ -913,6 +942,16 @@ class Orchestrator(ChatAgent):
                 ),
             },
         )
+        # Re-write specs file for stdio backends so the MCP server sees updated state
+        if hasattr(agent.backend, "_checklist_specs_path"):
+            from .mcp_tools.checklist_tools_server import write_checklist_specs
+
+            write_checklist_specs(
+                items=agent.backend._checklist_items,
+                state=agent.backend._checklist_state,
+                output_path=agent.backend._checklist_specs_path,
+            )
+
         logger.debug(
             "[Orchestrator] Refreshed checklist state for %s: remaining=%d, has_answers=%s",
             agent_id,
@@ -4893,6 +4932,17 @@ Your answer:"""
         restart_pending = self.agent_states[agent_id].restart_pending
         return restart_pending
 
+    def _should_defer_restart_for_first_answer(self, agent_id: str) -> bool:
+        """Check if restart/injection should be deferred for first-answer protection.
+
+        Each agent is guaranteed to complete at least one full round and produce
+        an answer before being restarted or injected with other agents' work.
+        """
+        state = self.agent_states.get(agent_id)
+        if state is None:
+            return False
+        return state.answer is None
+
     async def _clear_framework_mcp_state(self, agent_id: str) -> None:
         """
         Clear in-memory state of framework MCP servers before agent restart.
@@ -5297,6 +5347,12 @@ Your answer:"""
             if not self._check_restart_pending(agent_id):
                 return None
 
+            # First-answer protection: don't inject into an agent that hasn't
+            # produced its first answer yet.
+            if self._should_defer_restart_for_first_answer(agent_id):
+                self.agent_states[agent_id].restart_pending = False
+                return None
+
             # In vote-only mode, skip injection and force a full restart instead.
             # Mid-stream injection can't update tool schemas, so agents in vote-only mode
             # wouldn't be able to vote for newly discovered answers (the vote enum is fixed
@@ -5494,6 +5550,12 @@ Your answer:"""
         injection behavior, but delivers update content as an enforcement message so
         `reset_chat=False` preserves in-flight chat/session buffers.
         """
+        # First-answer protection: don't inject into an agent that hasn't
+        # produced its first answer yet.
+        if self._should_defer_restart_for_first_answer(agent_id):
+            self.agent_states[agent_id].restart_pending = False
+            return None
+
         # Gather latest submitted answers and select unseen updates for this agent.
         current_answers = self._get_current_answers_snapshot()
         selected_answers, had_unseen_updates = self._select_midstream_answer_updates(
@@ -5724,6 +5786,12 @@ Your answer:"""
                 return None
 
             if not self._check_restart_pending(agent_id):
+                return None
+
+            # First-answer protection: don't inject into an agent that hasn't
+            # produced its first answer yet.
+            if self._should_defer_restart_for_first_answer(agent_id):
+                self.agent_states[agent_id].restart_pending = False
                 return None
 
             # In vote-only mode, skip injection and force a full restart instead.
@@ -7646,78 +7714,86 @@ Your answer:"""
                 )
 
                 if self._check_restart_pending(agent_id):
-                    logger.info(
-                        f"[Orchestrator] Agent {agent_id} has restart_pending flag",
-                    )
-
-                    # Clear framework MCP state before restart (e.g., task plans)
-                    await self._clear_framework_mcp_state(agent_id)
-
-                    # In vote-only mode, always restart to get updated tool schemas.
-                    # Mid-stream injection can't update the vote enum, so we need a full restart.
-                    if self._is_vote_only_mode(agent_id):
+                    # First-answer protection: let the agent finish its first round
+                    # before acting on restart signals from other agents.
+                    if self._should_defer_restart_for_first_answer(agent_id):
                         logger.info(
-                            f"[Orchestrator] Agent {agent_id} in vote-only mode - forcing restart for updated vote options",
+                            f"[Orchestrator] Deferring restart for {agent_id} - first answer not yet produced",
                         )
                         self.agent_states[agent_id].restart_pending = False
-                        yield ("done", None)
-                        return
+                    else:
+                        logger.info(
+                            f"[Orchestrator] Agent {agent_id} has restart_pending flag",
+                        )
 
-                    has_hook_delivery = self._backend_supports_midstream_hook_injection(agent)
+                        # Clear framework MCP state before restart (e.g., task plans)
+                        await self._clear_framework_mcp_state(agent_id)
 
-                    if not has_hook_delivery:
-                        # No hook callback path (e.g., Codex): if a stream is already in progress
-                        # for this execution, convert the update into an enforcement message so
-                        # reset_chat=False preserves buffer/session state.
-                        if not is_first_real_attempt:
-                            fallback_injection = await self._prepare_no_hook_midstream_enforcement(
-                                agent_id,
-                                answers,
+                        # In vote-only mode, always restart to get updated tool schemas.
+                        # Mid-stream injection can't update the vote enum, so we need a full restart.
+                        if self._is_vote_only_mode(agent_id):
+                            logger.info(
+                                f"[Orchestrator] Agent {agent_id} in vote-only mode - forcing restart for updated vote options",
                             )
-                            if fallback_injection:
-                                enforcement_msg = fallback_injection
-                                _mid_stream_injection = True
-                            elif self._check_restart_pending(agent_id):
-                                # Could not deliver mid-stream (e.g., fairness cap reached) - force
-                                # a clean restart so the next round can continue making progress.
-                                logger.info(
-                                    "[Orchestrator] Forcing restart for %s (no-hook backend, pending unseen updates)",
+                            self.agent_states[agent_id].restart_pending = False
+                            yield ("done", None)
+                            return
+
+                        has_hook_delivery = self._backend_supports_midstream_hook_injection(agent)
+
+                        if not has_hook_delivery:
+                            # No hook callback path (e.g., Codex): if a stream is already in progress
+                            # for this execution, convert the update into an enforcement message so
+                            # reset_chat=False preserves buffer/session state.
+                            if not is_first_real_attempt:
+                                fallback_injection = await self._prepare_no_hook_midstream_enforcement(
                                     agent_id,
+                                    answers,
+                                )
+                                if fallback_injection:
+                                    enforcement_msg = fallback_injection
+                                    _mid_stream_injection = True
+                                elif self._check_restart_pending(agent_id):
+                                    # Could not deliver mid-stream (e.g., fairness cap reached) - force
+                                    # a clean restart so the next round can continue making progress.
+                                    logger.info(
+                                        "[Orchestrator] Forcing restart for %s (no-hook backend, pending unseen updates)",
+                                        agent_id,
+                                    )
+                                    self.agent_states[agent_id].restart_pending = False
+                                    self.agent_states[agent_id].injection_count += 1
+                                    yield ("done", None)
+                                    return
+                            else:
+                                # No in-flight buffer yet; normal restart is equivalent and simpler.
+                                logger.info(
+                                    f"[Orchestrator] Agent {agent_id} backend has no hooks - restarting to apply new context",
                                 )
                                 self.agent_states[agent_id].restart_pending = False
                                 self.agent_states[agent_id].injection_count += 1
                                 yield ("done", None)
                                 return
                         else:
-                            # No in-flight buffer yet; normal restart is equivalent and simpler.
-                            logger.info(
-                                f"[Orchestrator] Agent {agent_id} backend has no hooks - restarting to apply new context",
-                            )
-                            self.agent_states[agent_id].restart_pending = False
-                            self.agent_states[agent_id].injection_count += 1
-                            yield ("done", None)
-                            return
-                    else:
-                        # Check if this is the first time agent sees a new answer
-                        if self.agent_states[agent_id].injection_count == 0:
-                            # First time seeing a new answer - restart normally
-                            # The mid-stream callback will handle subsequent answers via tool results
-                            logger.info(
-                                f"[Orchestrator] Agent {agent_id} restarting normally (first new answer)",
-                            )
-                            self.agent_states[agent_id].restart_pending = False
-                            self.agent_states[agent_id].injection_count += 1
-                            # Signal completion so coordination loop restarts agent with updated context
-                            # Note: agent_restart notification is yielded at the top of _stream_agent_execution
-                            yield ("done", None)
-                            return
-                        else:
-                            # injection_count >= 1, mid-stream callback will handle via tool results
-                            # Do NOT clear restart_pending here - the callback checks this flag
-                            # and will clear it after injecting content (see get_injection_content)
-                            # Only suppress the round banner once streaming has already started.
-                            if not is_first_real_attempt:
-                                _mid_stream_injection = True
+                            # Check if this is the first time agent sees a new answer
+                            if self.agent_states[agent_id].injection_count == 0:
+                                # First time seeing a new answer - restart normally
+                                # The mid-stream callback will handle subsequent answers via tool results
+                                logger.info(
+                                    f"[Orchestrator] Agent {agent_id} restarting normally (first new answer)",
+                                )
+                                self.agent_states[agent_id].restart_pending = False
+                                self.agent_states[agent_id].injection_count += 1
+                                # Signal completion so coordination loop restarts agent with updated context
+                                # Note: agent_restart notification is yielded at the top of _stream_agent_execution
+                                yield ("done", None)
+                                return
+                            else:
+                                # injection_count >= 1, mid-stream callback will handle via tool results
+                                # Do NOT clear restart_pending here - the callback checks this flag
+                                # and will clear it after injecting content (see get_injection_content)
+                                # Only suppress the round banner once streaming has already started.
+                                if not is_first_real_attempt:
+                                    _mid_stream_injection = True
 
                 # Track restarts for TUI round display - only when agent is about to do real work
                 # (not if it's exiting immediately due to restart_pending)

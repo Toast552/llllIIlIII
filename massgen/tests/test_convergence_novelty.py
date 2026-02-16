@@ -142,6 +142,15 @@ class TestSubstantivenessTest:
         normalized = " ".join(lower.split())
         assert "changedoc decisions without corresponding" in normalized
 
+    def test_gated_decision_requires_implementing_all_identified_improvements(self):
+        """Iterate verdict guidance must say to implement ALL identified improvements, not just one."""
+        decision = _build_checklist_gated_decision(_CHECKLIST_ITEMS_CHANGEDOC)
+        normalized = " ".join(decision.lower().split())
+        # Must instruct agents to implement all structural improvements, not cherry-pick
+        assert "all" in normalized and "improvements" in normalized
+        # Must discourage picking only one improvement when multiple are identified
+        assert "cherry" in normalized or "single easiest" in normalized or "one and stop" in normalized
+
 
 # ---------------------------------------------------------------------------
 # Substantiveness Test in Changedoc Analysis

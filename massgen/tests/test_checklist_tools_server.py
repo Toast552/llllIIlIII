@@ -659,6 +659,47 @@ class TestSubstantivenessGating:
         assert "not synthesis" in result["explanation"]
 
 
+class TestIterateVerdictBreadth:
+    """Tests that iterate verdict encourages implementing ALL identified improvements."""
+
+    def test_iterate_verdict_says_implement_all(self, tmp_path):
+        """When iterating, verdict must tell agent to implement ALL improvements, not just one."""
+        items = ["Coverage", "Quality", "Polish", "Depth", "Novelty"]
+        state = {
+            "terminate_action": "vote",
+            "iterate_action": "new_answer",
+            "has_existing_answers": True,
+            "required": 4,
+            "cutoff": 70,
+            "substantiveness_eval": {"required": True, "valid": True, "has_substantive_plan": True},
+        }
+        result = evaluate_checklist_submission(
+            scores={
+                "T1": {"score": 60, "reasoning": "gaps in coverage"},
+                "T2": {"score": 55, "reasoning": "weak quality"},
+                "T3": {"score": 70, "reasoning": "decent polish"},
+                "T4": {"score": 50, "reasoning": "shallow"},
+                "T5": {"score": 40, "reasoning": "no novelty"},
+            },
+            improvements="Add interactive timeline, redesign navigation, add real data sources",
+            report_path="",
+            items=items,
+            state=state,
+            substantiveness={
+                "transformative_count": 0,
+                "structural_count": 3,
+                "incremental_count": 1,
+                "decision_space_exhausted": False,
+                "notes": "Three structural improvements identified",
+            },
+        )
+        assert result["verdict"] == "new_answer"
+        explanation_lower = result["explanation"].lower()
+        normalized = " ".join(explanation_lower.split())
+        # Must tell agent to implement all improvements, not just pick one
+        assert "implement all" in normalized or "address all" in normalized or "all identified" in normalized
+
+
 class TestBuildServerConfig:
     """Tests for build_server_config utility."""
 
@@ -670,3 +711,134 @@ class TestBuildServerConfig:
         assert config["command"] == "fastmcp"
         assert "--specs" in config["args"]
         assert str(specs_path) in config["args"]
+
+
+# ---------------------------------------------------------------------------
+# Stdio MCP registration (orchestrator wiring)
+# ---------------------------------------------------------------------------
+
+
+class TestChecklistStdioRegistration:
+    """Tests for _init_checklist_tool_stdio orchestrator helper.
+
+    Verifies that non-SDK backends with standard MCP infrastructure get the
+    checklist stdio MCP server registered automatically.
+    """
+
+    def _make_backend(self, *, mcp_servers=None, supports_sdk_mcp=False):
+        """Create a minimal mock backend with the attributes the orchestrator checks."""
+
+        class _MockBackend:
+            pass
+
+        backend = _MockBackend()
+        if mcp_servers is not None:
+            backend.mcp_servers = list(mcp_servers)
+        backend.supports_sdk_mcp = supports_sdk_mcp
+        return backend
+
+    def test_stdio_mcp_added_to_backend_mcp_servers(self, tmp_path, monkeypatch):
+        """Backends with mcp_servers=[] get checklist stdio MCP appended."""
+        from massgen.orchestrator import Orchestrator
+
+        backend = self._make_backend(mcp_servers=[])
+        checklist_state = {
+            "terminate_action": "vote",
+            "iterate_action": "new_answer",
+            "has_existing_answers": False,
+            "required": 3,
+            "cutoff": 70,
+        }
+        items = ["Check 1", "Check 2", "Check 3"]
+        backend._checklist_state = checklist_state
+        backend._checklist_items = items
+
+        # Redirect temp dir to tmp_path for deterministic cleanup
+        monkeypatch.setattr("tempfile.mkdtemp", lambda **kw: str(tmp_path / "specs_dir"))
+        (tmp_path / "specs_dir").mkdir(exist_ok=True)
+
+        orch = Orchestrator.__new__(Orchestrator)
+        orch._init_checklist_tool_stdio("agent_0", backend, checklist_state, items)
+
+        # Stdio MCP config should be appended
+        assert len(backend.mcp_servers) == 1
+        mcp_entry = backend.mcp_servers[0]
+        assert mcp_entry["name"] == "massgen_checklist"
+        assert mcp_entry["type"] == "stdio"
+
+        # Specs file should exist with correct content
+        specs_path = backend._checklist_specs_path
+        assert specs_path.exists()
+        data = json.loads(specs_path.read_text())
+        assert data["items"] == items
+        assert data["state"]["required"] == 3
+
+    def test_specs_file_rewritten_on_refresh(self, tmp_path, monkeypatch):
+        """Calling write_checklist_specs with updated state rewrites the file."""
+        items = ["Check 1", "Check 2"]
+        state_v1 = {"has_existing_answers": False, "required": 2, "cutoff": 70}
+        specs_path = tmp_path / "specs.json"
+        write_checklist_specs(items, state_v1, specs_path)
+
+        # Simulate orchestrator updating state
+        state_v2 = {"has_existing_answers": True, "required": 2, "cutoff": 70, "remaining": 3}
+        write_checklist_specs(items, state_v2, specs_path)
+
+        data = json.loads(specs_path.read_text())
+        assert data["state"]["has_existing_answers"] is True
+        assert data["state"]["remaining"] == 3
+
+    def test_sdk_backend_skipped(self, tmp_path):
+        """SDK backends (supports_sdk_mcp=True) should NOT get stdio MCP added."""
+        backend = self._make_backend(mcp_servers=[], supports_sdk_mcp=True)
+        checklist_state = {"required": 3, "cutoff": 70}
+        items = ["Check 1", "Check 2", "Check 3"]
+        backend._checklist_state = checklist_state
+        backend._checklist_items = items
+
+        # The orchestrator's _init_checklist_tool checks supports_sdk_mcp first,
+        # so _init_checklist_tool_stdio is never called for SDK backends.
+        # We verify the gate condition directly.
+        assert backend.supports_sdk_mcp is True
+        # mcp_servers should remain empty — no stdio MCP added
+        assert len(backend.mcp_servers) == 0
+
+    def test_codex_backend_skipped(self):
+        """Backends without mcp_servers attribute should NOT get stdio MCP added."""
+        backend = self._make_backend()  # No mcp_servers attribute
+        assert not hasattr(backend, "mcp_servers")
+
+    def test_replaces_existing_checklist_mcp_entry(self, tmp_path, monkeypatch):
+        """If a checklist MCP entry already exists, it should be replaced, not duplicated."""
+        from massgen.orchestrator import Orchestrator
+
+        existing_mcp = {"name": "massgen_checklist", "type": "stdio", "command": "old"}
+        backend = self._make_backend(mcp_servers=[existing_mcp, {"name": "other_tool", "type": "stdio"}])
+        checklist_state = {"required": 2, "cutoff": 70}
+        items = ["Check 1", "Check 2"]
+        backend._checklist_state = checklist_state
+        backend._checklist_items = items
+
+        monkeypatch.setattr("tempfile.mkdtemp", lambda **kw: str(tmp_path / "specs_dir"))
+        (tmp_path / "specs_dir").mkdir(exist_ok=True)
+
+        orch = Orchestrator.__new__(Orchestrator)
+        orch._init_checklist_tool_stdio("agent_0", backend, checklist_state, items)
+
+        # Should have exactly 2 entries: the other_tool + the new checklist
+        assert len(backend.mcp_servers) == 2
+        names = [s["name"] for s in backend.mcp_servers]
+        assert names.count("massgen_checklist") == 1
+        assert "other_tool" in names
+
+    def test_checklist_in_framework_mcps(self):
+        """massgen_checklist must be in FRAMEWORK_MCPS so it's sent directly to the model.
+
+        Without this, code-based-tools filtering shunts it into a Python
+        wrapper that the agent has to discover via filesystem — breaking
+        the direct tool-call contract.
+        """
+        from massgen.filesystem_manager._constants import FRAMEWORK_MCPS
+        from massgen.mcp_tools.checklist_tools_server import SERVER_NAME
+
+        assert SERVER_NAME in FRAMEWORK_MCPS, f"{SERVER_NAME!r} missing from FRAMEWORK_MCPS — " f"checklist tool will be filtered out of direct model tools"

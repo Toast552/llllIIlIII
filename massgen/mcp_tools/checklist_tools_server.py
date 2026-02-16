@@ -343,7 +343,8 @@ def evaluate_checklist_submission(
             if improvements_text:
                 explanation += (
                     f" Your own improvements analysis identified: {improvements_text} "
-                    f"— use this as your implementation plan. The result must be "
+                    f"— implement all identified improvements, not just one. Each round "
+                    f"is expensive; deliver the full scope of changes. The result must be "
                     f"obviously better, not just marginally different."
                 )
         else:

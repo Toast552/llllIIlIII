@@ -14,7 +14,9 @@ from massgen.system_message_builder import SystemMessageBuilder
 from massgen.system_prompt_sections import (
     _CHECKLIST_ITEMS_CHANGEDOC,
     ChangedocSection,
+    CoreBehaviorsSection,
     EvaluationSection,
+    SubagentSection,
     _build_changedoc_checklist_analysis,
     _build_changedoc_subsequent_round_prompt,
     _build_checklist_analysis,
@@ -602,3 +604,160 @@ class TestAntiGlazingAndSynthesis:
         """Rationale Preservation Rule forbids replacing Why with meta-justification."""
         prompt = _build_changedoc_subsequent_round_prompt()
         assert "this was the best prior answer" in prompt
+
+    def test_changedoc_accuracy_requirement_in_t3(self):
+        """T3 checklist item must emphasize accuracy — Implementation fields describe what ACTUALLY EXISTS."""
+        from massgen.system_prompt_sections import _CHECKLIST_ITEMS_CHANGEDOC
+
+        t3_text = _CHECKLIST_ITEMS_CHANGEDOC[2]  # 0-indexed, T3 is the 3rd item
+        lower = t3_text.lower()
+        # Must warn about fabrication or require verification of actual existence
+        assert "actually exist" in lower or "fabricat" in lower or "verified" in lower or "must exist" in lower, f"T3 must emphasize that implementation references must actually exist. Got: {t3_text}"
+
+    def test_first_round_changedoc_verification_step(self):
+        """First-round changedoc workflow must include a verification step."""
+        section = ChangedocSection(has_prior_answers=False)
+        content = section.build_content()
+        lower = content.lower()
+        # Must mention verifying that implementation fields are accurate
+        assert "verify" in lower or "confirm" in lower, "First-round changedoc must include verification of implementation accuracy"
+
+    def test_subsequent_round_changedoc_verification_step(self):
+        """Subsequent-round changedoc workflow must include a verification step."""
+        prompt = _build_changedoc_subsequent_round_prompt()
+        lower = prompt.lower()
+        # Must mention verifying implementation fields match actual output
+        assert "verify" in lower or "confirm" in lower, "Subsequent-round changedoc must include verification of implementation accuracy"
+
+    def test_changedoc_analysis_flags_fabrication(self):
+        """Changedoc analysis Implementation accuracy check must flag fabricated claims."""
+        analysis = _build_changedoc_checklist_analysis()
+        lower = analysis.lower()
+        # Must warn about documenting features that don't exist
+        assert "fabricat" in lower or "does not exist" in lower or "actually exist" in lower or "not actually" in lower, "Changedoc analysis must flag fabricated implementation claims"
+
+    def test_fewer_decisions_guidance_scoped_to_changedoc(self):
+        """'Fewer, stronger decisions' guidance must clarify it refers to changedoc quality, not output scope."""
+        prompt = _build_changedoc_subsequent_round_prompt()
+        lower = " ".join(prompt.lower().split())
+        # Must still have the fewer/stronger guidance
+        assert "fewer" in lower and "stronger" in lower
+        # The fewer/stronger paragraph must clarify it does NOT limit the scope of output work.
+        # Find the paragraph with "fewer" and check it has a clarification
+        fewer_idx = lower.index("fewer")
+        # Check within a ~300 char window around the "fewer" mention
+        context_window = lower[max(0, fewer_idx - 100) : fewer_idx + 300]
+        assert "does not limit" in context_window or "not about limiting" in context_window or "scope of output" in context_window
+
+
+# ---------------------------------------------------------------------------
+# Output integrity: working output before adding features (Area 3)
+# ---------------------------------------------------------------------------
+
+
+class TestOutputIntegrityPrinciple:
+    """Tests that system prompts emphasize working output over feature accumulation."""
+
+    def test_t4_mentions_functioning_or_working(self):
+        """T4 checklist item must require the deliverable actually functions, not just has features."""
+        t4_text = _CHECKLIST_ITEMS_CHANGEDOC[3]  # 0-indexed, T4 is the 4th item
+        lower = t4_text.lower()
+        assert "function" in lower or "works" in lower or "working" in lower or "internally consistent" in lower, f"T4 must require deliverable actually functions. Got: {t4_text}"
+
+    def test_decision_section_verify_before_extend(self):
+        """Decision/improvement section must instruct verifying existing before adding new."""
+        from massgen.system_prompt_sections import _build_checklist_gated_decision
+
+        decision = _build_checklist_gated_decision(
+            checklist_items=_CHECKLIST_ITEMS_CHANGEDOC,
+            gap_report_mode="changedoc",
+        )
+        lower = decision.lower()
+        assert (
+            "verify" in lower or "existing features" in lower or "before adding" in lower or "already works" in lower or "working output" in lower
+        ), "Decision section must instruct agents to verify existing functionality before adding features"
+
+    def test_changedoc_analysis_has_output_integrity_check(self):
+        """Changedoc analysis gap section must check output integrity (does it actually work)."""
+        analysis = _build_changedoc_checklist_analysis()
+        lower = analysis.lower()
+        assert (
+            "broken" in lower or "internally consistent" in lower or "actually work" in lower or "output integrity" in lower or "still function" in lower
+        ), "Changedoc analysis must check whether the output actually works, not just has features"
+
+
+# ---------------------------------------------------------------------------
+# Context Window Persistence Guidance
+# ---------------------------------------------------------------------------
+
+
+class TestContextWindowPersistence:
+    """Core behaviors must include guidance on persisting through context compaction."""
+
+    def test_core_behaviors_has_context_compaction_guidance(self):
+        """CoreBehaviorsSection must tell agents not to stop early due to token budget."""
+        section = CoreBehaviorsSection()
+        content = section.build_content()
+        lower = content.lower()
+        assert "compact" in lower or "context window" in lower or "token budget" in lower
+
+    def test_core_behaviors_says_do_not_stop_early(self):
+        """CoreBehaviorsSection must instruct agents to not stop tasks early."""
+        section = CoreBehaviorsSection()
+        content = section.build_content()
+        lower = content.lower()
+        assert "do not stop" in lower or "never" in lower and "stop" in lower
+
+    def test_core_behaviors_says_save_progress(self):
+        """CoreBehaviorsSection must instruct agents to save progress before compaction."""
+        section = CoreBehaviorsSection()
+        content = section.build_content()
+        lower = content.lower()
+        assert "save" in lower and ("progress" in lower or "state" in lower or "memory" in lower)
+
+
+# ---------------------------------------------------------------------------
+# Evaluation Delegation via Subagents
+# ---------------------------------------------------------------------------
+
+
+def _subagent_content():
+    """Helper: build SubagentSection content with default args."""
+    return SubagentSection(workspace_path="/tmp/workspace", max_concurrent=3).build_content()
+
+
+class TestEvaluationDelegation:
+    """SubagentSection must guide agents to delegate procedural evaluation work."""
+
+    def test_subagent_section_has_evaluation_delegation(self):
+        """SubagentSection must include evaluation delegation pattern."""
+        content = _subagent_content()
+        lower = content.lower()
+        assert "evaluation" in lower or "testing" in lower and "delegat" in lower
+
+    def test_evaluation_delegation_mentions_async(self):
+        """Evaluation delegation pattern must recommend async mode."""
+        content = _subagent_content()
+        lower = content.lower()
+        assert "async" in lower and ("evaluation" in lower or "testing" in lower)
+
+    def test_evaluation_delegation_describes_role_split(self):
+        """Must describe what subagent does (procedural) vs main agent (analytical)."""
+        content = _subagent_content()
+        lower = content.lower()
+        # Subagent handles procedural: screenshots, tests, serving
+        assert "screenshot" in lower or "procedural" in lower or "read_media" in lower
+        # Main agent handles analytical: judgment, decisions
+        assert "judgment" in lower or "analyz" in lower or "decision" in lower
+
+    def test_subagent_returns_descriptive_not_judgments(self):
+        """Must clarify subagents return descriptions/observations, not high-level judgments."""
+        content = _subagent_content()
+        lower = content.lower()
+        assert "descri" in lower and ("observ" in lower or "finding" in lower or "report" in lower)
+
+    def test_manual_polling_for_no_hook_backends(self):
+        """Async section must mention manual polling as fallback for no-hook backends."""
+        content = _subagent_content()
+        lower = content.lower()
+        assert "check_subagent_status" in lower or "poll" in lower

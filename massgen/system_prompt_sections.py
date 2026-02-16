@@ -134,8 +134,12 @@ _CHECKLIST_ITEMS = [
 _CHECKLIST_ITEMS_CHANGEDOC = [
     "The changedoc captures every significant decision the task demands. No important " "choices were made implicitly in code but missing from the changedoc.",
     "Each decision has strong, specific rationale tied to task requirements. No weak " '"Why" fields or strawman alternatives.',
-    "Every decision is traceable to specific artifacts — Implementation fields reference " "actual code locations, and the output implements what was decided.",
-    "The actual deliverable achieves genuine quality, depth, and polish. Would impress " "the person who asked.",
+    "Every decision is traceable to specific artifacts — Implementation fields reference "
+    "actual code locations that must exist and be verified. Documenting features, text, "
+    "or code that does not actually exist in the output is a critical failure.",
+    "The actual deliverable functions correctly and is internally consistent. A working "
+    "output with fewer features is better than a broken output with more. Achieves "
+    "genuine quality, depth, and polish. Would impress the person who asked.",
     "At least one genuinely novel or ambitious element (NEW markers or evident in output). "
     "Goes beyond the safe, obvious approach. Pure synthesis — combining existing agents' "
     "approaches without original thinking — does not count as novel. Synthesis is competent "
@@ -307,7 +311,11 @@ For each decision (DEC-*) in the changedoc:
   strawmen set up to lose? Would a thoughtful colleague have considered these same
   alternatives?
 - **Implementation accuracy**: Do the Implementation fields reference actual code
-  locations that exist and match what was decided?
+  locations that exist and match what was decided? **Verify this literally** — open
+  the referenced files and confirm the described content is there. Documenting
+  features, quoted text, or line numbers that do not actually exist in the output
+  is fabrication, not aspiration. Flag any fabricated Implementation fields as
+  critical failures.
 
 Then ask: **What decisions are MISSING?** What important choices were made implicitly
 in code but never recorded? What trade-offs were navigated without being articulated?
@@ -385,6 +393,10 @@ Focus exclusively on what is missing, weak, or falls short.
 - **Output gaps**: Where does the deliverable fall short of genuine quality, depth, or
   polish? Be specific about what is lacking, not about what is adequate.
 - **Traceability gaps**: Are there code choices that lack corresponding changedoc entries?
+- **Output integrity**: Does the deliverable actually work end-to-end? Are features from
+  earlier rounds still functioning after new features were added? Adding features that
+  break existing functionality is regression, not improvement. A working output with fewer
+  features is better than a broken output with more.
 - **Novelty deficit**: Is there at least one genuinely novel or ambitious element, or
   does everything take the safe, obvious path?
 
@@ -735,7 +747,17 @@ to call `{terminate_action}` or `{iterate_action}`. Follow the verdict.
 substantially better** — not just marginally different. A user should immediately
 notice the improvement. Do NOT simply copy or resubmit the same content with minor
 tweaks. Use your improvements analysis to guide what to build differently, and
-implement the changes you identified — not just acknowledge them."""
+implement the changes you identified — not just acknowledge them.
+
+**Implement ALL identified improvements, not just one.** If your gap analysis found
+multiple structural weaknesses, address them all in this round. Do not pick the
+single easiest improvement, implement it, and stop. Each round is expensive — make
+it count by delivering the full scope of improvements you identified.
+
+**Verify existing features before adding new ones.** After making changes, confirm that
+features from prior rounds still work. Adding a feature that breaks existing functionality
+is regression, not improvement. A working output with fewer features is always better than
+a broken output with more features."""
 
 
 class Priority(IntEnum):
@@ -917,7 +939,19 @@ actions can be done in parallel rather than sequentially. For example, when read
 tool calls in parallel to read all 3 files into context at the same time. Maximize use of parallel
 tool calls where possible to increase speed and efficiency. However, if some tool calls depend on
 previous calls to inform dependent values like the parameters, do NOT call these tools in parallel
-and instead call them sequentially. Never use placeholders or guess missing parameters in tool calls."""
+and instead call them sequentially. Never use placeholders or guess missing parameters in tool calls.
+
+**Task Persistence:**
+Your context window will be automatically compacted as it approaches its limit, allowing you to
+continue working indefinitely from where you left off. Therefore, do not stop tasks early due to
+token budget concerns. As you approach your token budget limit, save your current progress and state
+to memory before the context window refreshes. Always be as persistent and autonomous as possible
+and complete tasks fully, even if the end of your budget is approaching. Never artificially stop any
+task early regardless of the context remaining."""
+
+
+# Task Persistence guidance sourced from Anthropic Claude prompting best practices:
+# https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices#context-awareness-and-multi-window-workflows
 
 
 class GPT5GuidanceSection(SystemPromptSection):
@@ -3006,7 +3040,10 @@ decision while working.
 1. **Create `tasks/changedoc.md` immediately** when you begin working. Write the Summary with your initial approach.
 2. **Log each significant decision as you make it.** When you choose an approach, architecture, tool, or trade-off — write a DEC entry in the changedoc before or as you implement it.
 3. **After implementing**, fill in the Implementation field on each decision with the actual files and symbols.
-4. **Submit your answer** via `new_answer` once your work is complete. The changedoc should already be up to date.
+4. **Verify accuracy**: Before submitting, confirm that every Implementation field
+   describes what actually exists in the files. Open the referenced locations and check.
+   Do not document features you plan to add — only what is already built.
+5. **Submit your answer** via `new_answer` once your work is complete. The changedoc should already be up to date.
 
 The changedoc captures your reasoning in real-time, not as a summary after the fact. Focus on decisions where a reasonable person might have chosen differently.
 
@@ -3100,7 +3137,11 @@ to the deliverable before the checklist verdict — work done before a "vote" ve
 because changes are only locked in when you call `new_answer`.
 3. **If the verdict says iterate**: implement your planned improvements. Log each decision in
 the changedoc as you make it. Update the Implementation fields to reference YOUR code locations.
-4. **Submit your answer** via `new_answer` once your work is complete. The changedoc should already be up to date.
+4. **Verify before submitting**: Confirm that every Implementation field describes what
+   actually exists in the files — open the referenced locations and check. Also verify
+   that features from prior rounds still work after your changes. Do not document
+   features you plan to add — only what is already built.
+5. **Submit your answer** via `new_answer` once your work is complete. The changedoc should already be up to date.
 
 ### Synthesizing from prior answers
 
@@ -3122,6 +3163,8 @@ Convergence on the same approach is not proof it is the best approach.
 Five deeply-reasoned decisions beat twelve adequate ones. You may REMOVE or MERGE decisions
 from the inherited changedoc if they are redundant, weak, or dilute the overall quality.
 Fewer, stronger decisions produce better outcomes than accumulating every idea.
+This applies to changedoc decision count — it does not limit the scope of output changes
+you should make. If your gap analysis identifies five output improvements, implement all five.
 
 **Changedoc changes must accompany output changes.** Improving the changedoc alone — adding
 decisions, strengthening rationale, deepening alternatives — does not constitute a round of
@@ -3372,6 +3415,29 @@ Subagents are useful helpers but have limitations:
 - Don't blindly trust subagent results - verify and integrate thoughtfully
 - If a subagent produces something broken or incomplete, **you fix it** rather than reporting failure
 
+**EVALUATION DELEGATION (async pattern):**
+When your output needs testing or evaluation that involves procedural tool use, delegate it
+to an async subagent so you can keep working on implementation. Spawn with
+`async_=True, refine=False` — the subagent evaluates while you continue building.
+
+Subagent handles (procedural observations):
+- Serving a website and taking screenshots, running Playwright tests, using read_media
+- Executing test suites, linters, or validation scripts against generated code
+- Running benchmarks, profiling, or performance measurements
+- Checking file integrity, link resolution, or cross-references in documents
+- Comparing output against specs or acceptance criteria with automated tools
+
+You handle (analytical judgment):
+- Analyzing previous answers and peer approaches in depth
+- Making quality judgments and deciding what to improve next
+- Synthesizing insights from multiple sources into a coherent strategy
+- Prioritizing which gaps matter most and what to build next
+
+The subagent returns a descriptive report of findings and observations — what it measured,
+what passed, what failed, what it saw. Trust its observations and measurements. Make your
+own judgments about quality and priorities, since you have the full context and the subagent
+may run on a simpler model.
+
 **AVOID SUBAGENTS FOR:**
 - Simple, quick operations you can do directly (overhead not worth it)
 - Tasks requiring back-and-forth coordination (high overhead)
@@ -3477,8 +3543,11 @@ spawn_subagents(
 ```
 
 **async_ parameter:**
-- `async_=True`: Spawn in background, continue working, results injected later via broadcast. Use when you can do useful work while waiting or user requests background execution.
-- `async_=False` (default): Wait for results before proceeding. Use when you need outputs to complete any other work.
+- `async_=True`: Spawn in background and continue working. Results are automatically
+  injected when ready (on your next tool call). If auto-injection is not available, poll
+  manually with `check_subagent_status` and `get_subagent_result`. Use for evaluation
+  delegation and any work you can do in parallel.
+- `async_=False` (default): Wait for results before proceeding. Use when you need outputs to continue.
 
 **refine parameter:**
 - `refine=True` (default): Multi-round refinement with voting. Higher quality, slower, more expensive. Use for complex analysis.
