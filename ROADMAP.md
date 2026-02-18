@@ -234,7 +234,7 @@ Want to contribute or collaborate on a specific track? Reach out to the track ow
 
 ---
 
-## 📋 v0.1.53 - Background Tools & Specialized Subagents
+## 📋 v0.1.53 - Background Tool Execution
 
 ### Features
 
@@ -244,41 +244,30 @@ Want to contribute or collaborate on a specific track? Reach out to the track ow
 - Compatible with custom tools and MCP server tools
 - **Use Case**: Agents continue foreground work while long-running tools execute in the background
 
-**2. Specialized Subagents** (@ncrispino)
-- PR: [#917](https://github.com/massgen/MassGen/pull/917)
-- **Evaluator**: Programmatic execution and verification (tests, Playwright, scripted checks)
-- **Explorer**: Research and discovery (codebase search, semantic discovery, documentation analysis). Runs in background by default.
-- Type discovery via `SUBAGENT.md` frontmatter for defining custom subagent types
-- **Use Case**: Purpose-built subagent types with built-in skills for common delegation patterns
-
-**3. Planning Task Verification** (@ncrispino)
+**2. Planning Task Verification** (@ncrispino)
 - PR: [#917](https://github.com/massgen/MassGen/pull/917)
 - Tasks now require `verification` and `verification_method` fields by default
 - `--no-require-verification` flag to opt out; framework-injected tasks exempt
 - **Use Case**: Ensure every planned task has clear verification criteria
 
-**4. TUI Background Job Indicators** (@ncrispino)
+**3. TUI Background Job Indicators** (@ncrispino)
 - PR: [#917](https://github.com/massgen/MassGen/pull/917)
 - Agent status ribbon with background job indicators
 - Background tasks modal with lifecycle controls
 - **Use Case**: Visual feedback for background tool execution in the terminal UI
 
-**5. Hook Framework Improvements** (@ncrispino)
+**4. Subagent Infrastructure** (@ncrispino)
 - PR: [#917](https://github.com/massgen/MassGen/pull/917)
+- Groundwork for specialized subagent types: Evaluator and Explorer definitions via `SUBAGENT.md` frontmatter
 - Broadcasting subagent results to agents via hooks
-- **Use Case**: Parent agents receive subagent results automatically
-
-**6. Tool Argument Normalization** (@ncrispino)
-- PR: [#917](https://github.com/massgen/MassGen/pull/917)
-- Consistent argument handling across backends
-- **Use Case**: Reliable tool calling behavior regardless of backend
+- Tool argument normalization for consistent handling across backends
+- **Use Case**: Foundation for specialized subagent types (maturing in future releases)
 
 ### Success Criteria
 - ✅ Background tool lifecycle (start, monitor, wait, cancel, list) working
-- ✅ Evaluator and Explorer subagent types with built-in skills
 - ✅ Planning tasks require verification fields by default
 - ✅ TUI background job indicators and modal controls
-- ✅ Subagent result broadcasting via hooks
+- ✅ Subagent type infrastructure and result broadcasting
 
 ---
 

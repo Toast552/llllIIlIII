@@ -190,9 +190,9 @@ Key Features
 Recent Releases
 ---------------
 
-**v0.1.53 (February 18, 2026)** - Background Tools & Specialized Subagents
+**v0.1.53 (February 18, 2026)** - Background Tool Execution
 
-Background tool execution for non-blocking long-running work. Specialized subagent types (Evaluator, Explorer) with built-in skills. Planning task verification requirements. TUI background job indicators and lifecycle controls.
+Background tool execution for non-blocking long-running work. Planning task verification requirements. TUI background job indicators and lifecycle controls. Subagent infrastructure groundwork with Evaluator and Explorer types.
 
 **v0.1.52 (February 16, 2026)** - Final Answer Modal & Coordination Quality Gates
 

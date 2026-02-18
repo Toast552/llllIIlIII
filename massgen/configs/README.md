@@ -228,14 +228,13 @@ Most configurations use environment variables for API keys:so
 ## Release History & Examples
 
 ### v0.1.53 - Latest
-**New Features:** Background Tool Execution, Specialized Subagents, Planning Task Verification, TUI Background Job Indicators
+**New Features:** Background Tool Execution, Planning Task Verification, TUI Background Job Indicators
 
 **Key Features:**
 - **Background Tool Execution**: Non-blocking lifecycle tools (`start_background_tool`, `get_background_tool_status`, `get_background_tool_result`, `wait_for_background_tool`, `cancel_background_tool`, `list_background_tools`)
-- **Specialized Subagents**: Two built-in types — Evaluator (tests, Playwright, verification) and Explorer (research, codebase search, semantic discovery)
 - **Planning Task Verification**: Tasks require `verification` and `verification_method` by default; `--no-require-verification` to opt out
 - **TUI Background Job Indicators**: Agent status ribbon and background tasks modal with lifecycle controls
-- **Hook Framework**: Broadcasting subagent results to agents via hooks
+- **Subagent Infrastructure**: Groundwork for Evaluator and Explorer subagent types via `SUBAGENT.md` frontmatter
 - **Tool Argument Normalization**: Consistent argument handling across backends
 
 **Try It:**

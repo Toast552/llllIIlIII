@@ -161,11 +161,9 @@ This project started with the "threads of thought" and "iterative refinement" id
 
 **What's New in v0.1.53:**
 - **⏳ Background Tool Execution** - Non-blocking lifecycle tools for long-running work: start, monitor, wait, cancel, and list background jobs. Compatible with custom tools and MCP server tools.
-- **🤖 Specialized Subagents** - Two built-in types: **Evaluator** (programmatic execution/verification, tests, Playwright) and **Explorer** (research/discovery, codebase search, semantic discovery). Type discovery via `SUBAGENT.md` frontmatter.
 - **✅ Planning Task Verification** - Tasks now require `verification` and `verification_method` fields by default. `--no-require-verification` flag to opt out.
 - **🎯 TUI Background Job Indicators** - Agent status ribbon with background job indicators and background tasks modal with lifecycle controls.
-- **🔗 Hook Framework** - Broadcasting subagent results to parent agents via hooks.
-- **🔧 Tool Argument Normalization** - Consistent argument handling across backends.
+- **🔧 Subagent Infrastructure** - Groundwork for specialized subagent types (Evaluator, Explorer) via `SUBAGENT.md` frontmatter. Result broadcasting via hooks. Tool argument normalization across backends.
 
 **Try v0.1.53 Features:**
 ```bash
@@ -1247,11 +1245,6 @@ MassGen is currently in its foundational stage, with a focus on parallel, asynch
 - **Compatible Targets**: Works with custom tools and MCP server tools
 - **Lifecycle Tools**: `start_background_tool`, `get_background_tool_status`, `get_background_tool_result`, `wait_for_background_tool`, `cancel_background_tool`, `list_background_tools`
 
-#### Specialized Subagents
-- **Evaluator**: Programmatic execution and verification (tests, Playwright, scripted checks)
-- **Explorer**: Research and discovery (codebase search, semantic discovery, documentation analysis). Runs in background by default.
-- **Type Discovery**: `SUBAGENT.md` frontmatter for defining custom subagent types
-
 #### Planning Task Verification
 - **Verification Fields**: Tasks now require `verification` and `verification_method` by default
 - **Opt-Out**: `--no-require-verification` flag for backwards compatibility
@@ -1261,7 +1254,8 @@ MassGen is currently in its foundational stage, with a focus on parallel, asynch
 - **Agent Status Ribbon**: Background job indicators in agent status display
 - **Background Tasks Modal**: Lifecycle controls for managing background tools
 
-#### Changed
+#### Also in this release
+- **Subagent Infrastructure**: Groundwork for specialized subagent types (Evaluator, Explorer) via `SUBAGENT.md` frontmatter
 - **Hook Framework**: Broadcasting subagent results to agents via hooks
 - **Tool Argument Normalization**: Consistent argument handling across backends
 
