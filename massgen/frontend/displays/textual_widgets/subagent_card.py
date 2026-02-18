@@ -605,6 +605,11 @@ class SubagentCard(Vertical, can_focus=True):
     def subagents(self) -> List[SubagentDisplayData]:
         return self._subagents
 
+    @property
+    def tool_call_id(self) -> Optional[str]:
+        """Tool call identifier used to correlate start/complete lifecycle updates."""
+        return self._tool_call_id
+
     def update_subagents(self, subagents: List[SubagentDisplayData]) -> None:
         self._subagents = subagents
         self._refresh_columns()

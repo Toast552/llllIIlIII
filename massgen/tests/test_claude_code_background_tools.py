@@ -130,8 +130,8 @@ async def test_claude_code_background_lifecycle_for_mcp_tool(tmp_path, monkeypat
 
 
 @pytest.mark.asyncio
-async def test_claude_code_custom_tool_async_flag_auto_background(tmp_path):
-    """Custom tool calls with async=true should auto-start a background job."""
+async def test_claude_code_custom_tool_background_flag_auto_background(tmp_path):
+    """Custom tool calls with background=true should auto-start a background job."""
     backend = ClaudeCodeBackend(cwd=str(tmp_path))
     backend._custom_tool_manager = ToolManager()
 
@@ -143,7 +143,7 @@ async def test_claude_code_custom_tool_async_flag_auto_background(tmp_path):
 
     response = await backend._execute_massgen_custom_tool(
         "custom_tool__slow_echo",
-        {"city": "rome", "async": True},
+        {"city": "rome", "background": True},
     )
 
     payload = json.loads(response["content"][0]["text"])
@@ -169,6 +169,55 @@ async def test_claude_code_custom_tool_async_flag_auto_background(tmp_path):
     assert "echo::rome" in final["result"]
 
 
+@pytest.mark.asyncio
+async def test_claude_code_auto_background_preserves_real_mcp_background_param(
+    tmp_path,
+    monkeypatch,
+):
+    """MCP tools that define background should keep it when auto-backgrounded."""
+    backend = ClaudeCodeBackend(cwd=str(tmp_path))
+    backend._mcp_client = SimpleNamespace(
+        tools={
+            "mcp__subagent_agent_a__spawn_subagents": SimpleNamespace(
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "tasks": {"type": "array", "items": {"type": "object"}},
+                        "background": {"type": "boolean"},
+                    },
+                },
+            ),
+        },
+    )
+
+    captured: dict = {}
+
+    class _FakeJob:
+        job_id = "bgtool_claude_test"
+        tool_name = "mcp__subagent_agent_a__spawn_subagents"
+
+    async def fake_start_background_job(*, tool_name, arguments):
+        captured["tool_name"] = tool_name
+        captured["arguments"] = arguments
+        return _FakeJob()
+
+    monkeypatch.setattr(backend, "_start_background_tool_job", fake_start_background_job)
+
+    response = await backend._execute_massgen_custom_tool(
+        "mcp__subagent_agent_a__spawn_subagents",
+        {
+            "tasks": [{"task": "test task"}],
+            "background": True,
+        },
+    )
+    payload = json.loads(response["content"][0]["text"])
+
+    assert payload["success"] is True
+    assert payload["status"] == "background"
+    assert captured["tool_name"] == "mcp__subagent_agent_a__spawn_subagents"
+    assert captured["arguments"]["background"] is True
+
+
 def test_claude_code_media_tools_default_to_background(tmp_path):
     """Claude Code policy should default media tools to background mode."""
     backend = ClaudeCodeBackend(cwd=str(tmp_path))
@@ -180,7 +229,7 @@ def test_claude_code_media_tools_default_to_background(tmp_path):
     assert (
         backend._should_auto_background_execution(
             "custom_tool__read_media",
-            {"async": False},
+            {"background": False},
         )
         is False
     )
@@ -188,6 +237,13 @@ def test_claude_code_media_tools_default_to_background(tmp_path):
         backend._should_auto_background_execution(
             "custom_tool__generate_media",
             {"background": False},
+        )
+        is False
+    )
+    assert (
+        backend._should_auto_background_execution(
+            "custom_tool__slow_echo",
+            {"async": True},
         )
         is False
     )

@@ -36,15 +36,24 @@ class _RibbonStub:
 
 
 class _PanelStub:
-    def __init__(self, running_count: int, background_jobs: list[dict]) -> None:
+    def __init__(
+        self,
+        running_count: int,
+        background_jobs: list[dict],
+        background_history: list[dict] | None = None,
+    ) -> None:
         self._running_count = running_count
         self._background_jobs = background_jobs
+        self._background_history = background_history or []
 
     def _get_running_tools_count(self) -> int:
         return self._running_count
 
     def _get_background_tools(self) -> list[dict]:
         return self._background_jobs
+
+    def _get_background_tool_history(self) -> list[dict]:
+        return self._background_history
 
 
 class _BackgroundDetailModalHostApp(App):
@@ -215,6 +224,40 @@ def test_action_open_background_tools_notifies_when_empty():
 
     assert captured.get("modal") is None
     assert captured.get("message") == "No background jobs running"
+
+
+def test_action_open_background_tools_shows_recent_completed_history() -> None:
+    app_cls = textual_display_module.TextualApp
+    app = app_cls.__new__(app_cls)
+
+    app.agent_widgets = {
+        "agent_a": _PanelStub(
+            running_count=0,
+            background_jobs=[],
+            background_history=[
+                {
+                    "tool_name": "custom_tool__generate_media",
+                    "display_name": "Generate Media",
+                    "status": "completed",
+                    "is_active": False,
+                    "async_id": "bgtool_done_1",
+                    "agent_id": "agent_a",
+                },
+            ],
+        ),
+    }
+
+    captured: dict[str, object] = {}
+    app._show_modal_async = lambda modal: captured.setdefault("modal", modal)
+    app.notify = lambda *_args, **_kwargs: captured.setdefault("notified", True)
+
+    app.action_open_background_tools()
+
+    modal = captured.get("modal")
+    assert isinstance(modal, BackgroundTasksModal)
+    assert modal.background_tasks == []
+    assert len(modal.recent_tasks) == 1
+    assert modal.recent_tasks[0]["status"] == "completed"
 
 
 def test_update_running_tools_count_aggregates_across_agent_panels():

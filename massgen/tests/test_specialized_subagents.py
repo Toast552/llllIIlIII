@@ -14,7 +14,7 @@ def test_config_creation():
         name="evaluator",
         description="Runs deliverables and checks features",
         system_prompt="You are an evaluator.",
-        default_async=True,
+        default_background=True,
         default_refine=False,
         skills=["webapp-testing", "agent-browser"],
         mcp_servers=["browser"],
@@ -23,7 +23,7 @@ def test_config_creation():
     assert config.name == "evaluator"
     assert config.description == "Runs deliverables and checks features"
     assert config.system_prompt == "You are an evaluator."
-    assert config.default_async is True
+    assert config.default_background is True
     assert config.default_refine is False
     assert config.skills == ["webapp-testing", "agent-browser"]
     assert config.mcp_servers == ["browser"]
@@ -38,7 +38,7 @@ def test_config_defaults():
         name="test",
         description="test type",
     )
-    assert config.default_async is False
+    assert config.default_background is False
     assert config.default_refine is False
     assert config.system_prompt == ""
     assert config.skills == []
@@ -54,7 +54,7 @@ def test_config_roundtrip():
         name="evaluator",
         description="Checks features",
         system_prompt="You are an evaluator.\nBe thorough.",
-        default_async=True,
+        default_background=True,
         default_refine=False,
         skills=["webapp-testing", "agent-browser"],
         mcp_servers=["browser"],
@@ -65,7 +65,7 @@ def test_config_roundtrip():
     assert restored.name == original.name
     assert restored.description == original.description
     assert restored.system_prompt == original.system_prompt
-    assert restored.default_async == original.default_async
+    assert restored.default_background == original.default_background
     assert restored.default_refine == original.default_refine
     assert restored.skills == original.skills
     assert restored.mcp_servers == original.mcp_servers
@@ -95,8 +95,20 @@ def test_scanner_parses_frontmatter():
     types = scan_subagent_types(builtin_dir=builtin_dir, project_dir=Path("/nonexistent"))
     evaluator = next(t for t in types if t.name == "evaluator")
     assert evaluator.description  # non-empty description
-    assert isinstance(evaluator.default_async, bool)
+    assert isinstance(evaluator.default_background, bool)
     assert isinstance(evaluator.default_refine, bool)
+
+
+def test_evaluator_description_targets_programmatic_execution():
+    """Evaluator description should signal run-heavy procedural verification use cases."""
+    from massgen.subagent.type_scanner import scan_subagent_types
+
+    builtin_dir = Path(__file__).parent.parent / "subagent_types"
+    types = scan_subagent_types(builtin_dir=builtin_dir, project_dir=Path("/nonexistent"))
+    evaluator = next(t for t in types if t.name == "evaluator")
+    lower = evaluator.description.lower()
+    assert "programmatic" in lower or "procedural" in lower
+    assert "test" in lower or "execute" in lower or "run" in lower
 
 
 def test_scanner_body_is_system_prompt():
@@ -110,6 +122,19 @@ def test_scanner_body_is_system_prompt():
     assert len(evaluator.system_prompt) > 50
     # Should not contain the frontmatter markers
     assert "---" not in evaluator.system_prompt[:10]
+
+
+def test_evaluator_prompt_allows_optional_suggestions():
+    """Evaluator prompt may include suggestions, but keeps decision ownership with main agent."""
+    from massgen.subagent.type_scanner import scan_subagent_types
+
+    builtin_dir = Path(__file__).parent.parent / "subagent_types"
+    types = scan_subagent_types(builtin_dir=builtin_dir, project_dir=Path("/nonexistent"))
+    evaluator = next(t for t in types if t.name == "evaluator")
+    lower = evaluator.system_prompt.lower()
+    assert "may include suggestions" in lower
+    assert "main agent" in lower
+    assert "decid" in lower or "judg" in lower
 
 
 def test_evaluator_has_skills():
@@ -261,3 +286,16 @@ def test_evaluation_evaluator_says_dont_do_yourself():
     # Should tell agent NOT to do evaluation work inline
     assert "do not" in content.lower() or "don't" in content.lower() or "NOT" in content
     assert "evaluator" in content.lower()
+
+
+def test_evaluation_evaluator_directive_keeps_main_agent_decision_authority():
+    """Evaluator directive can accept suggestions but must keep final judgment with main agent."""
+    from massgen.system_prompt_sections import EvaluationSection
+
+    section = EvaluationSection(
+        voting_sensitivity="checklist_gated",
+        has_evaluator_subagent=True,
+    )
+    content = section.build_content().lower()
+    assert "suggest" in content
+    assert "your judgment" in content or "you decide" in content or "you remain responsible" in content

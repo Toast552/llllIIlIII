@@ -843,12 +843,12 @@ class MidStreamInjectionHook(PatternHook):
 
 
 class SubagentCompleteHook(PatternHook):
-    """PostToolUse hook that injects completed async subagent results.
+    """PostToolUse hook that injects completed background subagent results.
 
     This hook checks the pending results queue after each tool call
     and injects any completed subagent results into the tool output.
 
-    Used for the async subagent execution feature (MAS-214) where subagents
+    Used for background subagent execution where subagents
     run in the background and results are automatically injected when
     the parent agent executes its next tool.
     """
@@ -879,7 +879,7 @@ class SubagentCompleteHook(PatternHook):
         """Set the function to retrieve pending results.
 
         The getter should return a list of (subagent_id, SubagentResult) tuples
-        representing completed async subagents that need their results injected.
+        representing completed background subagents that need their results injected.
 
         Args:
             getter: A callable that returns pending results and clears the queue
@@ -895,7 +895,7 @@ class SubagentCompleteHook(PatternHook):
     ) -> HookResult:
         """Execute the subagent complete hook.
 
-        Checks for pending async subagent results and injects them if available.
+        Checks for pending background subagent results and injects them if available.
 
         Args:
             function_name (str): Name of the subagent function.

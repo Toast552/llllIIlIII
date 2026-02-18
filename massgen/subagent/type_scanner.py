@@ -112,7 +112,7 @@ def _parse_subagent_md(
         name=name,
         description=description,
         system_prompt=system_prompt,
-        default_async=bool(metadata.get("default_async", False)),
+        default_background=bool(metadata.get("default_background", False)),
         default_refine=bool(metadata.get("default_refine", False)),
         skills=metadata.get("skills", []) or [],
         mcp_servers=metadata.get("mcp_servers", []) or [],

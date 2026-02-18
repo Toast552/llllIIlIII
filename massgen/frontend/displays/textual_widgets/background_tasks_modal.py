@@ -40,10 +40,23 @@ class BackgroundTaskRow(Static, can_focus=True):
         text = Text()
         task = self._task_data
 
+        latest_status = str(task.get("latest_status") or task.get("status") or "running").lower().strip()
+        status_icon = "●"
+        status_style = "bold #d29922"
+        if latest_status in {"completed", "success"}:
+            status_icon = "✓"
+            status_style = "bold #3fb950"
+        elif latest_status in {"error", "failed", "cancelled", "canceled", "stopped"}:
+            status_icon = "✗"
+            status_style = "bold #f85149"
+        elif latest_status == "timeout":
+            status_icon = "⏱"
+            status_style = "bold #d29922"
+
         # Tool name (no emoji)
         tool_name = task.get("tool_name", "Unknown")
         display_name = task.get("display_name", tool_name)
-        text.append("● ", style="bold #d29922")
+        text.append(f"{status_icon} ", style=status_style)
         text.append(display_name, style="bold")
 
         agent_id = task.get("agent_id")
@@ -59,15 +72,15 @@ class BackgroundTaskRow(Static, can_focus=True):
 
         # Elapsed time
         start_time = task.get("start_time")
-        if start_time:
+        if start_time and latest_status in {"running", "background", "pending", "queued"}:
             if isinstance(start_time, datetime):
                 elapsed = (datetime.now() - start_time).total_seconds()
             else:
                 elapsed = 0
             minutes, seconds = divmod(int(elapsed), 60)
             text.append(f"  ⏱ {minutes}m{seconds:02d}s running", style="dim")
-        elif task.get("status"):
-            text.append(f"  {task.get('status')}", style="dim")
+        elif latest_status:
+            text.append(f"  {latest_status}", style="dim")
 
         # Click hint
         text.append("  [click for details]", style="dim italic #d29922")
@@ -365,14 +378,17 @@ class BackgroundTasksModal(ModalScreen[None]):
     def __init__(
         self,
         background_tasks: List[Dict[str, Any]],
+        recent_tasks: Optional[List[Dict[str, Any]]] = None,
         agent_id: Optional[str] = None,
     ) -> None:
         super().__init__()
         self.background_tasks = background_tasks or []
+        self.recent_tasks = recent_tasks or []
         self.agent_id = agent_id
 
     def compose(self) -> ComposeResult:
-        count = len(self.background_tasks)
+        active_count = len(self.background_tasks)
+        recent_count = len(self.recent_tasks)
 
         with Container():
             # Header section
@@ -382,19 +398,31 @@ class BackgroundTasksModal(ModalScreen[None]):
                     if self.agent_id:
                         title += f" . {self.agent_id}"
                     yield Static(title, classes="modal-title")
-                    yield Static(f"{count} job(s)", classes="modal-stats")
+                    stats = f"{active_count} active"
+                    if recent_count:
+                        stats += f" • {recent_count} recent"
+                    yield Static(stats, classes="modal-stats")
                     yield Button("✕", variant="default", classes="modal-close", id="close_btn")
 
             # Task list
             with ScrollableContainer(classes="modal-body"):
-                if not self.background_tasks:
+                if not self.background_tasks and not self.recent_tasks:
                     yield Static(
                         "No background operations running.",
                         classes="empty-message",
                     )
                 else:
-                    for i, task in enumerate(self.background_tasks):
-                        yield BackgroundTaskRow(task, i, self.agent_id, id=f"task_row_{i}")
+                    row_index = 0
+                    if self.background_tasks:
+                        yield Static("Active", classes="section-heading")
+                        for task in self.background_tasks:
+                            yield BackgroundTaskRow(task, row_index, self.agent_id, id=f"task_row_{row_index}")
+                            row_index += 1
+                    if self.recent_tasks:
+                        yield Static("Recent", classes="section-heading")
+                        for task in self.recent_tasks:
+                            yield BackgroundTaskRow(task, row_index, self.agent_id, id=f"task_row_{row_index}")
+                            row_index += 1
 
             # Footer
             with Container(classes="modal-footer"):

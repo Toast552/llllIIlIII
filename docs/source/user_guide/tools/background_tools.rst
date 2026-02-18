@@ -36,9 +36,13 @@ MassGen exposes a consistent lifecycle:
 5. Cancel with ``custom_tool__cancel_background_tool`` if no longer needed
 6. Inspect all jobs with ``custom_tool__list_background_tools``
 
+.. important::
+
+   Lifecycle tools use ``job_id`` (background job identifier), not tool-specific IDs such as ``subagent_id``.
+
 You can request background execution in two ways:
 
-* Preferred for normal custom tool calls: include ``async: true`` (or ``mode: background``) on the original tool call
+* Preferred for normal custom tool calls: include ``background: true`` (or ``mode: background``) on the original tool call
 * Explicit management flow: call ``custom_tool__start_background_tool`` with target ``tool_name`` and ``arguments``
 
 How Waiting Works
@@ -63,6 +67,18 @@ Recommended pattern:
 2. Continue foreground work
 3. When blocked, use ``custom_tool__wait_for_background_tool``
 4. Fetch final payload with ``custom_tool__get_background_tool_result`` as needed
+
+Subagents + Background Lifecycle
+--------------------------------
+
+For subagent work, keep these roles separate:
+
+* ``spawn_subagents``: starts subagent work
+* ``list_subagents``: discovery/index of subagent metadata (status, workspace, session pointers)
+* ``custom_tool__*background*`` lifecycle tools: status/result/wait/cancel management for background jobs
+
+When cancelling a background subagent flow, call ``custom_tool__cancel_background_tool(job_id)`` with the
+background job ID returned by the lifecycle system.
 
 Backend Notes
 -------------

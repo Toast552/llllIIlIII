@@ -27,7 +27,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import fastmcp
 
@@ -49,7 +49,7 @@ BACKGROUND_TOOL_MANAGEMENT_NAMES = {
     BACKGROUND_TOOL_WAIT_NAME,
 }
 BACKGROUND_TOOL_TERMINAL_STATUSES = {"completed", "error", "cancelled"}
-BACKGROUND_CONTROL_MODES = {"background", "async"}
+BACKGROUND_CONTROL_MODES = {"background"}
 FOREGROUND_CONTROL_MODES = {"foreground", "blocking", "sync"}
 BACKGROUND_TOOL_WAIT_DEFAULT_TIMEOUT_SECONDS = 30.0
 BACKGROUND_TOOL_WAIT_MAX_TIMEOUT_SECONDS = 600.0
@@ -78,8 +78,6 @@ def _is_default_media_background_tool(tool_name: str) -> bool:
 
 def _is_explicit_foreground_request(arguments: Dict[str, Any]) -> bool:
     """Return True when args explicitly request foreground/blocking behavior."""
-    if arguments.get("async") is False or arguments.get("async_") is False:
-        return True
     if arguments.get("background") is False:
         return True
     if arguments.get("run_in_background") is False:
@@ -98,19 +96,32 @@ def _should_auto_background_execution(tool_name: str, arguments: Dict[str, Any])
         return True
     mode = arguments.get("mode")
     mode_is_background = isinstance(mode, str) and mode.lower() in BACKGROUND_CONTROL_MODES
-    return arguments.get("async") is True or arguments.get("async_") is True or mode_is_background
+    return arguments.get("background") is True or mode_is_background
 
 
-def _strip_background_control_args(arguments: Dict[str, Any]) -> Dict[str, Any]:
-    """Strip background control args before normal tool execution."""
+def _strip_background_control_args(
+    arguments: Dict[str, Any],
+    control_args_to_strip: Optional[Set[str]] = None,
+) -> Dict[str, Any]:
+    """Strip background control args before normal tool execution.
+
+    Args:
+        arguments: Raw tool arguments.
+        control_args_to_strip: Optional explicit set of control arg names to strip.
+            When omitted, strips all known background control fields for backwards
+            compatibility. Callers should pass synthetic-only controls when a tool
+            defines real parameters like `background`.
+    """
+    controls = {"mode", "background", "run_in_background"} if control_args_to_strip is None else set(control_args_to_strip)
     cleaned = dict(arguments)
-    cleaned.pop("async", None)
-    cleaned.pop("async_", None)
-    cleaned.pop("background", None)
-    cleaned.pop("run_in_background", None)
-    mode = cleaned.get("mode")
-    if mode is None or (isinstance(mode, str) and mode.lower() in BACKGROUND_CONTROL_MODES):
-        cleaned.pop("mode", None)
+    if "background" in controls:
+        cleaned.pop("background", None)
+    if "run_in_background" in controls:
+        cleaned.pop("run_in_background", None)
+    if "mode" in controls:
+        mode = cleaned.get("mode")
+        if mode is None or (isinstance(mode, str) and mode.lower() in BACKGROUND_CONTROL_MODES):
+            cleaned.pop("mode", None)
     return cleaned
 
 
@@ -936,19 +947,6 @@ def _register_mcp_tool(
         signature_to_input_name["mode"] = "mode"
         synthetic_control_input_names.add("mode")
 
-    if "async" not in properties and "async_" not in properties:
-        params.append(
-            inspect.Parameter(
-                "async_",
-                inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                default=None,
-                annotation=Optional[bool],
-            ),
-        )
-        handler_annotations["async_"] = Optional[bool]
-        signature_to_input_name["async_"] = "async"
-        synthetic_control_input_names.add("async")
-
     if "background" not in properties:
         params.append(
             inspect.Parameter(
@@ -970,9 +968,17 @@ def _register_mcp_tool(
             input_kwargs[input_name] = value
 
         if background_manager and _should_auto_background_execution(tool_name, input_kwargs):
+            control_args_to_strip = set(synthetic_control_input_names)
+            # Legacy control alias should never be forwarded unless a tool
+            # explicitly declares it (rare).
+            if "run_in_background" not in properties:
+                control_args_to_strip.add("run_in_background")
             payload = await background_manager.start(
                 tool_name=tool_name,
-                arguments=_strip_background_control_args(input_kwargs),
+                arguments=_strip_background_control_args(
+                    input_kwargs,
+                    control_args_to_strip=control_args_to_strip,
+                ),
             )
             if payload.get("success"):
                 payload.setdefault("status", "background")

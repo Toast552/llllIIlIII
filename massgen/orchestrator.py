@@ -333,7 +333,7 @@ class Orchestrator(ChatAgent):
         # Human input hook for injecting user input during execution
         # Shared across all agents (one per orchestration session)
         self._human_input_hook: Optional[HumanInputHook] = None
-        # Async subagent completion tracking
+        # Background subagent completion tracking
         # Stores pending results for each parent agent until they can be injected
         # Format: {parent_agent_id: [(subagent_id, SubagentResult), ...]}
         self._pending_subagent_results: Dict[str, List[Tuple[str, "SubagentResult"]]] = {}
@@ -342,12 +342,12 @@ class Orchestrator(ChatAgent):
         # Format: {agent_id: set(subagent_id, ...)}
         self._injected_subagents: Dict[str, Set[str]] = {}
 
-        # Async subagent configuration (parsed from coordination_config)
-        async_subagent_config = {}
+        # Background subagent configuration (parsed from coordination_config)
+        background_subagent_config = {}
         if hasattr(self.config, "coordination_config"):
-            async_subagent_config = getattr(self.config.coordination_config, "async_subagents", {}) or {}
-        self._async_subagents_enabled = async_subagent_config.get("enabled", True)
-        self._async_subagent_injection_strategy = async_subagent_config.get("injection_strategy", "tool_result")
+            background_subagent_config = getattr(self.config.coordination_config, "background_subagents", {}) or {}
+        self._background_subagents_enabled = background_subagent_config.get("enabled", True)
+        self._background_subagent_injection_strategy = background_subagent_config.get("injection_strategy", "tool_result")
 
         # Agent startup rate limiting (per model)
         # Load from centralized configuration file instead of hardcoding
@@ -1739,6 +1739,23 @@ class Orchestrator(ChatAgent):
                 parent_coordination_config["enable_agent_task_planning"] = coord_cfg.enable_agent_task_planning
             if hasattr(coord_cfg, "task_planning_filesystem_mode"):
                 parent_coordination_config["task_planning_filesystem_mode"] = coord_cfg.task_planning_filesystem_mode
+            use_skills = getattr(coord_cfg, "use_skills", False)
+            enabled_skill_names = getattr(coord_cfg, "enabled_skill_names", None)
+            if use_skills or enabled_skill_names is not None:
+                parent_coordination_config["use_skills"] = True
+                parent_coordination_config["massgen_skills"] = getattr(coord_cfg, "massgen_skills", []) or []
+                parent_coordination_config["skills_directory"] = getattr(
+                    coord_cfg,
+                    "skills_directory",
+                    ".agent/skills",
+                )
+                parent_coordination_config["load_previous_session_skills"] = getattr(
+                    coord_cfg,
+                    "load_previous_session_skills",
+                    False,
+                )
+                if enabled_skill_names is not None:
+                    parent_coordination_config["enabled_skill_names"] = enabled_skill_names
             if hasattr(coord_cfg, "subagent_round_timeouts") and coord_cfg.subagent_round_timeouts:
                 parent_coordination_config["subagent_round_timeouts"] = coord_cfg.subagent_round_timeouts
 
@@ -1770,6 +1787,9 @@ class Orchestrator(ChatAgent):
         default_timeout = 300
         min_timeout = 60
         max_timeout = 600
+        subagent_runtime_mode = "isolated"
+        subagent_runtime_fallback_mode = ""
+        subagent_host_launch_prefix: List[str] = []
         subagent_orchestrator_config_json = "{}"
         if hasattr(self.config, "coordination_config"):
             if hasattr(self.config.coordination_config, "subagent_max_concurrent"):
@@ -1785,6 +1805,15 @@ class Orchestrator(ChatAgent):
                 so_config = self.config.coordination_config.subagent_orchestrator
                 if so_config:
                     subagent_orchestrator_config_json = json.dumps(so_config.to_dict())
+            if hasattr(self.config.coordination_config, "subagent_runtime_mode"):
+                subagent_runtime_mode = self.config.coordination_config.subagent_runtime_mode or "isolated"
+            if hasattr(self.config.coordination_config, "subagent_runtime_fallback_mode"):
+                fallback_mode = self.config.coordination_config.subagent_runtime_fallback_mode
+                subagent_runtime_fallback_mode = fallback_mode if fallback_mode else ""
+            if hasattr(self.config.coordination_config, "subagent_host_launch_prefix"):
+                host_launch_prefix = self.config.coordination_config.subagent_host_launch_prefix
+                if isinstance(host_launch_prefix, list):
+                    subagent_host_launch_prefix = host_launch_prefix
 
         # Discover and serialize specialized subagent types for the MCP server
         specialized_subagents_path = ""
@@ -1854,6 +1883,12 @@ class Orchestrator(ChatAgent):
             coordination_config_path,
             "--specialized-subagents-file",
             specialized_subagents_path,
+            "--runtime-mode",
+            subagent_runtime_mode,
+            "--runtime-fallback-mode",
+            subagent_runtime_fallback_mode,
+            "--host-launch-prefix",
+            json.dumps(subagent_host_launch_prefix),
         ]
 
         # Build env for the MCP server process. Codex replaces (not merges)
@@ -5351,6 +5386,9 @@ Your answer:"""
             if not list_result.get("success") or not list_result.get("subagents"):
                 return []
 
+            # Import here to avoid circular import at module load.
+            from massgen.subagent.models import SubagentResult as RuntimeSubagentResult
+
             # Find completed subagents that haven't been injected yet
             pending_results = []
             for subagent_info in list_result["subagents"]:
@@ -5361,34 +5399,32 @@ Your answer:"""
                 if status != "completed" or subagent_id in self._injected_subagents[agent_id]:
                     continue
 
-                # Fetch the subagent's result
-                result_response = agent.mcp_client.call_tool(
-                    f"mcp__subagent_{agent_id}__get_subagent_result",
-                    {"subagent_id": subagent_id},
-                )
+                # list_subagents includes a full result payload for completed in-memory
+                # subagents. Registry-only historical entries may not include it.
+                result_data = subagent_info.get("result")
+                if not isinstance(result_data, dict):
+                    continue
 
-                if result_response.get("success") and result_response.get("result"):
-                    # Import SubagentResult here to avoid circular import
-                    from massgen.subagent.models import SubagentResult
-
-                    result_data = result_response["result"]
-                    result = SubagentResult(
+                try:
+                    result = RuntimeSubagentResult.from_dict(result_data)
+                except Exception:
+                    result = RuntimeSubagentResult(
                         subagent_id=result_data.get("subagent_id", subagent_id),
                         success=result_data.get("success", False),
-                        status=result_data.get("status", "unknown"),
+                        status=result_data.get("status", "error"),
                         answer=result_data.get("answer", ""),
                         error=result_data.get("error"),
-                        workspace_path=result_data.get("workspace_path", ""),
+                        workspace_path=result_data.get("workspace_path", result_data.get("workspace", "")),
                         execution_time_seconds=result_data.get("execution_time_seconds", 0.0),
                         token_usage=result_data.get("token_usage", {}),
                     )
 
-                    pending_results.append((subagent_id, result))
-                    # Mark as injected
-                    self._injected_subagents[agent_id].add(subagent_id)
-                    logger.debug(
-                        f"[Orchestrator] Fetched completed subagent {subagent_id} for {agent_id} " f"(status={result.status})",
-                    )
+                pending_results.append((subagent_id, result))
+                # Mark as injected
+                self._injected_subagents[agent_id].add(subagent_id)
+                logger.debug(
+                    f"[Orchestrator] Fetched completed subagent {subagent_id} for {agent_id} " f"(status={result.status})",
+                )
 
             if pending_results:
                 logger.debug(
@@ -5599,10 +5635,10 @@ Your answer:"""
             self._share_human_input_hook_with_display()
         manager.register_global_hook(HookType.POST_TOOL_USE, self._human_input_hook)
 
-        # Register subagent completion hook for async result injection
-        if self._async_subagents_enabled:
+        # Register subagent completion hook for background result injection
+        if self._background_subagents_enabled:
             subagent_hook = SubagentCompleteHook(
-                injection_strategy=self._async_subagent_injection_strategy,
+                injection_strategy=self._background_subagent_injection_strategy,
             )
 
             # Create a closure that captures agent_id for pending results retrieval
@@ -6014,10 +6050,10 @@ Your answer:"""
             self._share_human_input_hook_with_display()
         manager.register_global_hook(HookType.POST_TOOL_USE, self._human_input_hook)
 
-        # Register subagent completion hook for async result injection
-        if self._async_subagents_enabled:
+        # Register subagent completion hook for background result injection
+        if self._background_subagents_enabled:
             subagent_hook = SubagentCompleteHook(
-                injection_strategy=self._async_subagent_injection_strategy,
+                injection_strategy=self._background_subagent_injection_strategy,
             )
 
             # Create a closure that captures agent_id for pending results retrieval
@@ -6183,7 +6219,7 @@ Your answer:"""
         for agent_id, pending in self._pending_subagent_results.items():
             if pending:
                 logger.warning(
-                    f"[Orchestrator] {len(pending)} async subagent result(s) for {agent_id} " f"were not delivered (parent finished before injection). " f"IDs: {[p[0] for p in pending]}",
+                    f"[Orchestrator] {len(pending)} background subagent result(s) for {agent_id} " f"were not delivered (parent finished before injection). " f"IDs: {[p[0] for p in pending]}",
                 )
                 # Clear the pending results since they won't be delivered
                 self._pending_subagent_results[agent_id] = []

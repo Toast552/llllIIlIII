@@ -1,7 +1,7 @@
 ---
 name: explorer
 description: Research, discover code by meaning, gather information, report findings
-default_async: true
+default_background: true
 default_refine: false
 skills:
   - file-search

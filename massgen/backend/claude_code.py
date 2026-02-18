@@ -1294,7 +1294,10 @@ class ClaudeCodeBackend(NativeToolBackendMixin, StreamingBufferMixin, LLMBackend
         if not force_foreground:
             auto_background = self._should_auto_background_execution(tool_name, parsed_args)
         if auto_background:
-            background_args = self._strip_background_control_args(parsed_args)
+            background_args = self._strip_background_control_args(
+                parsed_args,
+                tool_name=tool_name,
+            )
             try:
                 background_job = await self._start_background_tool_job(
                     tool_name=tool_name,
@@ -1320,10 +1323,13 @@ class ClaudeCodeBackend(NativeToolBackendMixin, StreamingBufferMixin, LLMBackend
             }
 
         # Media tools default to background mode, so explicit foreground
-        # overrides may include control args (for example async=false).
+        # overrides may include control args (for example background=false).
         # Strip these before direct execution.
         if self._is_default_media_background_tool(tool_name):
-            parsed_args = self._strip_background_control_args(parsed_args)
+            parsed_args = self._strip_background_control_args(
+                parsed_args,
+                tool_name=tool_name,
+            )
 
         if not self._custom_tool_manager:
             return {
@@ -1410,18 +1416,45 @@ class ClaudeCodeBackend(NativeToolBackendMixin, StreamingBufferMixin, LLMBackend
             normalized = normalized[len(massgen_prefix) :]
         return normalized
 
-    @staticmethod
-    def _strip_background_control_args(arguments: Dict[str, Any]) -> Dict[str, Any]:
-        """Remove async/background control flags before dispatching target tools."""
+    def _mcp_tool_declares_argument(self, tool_name: str, argument_name: str) -> bool:
+        """Return True when a known MCP tool schema declares an argument."""
+        clients = [
+            getattr(self, "_mcp_client", None),
+            getattr(self, "_background_mcp_client", None),
+        ]
+        for client in clients:
+            tools = getattr(client, "tools", None)
+            if not isinstance(tools, dict) or tool_name not in tools:
+                continue
+            tool = tools[tool_name]
+            schema = getattr(tool, "inputSchema", None)
+            if not isinstance(schema, dict):
+                schema = getattr(tool, "parameters", None)
+            if not isinstance(schema, dict):
+                continue
+            properties = schema.get("properties")
+            if isinstance(properties, dict) and argument_name in properties:
+                return True
+        return False
+
+    def _strip_background_control_args(
+        self,
+        arguments: Dict[str, Any],
+        *,
+        tool_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Remove synthetic background control flags before dispatching target tools."""
         cleaned = dict(arguments)
-        if isinstance(cleaned.get("async"), bool):
-            cleaned.pop("async", None)
-        if isinstance(cleaned.get("background"), bool):
+        preserve_background = bool(tool_name) and self._mcp_tool_declares_argument(tool_name, "background")
+        preserve_run_in_background = bool(tool_name) and self._mcp_tool_declares_argument(tool_name, "run_in_background")
+        preserve_mode = bool(tool_name) and self._mcp_tool_declares_argument(tool_name, "mode")
+
+        if not preserve_background and isinstance(cleaned.get("background"), bool):
             cleaned.pop("background", None)
-        if isinstance(cleaned.get("run_in_background"), bool):
+        if not preserve_run_in_background and isinstance(cleaned.get("run_in_background"), bool):
             cleaned.pop("run_in_background", None)
         mode = cleaned.get("mode")
-        if isinstance(mode, str) and mode.lower() in {"background", "async"}:
+        if not preserve_mode and isinstance(mode, str) and mode.lower() in {"background"}:
             cleaned.pop("mode", None)
         return cleaned
 
@@ -1440,8 +1473,6 @@ class ClaudeCodeBackend(NativeToolBackendMixin, StreamingBufferMixin, LLMBackend
     @staticmethod
     def _is_explicit_foreground_request(arguments: Dict[str, Any]) -> bool:
         """Return True when args explicitly request foreground/blocking behavior."""
-        if arguments.get("async") is False:
-            return True
         if arguments.get("background") is False:
             return True
         if arguments.get("run_in_background") is False:
@@ -1467,8 +1498,8 @@ class ClaudeCodeBackend(NativeToolBackendMixin, StreamingBufferMixin, LLMBackend
             return True
 
         mode = arguments.get("mode")
-        mode_is_background = isinstance(mode, str) and mode.lower() in {"background", "async"}
-        return arguments.get("async") is True or mode_is_background
+        mode_is_background = isinstance(mode, str) and mode.lower() in {"background"}
+        return arguments.get("background") is True or mode_is_background
 
     def _validate_background_tool_prerequisites(self, tool_name: str) -> None:
         """Validate required prerequisites before starting a background tool."""

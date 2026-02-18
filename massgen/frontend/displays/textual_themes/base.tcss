@@ -7183,8 +7183,8 @@ SubagentColumn:hover {
 
 SubagentColumn:focus {
     background: $panel;
-    border-left: thick $primary;
-    padding-left: 0;
+    border-left: none;
+    padding-left: 1;
 }
 
 SubagentColumn .agent-header {
@@ -7282,9 +7282,17 @@ SubagentCard #subagent-columns {
 
 /* Option A: Refined Compact */
 SubagentCard.variant-a {
-    border-left: tall $secondary;
+    border-left: solid $secondary;
     padding-top: 0;
     padding-bottom: 0;
+}
+
+SubagentCard.variant-a:focus-within {
+    border-left: solid $primary;
+}
+
+SubagentCard.variant-a.all-completed {
+    border-left: solid $success;
 }
 
 SubagentCard.variant-a #subagent-card-title {

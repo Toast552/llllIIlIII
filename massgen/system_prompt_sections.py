@@ -2091,7 +2091,7 @@ class CommandExecutionSection(SystemPromptSection):
             "Order matters: create `CONTEXT.md` first, then start any `read_media`/`generate_media` background job.",
         )
         parts.append(
-            "Only run them in foreground when the user explicitly needs an immediate blocking result " "(set `async: false` on that call).",
+            "Only run them in foreground when the user explicitly needs an immediate blocking result " "(set `background: false` on that call).",
         )
         parts.append(
             "For `execute_command`, choose background mode only for long-running work " "(for example: test suites, installs, crawls, benchmarks, or long server runs).",
@@ -2103,13 +2103,13 @@ class CommandExecutionSection(SystemPromptSection):
             "For other tools, use your judgment: run in background when the call is slow and " "you can continue meaningful work without waiting for its result.",
         )
         parts.append(
-            "Simplest for custom tools: set `async: true` directly on the tool call " "(keep normal tool arguments unchanged).",
+            "Simplest for custom tools: set `background: true` directly on the tool call " "(keep normal tool arguments unchanged).",
         )
         parts.append(
             "Pass tool arguments as JSON objects (normal key/value fields), " "not escaped or stringified JSON blobs.",
         )
         parts.append(
-            "Use `custom_tool__start_background_tool` when you need wrapper-style lifecycle control " "or for tools where direct async control is not practical.",
+            "Use `custom_tool__start_background_tool` when you need wrapper-style lifecycle control " "or for tools where direct background control is not practical.",
         )
         parts.append("Use this lifecycle:")
         parts.append("- Start: `custom_tool__start_background_tool`")
@@ -2806,7 +2806,8 @@ Your goal is to iteratively refine answers until they meet the quality bar.
                     "**Mandatory Evaluator Check:** BEFORE calling `submit_checklist`, spawn your evaluator "
                     "subagent to verify your output. Do NOT serve websites, run test suites, or write "
                     "verification scripts yourself — delegate that procedural work to the evaluator. Read "
-                    "its report, then factor the findings into your T1-T5 scores."
+                    "its report, then factor the findings into your T1-T5 scores. If it includes "
+                    "suggestions, treat them as optional input and use your judgment for the final call."
                 )
             evaluation_section = f"""{analysis}
 
@@ -2992,7 +2993,8 @@ Both are terminal actions that end your round.
                         "**Mandatory Evaluator Check:** BEFORE calling `submit_checklist`, spawn your evaluator "
                         "subagent to verify your output. Do NOT serve websites, run test suites, or write "
                         "verification scripts yourself — delegate that procedural work to the evaluator. Read "
-                        "its report, then factor the findings into your T1-T5 scores."
+                        "its report, then factor the findings into your T1-T5 scores. If it includes "
+                        "suggestions, treat them as optional input and use your judgment for the final call."
                     )
                 return f"""**CHOOSING THE RIGHT TOOL — `new_answer` vs `stop`:**
 Both are terminal actions that end your round.
@@ -3523,9 +3525,13 @@ class SubagentSection(SystemPromptSection):
         ]
 
         for t in self.specialized_subagents:
-            async_str = "True" if t.default_async else "False"
+            background_str = "True" if t.default_background else "False"
             lines.append(f"**{t.name}** — {t.description}")
-            lines.append(f'`spawn_subagents(tasks=[{{"task": "...", "subagent_type": "{t.name}", "context_paths": []}}], async_={async_str})`')
+            lines.append(f'`spawn_subagents(tasks=[{{"task": "...", "subagent_type": "{t.name}", "context_paths": []}}], background={background_str})`')
+            if t.name.lower() == "evaluator":
+                lines.append(
+                    "Use this when the task is mostly programmatic execution/reporting (batch tests, Playwright flows, screenshot sweeps, scripted validation).",
+                )
             lines.append("")
 
         return "\n".join(lines)
@@ -3557,6 +3563,7 @@ Task D: Build website (deps: A, B, C)       ← Sequential, do yourself after A/
 **IDEAL USE CASES:**
 - **Research and exploration** - gathering information, searching, analyzing sources
 - **Parallel data collection** - multiple independent lookups that can run simultaneously
+- **Programmatic evaluation at scale** - batch test runs, Playwright verification, screenshot sweeps, repetitive scripted checks
 - Complex subtasks that benefit from fresh context (avoid context pollution)
 - Experimental operations you want isolated from your main workspace
 
@@ -3567,12 +3574,13 @@ Subagents are useful helpers but have limitations:
 - Don't blindly trust subagent results - verify and integrate thoughtfully
 - If a subagent produces something broken or incomplete, **you fix it** rather than reporting failure
 
-**EVALUATION DELEGATION (async pattern):**
+**EVALUATION DELEGATION (background pattern):**
 When your output needs testing or evaluation that involves procedural tool use, delegate it
-to an async subagent so you can keep working on implementation. Spawn with
-`async_=True, refine=False` — the subagent evaluates while you continue building.
+to a background subagent so you can keep working on implementation. Spawn with
+`background=True, refine=False` — the subagent evaluates while you continue building.
 
 Subagent handles (procedural observations):
+- High-volume batch workflows where execution is mostly mechanical and repeatable
 - Serving a website and taking screenshots, running Playwright tests, using read_media
 - Executing test suites, linters, or validation scripts against generated code
 - Running benchmarks, profiling, or performance measurements
@@ -3586,9 +3594,9 @@ You handle (analytical judgment):
 - Prioritizing which gaps matter most and what to build next
 
 The subagent returns a descriptive report of findings and observations — what it measured,
-what passed, what failed, what it saw. Trust its observations and measurements. Make your
-own judgments about quality and priorities, since you have the full context and the subagent
-may run on a simpler model.
+what passed, what failed, what it saw. It may include suggestions, but treat those as optional
+input. Trust its observations and measurements. Keep your judgment as the source of truth for
+quality and priorities, since you have the full context and the subagent may run on a simpler model.
 
 **AVOID SUBAGENTS FOR:**
 - Simple, quick operations you can do directly (overhead not worth it)
@@ -3691,7 +3699,7 @@ spawn_subagents(
         {{"task": "Create discography table in discography.md", "subagent_id": "discog", "context_paths": []}},
         {{"task": "List 20 famous songs with years in songs.md", "subagent_id": "songs", "context_paths": []}}
     ],
-    async_=False,  # True if run asynchronously (you check later), False to block until done
+    background=False,  # True to continue while subagent runs; False to wait for completion
     refine=False,  # True to allow subagents to refine their answers (more expensive and slower but better quality)
 )
 
@@ -3702,12 +3710,19 @@ spawn_subagents(
 # ])
 ```
 
-**async_ parameter:**
-- `async_=True`: Spawn in background and continue working. Results are automatically
-  injected when ready (on your next tool call). If auto-injection is not available, poll
-  manually with `check_subagent_status` and `get_subagent_result`. Use for evaluation
-  delegation and any work you can do in parallel.
-- `async_=False` (default): Wait for results before proceeding. Use when you need outputs to continue.
+**background parameter (async mode):**
+- `background=True`: Spawn in background and continue working asynchronously. Results are
+  often auto-injected on a later tool call.
+- If auto-injection is unavailable (or you need explicit control), use the standardized
+  background lifecycle tools:
+  - `custom_tool__get_background_tool_status(job_id)`
+  - `custom_tool__wait_for_background_tool(timeout_seconds?)`
+  - `custom_tool__get_background_tool_result(job_id)`
+  - `custom_tool__cancel_background_tool(job_id)`
+  - `custom_tool__list_background_tools(include_all=true)` to inspect all jobs
+- `list_subagents()` is a subagent discovery/index view (IDs, status, workspace, session_id);
+  do not treat it as the generic background job lifecycle manager, and do not pass `include_all` there.
+- `background=False` (default): Wait for results before proceeding. Use when you need outputs to continue.
 
 **refine parameter:**
 - `refine=True` (default): Multi-round refinement with voting. Higher quality, slower, more expensive. Use for complex analysis.
@@ -3715,11 +3730,10 @@ spawn_subagents(
 
 ## Available Tools
 
-- `spawn_subagents(tasks, async_?, refine?)` -- Max {self.max_concurrent} parallel tasks.
+- `spawn_subagents(tasks, background?, refine?)` -- Max {self.max_concurrent} parallel tasks.
   Each task must include `task` and explicit `context_paths` (can be `[]`).
-- `list_subagents()` - List all spawned subagents with status
-- `get_subagent_result(subagent_id)` - Get result from a completed subagent
-- `check_subagent_status(subagent_id)` - Check status of a subagent
+- `list_subagents()` - Discovery/index of spawned subagents (status, workspace, session_id)
+- `continue_subagent(subagent_id, message, timeout_seconds?)` - Continue an existing subagent conversation
 
 ## Result Format
 

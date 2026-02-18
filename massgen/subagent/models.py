@@ -31,7 +31,7 @@ class SpecializedSubagentConfig:
         name: Type identifier (e.g., "evaluator", "explorer")
         description: Short description of what this type does
         system_prompt: Full system prompt for the subagent (body of SUBAGENT.md)
-        default_async: Whether to spawn async by default
+        default_background: Whether to spawn in background mode by default
         default_refine: Whether to enable refinement by default
         skills: Skill names to pre-load for the subagent
         mcp_servers: MCP server names to ensure are available
@@ -41,7 +41,7 @@ class SpecializedSubagentConfig:
     name: str
     description: str
     system_prompt: str = ""
-    default_async: bool = False
+    default_background: bool = False
     default_refine: bool = False
     skills: List[str] = field(default_factory=list)
     mcp_servers: List[str] = field(default_factory=list)
@@ -53,7 +53,7 @@ class SpecializedSubagentConfig:
             "name": self.name,
             "description": self.description,
             "system_prompt": self.system_prompt,
-            "default_async": self.default_async,
+            "default_background": self.default_background,
             "default_refine": self.default_refine,
             "skills": self.skills.copy(),
             "mcp_servers": self.mcp_servers.copy(),
@@ -67,7 +67,7 @@ class SpecializedSubagentConfig:
             name=data["name"],
             description=data.get("description", ""),
             system_prompt=data.get("system_prompt", ""),
-            default_async=data.get("default_async", False),
+            default_background=data.get("default_background", False),
             default_refine=data.get("default_refine", False),
             skills=data.get("skills", []),
             mcp_servers=data.get("mcp_servers", []),

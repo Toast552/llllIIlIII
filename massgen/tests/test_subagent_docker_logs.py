@@ -218,6 +218,20 @@ class TestSubagentMcpConfigEnv:
         expected_timeout = orch.config.coordination_config.subagent_default_timeout + 60
         assert config["tool_timeout_sec"] == expected_timeout
 
+    def test_subagent_mcp_config_passes_runtime_isolation_args(self, tmp_path):
+        """Runtime mode/fallback/host-launch config should be forwarded to subagent MCP."""
+        orch, agent = self._make_orchestrator_and_agent(tmp_path)
+        orch.config.coordination_config.subagent_runtime_mode = "isolated"
+        orch.config.coordination_config.subagent_runtime_fallback_mode = "inherited"
+        orch.config.coordination_config.subagent_host_launch_prefix = ["host-launch", "--exec"]
+
+        config = orch._create_subagent_mcp_config("test_agent", agent)
+        args = config["args"]
+
+        assert self._get_arg(args, "--runtime-mode") == "isolated"
+        assert self._get_arg(args, "--runtime-fallback-mode") == "inherited"
+        assert json.loads(self._get_arg(args, "--host-launch-prefix")) == ["host-launch", "--exec"]
+
     def test_subagent_mcp_config_files_are_created_in_workspace(self, tmp_path, monkeypatch):
         """Temp config files should live in workspace so Docker-mounted MCP can read them."""
         orch, agent = self._make_orchestrator_and_agent(tmp_path)
@@ -270,3 +284,21 @@ class TestSubagentMcpConfigEnv:
         assert payload[0]["backend"]["enable_mcp_command_line"] is True
         assert payload[0]["backend"]["command_line_execution_mode"] == "docker"
         assert payload[0]["backend"]["enable_code_based_tools"] is True
+
+    def test_subagent_mcp_coordination_config_includes_skill_inheritance_fields(self, tmp_path):
+        """Parent skills settings should be serialized for subagent coordination inheritance."""
+        orch, agent = self._make_orchestrator_and_agent(tmp_path)
+        orch.config.coordination_config.use_skills = True
+        orch.config.coordination_config.massgen_skills = ["webapp-testing", "agent-browser"]
+        orch.config.coordination_config.skills_directory = ".agent/skills"
+        orch.config.coordination_config.load_previous_session_skills = True
+
+        config = orch._create_subagent_mcp_config("test_agent", agent)
+        args = config["args"]
+        coord_file = Path(self._get_arg(args, "--coordination-config-file"))
+        payload = json.loads(coord_file.read_text())
+
+        assert payload["use_skills"] is True
+        assert payload["massgen_skills"] == ["webapp-testing", "agent-browser"]
+        assert payload["skills_directory"] == ".agent/skills"
+        assert payload["load_previous_session_skills"] is True

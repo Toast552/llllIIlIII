@@ -17,6 +17,7 @@ import os
 import re
 import time
 from contextlib import nullcontext
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -1013,11 +1014,17 @@ class TimelineSection(ScrollableContainer):
             # Remove oldest items from DOM (but keep in cache for scroll-back)
             hidden_count = 0
             for child in prunable_children[:items_to_hide]:
-                # Don't hide tool cards that are still running
-                if hasattr(child, "tool_id") and child.tool_id in self._tools:
+                # Preserve high-signal cards in the live timeline.
+                if child.__class__.__name__ == "SubagentCard":
+                    self._log("[TRIM] Skipping subagent card")
+                    continue
+
+                # Don't hide tool cards that are still running or backgrounded.
+                if isinstance(child, ToolCallCard) and child.tool_id in self._tools:
                     tool_card = self._tools.get(child.tool_id)
-                    if tool_card and hasattr(tool_card, "_status") and tool_card._status == "running":
-                        self._log(f"[TRIM] Skipping running tool: {child.tool_id}")
+                    tool_status = getattr(tool_card, "_status", "")
+                    if tool_card and tool_status in {"running", "background"}:
+                        self._log(f"[TRIM] Skipping active/background tool: {child.tool_id}")
                         continue
 
                 # Actually remove from DOM to free up space
@@ -1226,6 +1233,43 @@ class TimelineSection(ScrollableContainer):
                     },
                 )
         return bg_tools
+
+    def get_background_tool_history(self) -> list:
+        """Return background tool records with latest known status (active + recent)."""
+        terminal_statuses = {"completed", "error", "failed", "cancelled", "canceled", "stopped"}
+        running_statuses = {"running", "background", "pending", "queued"}
+        known_statuses = self._collect_known_background_statuses()
+        history = []
+
+        for tool_id, card in self._tools.items():
+            if card.status != "background":
+                continue
+
+            async_id = str(card._async_id or "").strip()
+            latest_status = known_statuses.get(async_id, "background") if async_id else "background"
+            normalized_status = latest_status.lower().strip()
+            is_active = normalized_status not in terminal_statuses
+            display_status = "running" if normalized_status in running_statuses else normalized_status
+
+            history.append(
+                {
+                    "tool_id": tool_id,
+                    "tool_name": card.tool_name,
+                    "display_name": card._display_name,
+                    "tool_type": card.tool_type,
+                    "status": display_status,
+                    "latest_status": normalized_status,
+                    "is_active": is_active,
+                    "async_id": card._async_id,
+                    "start_time": card._start_time,
+                    "params": card._params_full if card._params_full else card._params,
+                    "result": card._result_full if card._result_full else card._result,
+                    "error": card._error,
+                },
+            )
+
+        history.sort(key=lambda item: item.get("start_time") or datetime.min)
+        return history
 
     # === Batch Card Methods ===
 

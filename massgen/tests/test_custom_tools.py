@@ -9,6 +9,7 @@ import os
 
 # Add parent directory to path for imports
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -688,8 +689,8 @@ class TestResponseBackendCustomTools:
         assert not result_str.startswith("Error:")
 
     @pytest.mark.asyncio
-    async def test_execute_tool_with_logging_auto_background_from_async_flag(self):
-        """Tool calls with async=true should be scheduled in background automatically."""
+    async def test_execute_tool_with_logging_auto_background_from_background_flag(self):
+        """Tool calls with background=true should be scheduled automatically."""
         backend = ResponseBackend(
             api_key=self.api_key,
             custom_tools=[{"func": async_weather_fetcher}],
@@ -699,7 +700,7 @@ class TestResponseBackendCustomTools:
         call = {
             "name": "custom_tool__async_weather_fetcher",
             "call_id": "auto-bg-call",
-            "arguments": json.dumps({"city": "Tokyo", "async": True}),
+            "arguments": json.dumps({"city": "Tokyo", "background": True}),
         }
         config = ToolExecutionConfig(
             tool_type="custom",
@@ -733,6 +734,74 @@ class TestResponseBackendCustomTools:
         assert result_payload["status"] == "background"
         assert result_payload["job_id"]
 
+    @pytest.mark.asyncio
+    async def test_execute_tool_with_logging_auto_background_preserves_real_mcp_background_param(
+        self,
+        monkeypatch,
+    ):
+        """MCP tools that define background should keep it when auto-backgrounded."""
+        backend = ResponseBackend(api_key=self.api_key)
+        backend._execution_context = ExecutionContext(messages=[], agent_id="agent_a")
+        backend._mcp_functions["mcp__subagent_agent_a__spawn_subagents"] = types.SimpleNamespace(
+            parameters={
+                "type": "object",
+                "properties": {
+                    "tasks": {"type": "array", "items": {"type": "object"}},
+                    "background": {"type": "boolean"},
+                },
+            },
+        )
+
+        captured: dict = {}
+
+        class _FakeJob:
+            job_id = "bgtool_test_mcp"
+            tool_name = "mcp__subagent_agent_a__spawn_subagents"
+
+        async def fake_start_background_job(*, tool_name, arguments, source_call_id=None):  # noqa: ARG001
+            captured["tool_name"] = tool_name
+            captured["arguments"] = arguments
+            return _FakeJob()
+
+        monkeypatch.setattr(backend, "_start_background_tool_job", fake_start_background_job)
+
+        call = {
+            "name": "mcp__subagent_agent_a__spawn_subagents",
+            "call_id": "auto-bg-mcp-call",
+            "arguments": json.dumps(
+                {
+                    "tasks": [{"task": "test task"}],
+                    "background": True,
+                },
+            ),
+        }
+        config = ToolExecutionConfig(
+            tool_type="mcp",
+            chunk_type="mcp_tool_status",
+            emoji_prefix="🔧 [MCP]",
+            success_emoji="✅ [MCP]",
+            error_emoji="❌ [MCP Error]",
+            source_prefix="mcp_",
+            status_called="mcp_tool_called",
+            status_response="mcp_tool_response",
+            status_error="mcp_tool_error",
+            execution_callback=backend._execute_mcp_function_with_retry,
+        )
+        updated_messages = []
+        processed_call_ids = set()
+
+        async for _ in backend._execute_tool_with_logging(
+            call,
+            config,
+            updated_messages,
+            processed_call_ids,
+        ):
+            pass
+
+        assert "auto-bg-mcp-call" in processed_call_ids
+        assert captured["tool_name"] == "mcp__subagent_agent_a__spawn_subagents"
+        assert captured["arguments"]["background"] is True
+
     def test_media_tools_default_to_background_mode(self):
         """read_media and generate_media should auto-background unless explicitly foreground."""
         backend = ResponseBackend(api_key=self.api_key)
@@ -744,7 +813,7 @@ class TestResponseBackendCustomTools:
         assert (
             backend._should_auto_background_execution(
                 "custom_tool__read_media",
-                {"async": False},
+                {"background": False},
             )
             is False
         )
@@ -1075,7 +1144,7 @@ class TestMcpToolSchemaTypes:
 class TestStripBackgroundControlArgs:
     """Tests for _strip_background_control_args.
 
-    Synthetic control parameters (mode, async, background) are added by
+    Synthetic control parameters (mode, background) are added by
     _register_mcp_tool for background scheduling.  They must be stripped
     before the arguments are passed to the actual tool execution, whether
     via the background path or the foreground path.
@@ -1094,32 +1163,23 @@ class TestStripBackgroundControlArgs:
         result = _strip_background_control_args(args)
         assert "mode" not in result
 
-    def test_strips_async_mode(self):
-        """mode='async' must be stripped."""
-        args = {"prompt": "goat", "mode": "async"}
-        result = _strip_background_control_args(args)
-        assert "mode" not in result
-
     def test_preserves_real_mode_value(self):
         """A tool's own 'mode' param (e.g., mode='image') must survive."""
         args = {"prompt": "goat", "mode": "image"}
         result = _strip_background_control_args(args)
         assert result["mode"] == "image"
 
-    def test_strips_async_flag(self):
-        args = {"prompt": "goat", "async": True}
-        result = _strip_background_control_args(args)
-        assert "async" not in result
-
-    def test_strips_async_underscore_flag(self):
-        args = {"prompt": "goat", "async_": True}
-        result = _strip_background_control_args(args)
-        assert "async_" not in result
-
     def test_strips_background_flag(self):
         args = {"prompt": "goat", "background": True}
         result = _strip_background_control_args(args)
         assert "background" not in result
+
+    def test_can_preserve_real_background_when_not_marked_control(self):
+        """Callers can strip only synthetic controls and keep real tool params."""
+        args = {"tasks": [{"task": "x"}], "background": True, "mode": None}
+        result = _strip_background_control_args(args, control_args_to_strip={"mode"})
+        assert result["background"] is True
+        assert "mode" not in result
 
     def test_strips_run_in_background_flag(self):
         args = {"prompt": "goat", "run_in_background": True}
@@ -1137,7 +1197,6 @@ class TestStripBackgroundControlArgs:
         args = {
             "file_path": "/workspace/output.png",
             "mode": None,
-            "async_": None,
             "background": None,
         }
         result = _strip_background_control_args(args)

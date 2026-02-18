@@ -4,6 +4,7 @@ Textual Terminal Display for MassGen Coordination
 
 """
 
+import ast
 import functools
 import json
 import os
@@ -215,6 +216,34 @@ def _parse_spawn_subagents_result(result_text: Any) -> Optional[Dict[str, Any]]:
     return parsed
 
 
+def _parse_spawn_subagents_args(args_payload: Any) -> Optional[Dict[str, Any]]:
+    """Parse spawn_subagents args payloads across JSON/repr encodings."""
+    if isinstance(args_payload, dict):
+        return args_payload
+    if not isinstance(args_payload, str):
+        return None
+
+    raw = args_payload.strip()
+    if not raw:
+        return None
+
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+
+    try:
+        parsed = ast.literal_eval(raw)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+
+    return None
+
+
 def _extract_spawned_subagents(result_text: Any) -> tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
     """Return normalized spawn_subagents payload plus extracted subagent entries."""
     result_data = _parse_spawn_subagents_result(result_text)
@@ -230,6 +259,12 @@ def _extract_spawned_subagents(result_text: Any) -> tuple[Optional[Dict[str, Any
 
     spawned = [entry for entry in spawned_raw if isinstance(entry, dict)]
     return result_data, spawned
+
+
+def _subagent_card_dom_id(call_id: Any) -> str:
+    """Build a safe, deterministic DOM id for subagent cards."""
+    safe_call_id = re.sub(r"[^a-zA-Z0-9_-]", "_", str(call_id or "subagent"))
+    return f"subagent_{safe_call_id}"
 
 
 def _map_subagent_status(raw_status: Any, completion_percentage: Optional[int] = None) -> tuple[str, int]:
@@ -6000,7 +6035,7 @@ Type your question and press Enter to ask the agents.
                     )
                 return
 
-            card_id = f"subagent_{call_id}"
+            card_id = _subagent_card_dom_id(call_id)
             card: Optional[SubagentCard] = None
             try:
                 card = timeline.query_one(f"#{card_id}", SubagentCard)
@@ -6018,7 +6053,11 @@ Type your question and press Enter to ask the agents.
                     status_callback=status_callback,
                     id=card_id,
                 )
-                timeline.add_widget(card)
+                round_number = max(
+                    1,
+                    int(getattr(panel, "_current_round", getattr(timeline, "_viewed_round", 1)) or 1),
+                )
+                timeline.add_widget(card, round_number=round_number)
 
         def update_runtime_subagent_card(
             self,
@@ -6127,7 +6166,7 @@ Type your question and press Enter to ask the agents.
             except Exception:
                 return
 
-            card_id = f"subagent_{call_id}"
+            card_id = _subagent_card_dom_id(call_id)
             try:
                 card = timeline.query_one(f"#{card_id}", SubagentCard)
             except Exception:
@@ -6250,10 +6289,14 @@ Type your question and press Enter to ask the agents.
                         panel._batch_tracker.mark_content_arrived()
                         panel._batch_tracker.finalize_current_batch()
 
-                    # Remove stale SubagentCards from failed spawn attempts
+                    # Remove stale duplicate card for the same tool call only.
+                    card_dom_id = _subagent_card_dom_id(call_id)
                     try:
                         for old_card in list(timeline.query(SubagentCard)):
-                            old_card.remove()
+                            old_id = getattr(old_card, "id", "")
+                            old_tool_call_id = getattr(old_card, "tool_call_id", None) or getattr(old_card, "_tool_call_id", None)
+                            if old_id == card_dom_id or str(old_tool_call_id) == str(call_id):
+                                old_card.remove()
                     except Exception as e:
                         tui_log(f"[TextualDisplay] {e}")
 
@@ -6262,14 +6305,19 @@ Type your question and press Enter to ask the agents.
                         seed_subagents=subagents,
                     )
 
+                    round_number = max(
+                        1,
+                        int(getattr(panel, "_current_round", getattr(timeline, "_viewed_round", 1)) or 1),
+                    )
+
                     # Create and add SubagentCard to timeline
                     card = SubagentCard(
                         subagents=subagents,
                         tool_call_id=call_id,
                         status_callback=status_callback,
-                        id=f"subagent_{call_id}",
+                        id=card_dom_id,
                     )
-                    timeline.add_widget(card)
+                    timeline.add_widget(card, round_number=round_number)
                     tui_log(
                         f"show_subagent_card_from_spawn: added SubagentCard with {len(subagents)} pending subagents",
                     )
@@ -9209,11 +9257,12 @@ Type your question and press Enter to ask the agents.
 
         def on_background_tasks_clicked(self, event: BackgroundTasksClicked) -> None:
             """Handle background tasks label click in ribbon."""
-            background_tasks = self._collect_background_tools_for_agent(event.agent_id)
-            if background_tasks:
+            background_tasks, recent_tasks = self._collect_background_tools_for_agent(event.agent_id)
+            if background_tasks or recent_tasks:
                 self._show_modal_async(
                     BackgroundTasksModal(
                         background_tasks,
+                        recent_tasks=recent_tasks,
                         agent_id=event.agent_id,
                     ),
                 )
@@ -9472,40 +9521,62 @@ Type your question and press Enter to ask the agents.
                 self.notify("No agent selected", severity="warning")
 
         def _collect_background_tools(self) -> List[Dict[str, Any]]:
-            """Collect background jobs across all agent panels."""
-            tasks: List[Dict[str, Any]] = []
+            """Collect active background jobs across all agent panels."""
+            active, _recent = self._collect_background_activity()
+            return active
+
+        @staticmethod
+        def _sort_background_tasks(tasks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            """Sort background task records chronologically by start time."""
+            return sorted(tasks, key=lambda item: item.get("start_time") or datetime.min)
+
+        def _collect_background_activity(self) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+            """Collect active + recent background jobs across all agent panels."""
+            active_tasks: List[Dict[str, Any]] = []
+            recent_tasks: List[Dict[str, Any]] = []
             for agent_id, panel in self.agent_widgets.items():
-                get_tools = getattr(panel, "_get_background_tools", None)
-                if not callable(get_tools):
-                    continue
+                panel_active, panel_recent = self._collect_background_tools_for_agent(agent_id)
+                active_tasks.extend(panel_active)
+                recent_tasks.extend(panel_recent)
+            return self._sort_background_tasks(active_tasks), self._sort_background_tasks(recent_tasks)
+
+        def _collect_background_tools_for_agent(self, agent_id: str) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+            """Collect active + recent background jobs from a single agent panel."""
+            panel = self.agent_widgets.get(agent_id)
+            if panel is None:
+                return [], []
+
+            get_history = getattr(panel, "_get_background_tool_history", None)
+            if callable(get_history):
                 try:
-                    panel_tasks = get_tools() or []
+                    history_items = get_history() or []
                 except Exception as e:
                     tui_log(f"[TextualDisplay] {e}")
-                    continue
-                for task in panel_tasks:
+                    history_items = []
+                active: List[Dict[str, Any]] = []
+                recent: List[Dict[str, Any]] = []
+                for task in history_items:
                     if not isinstance(task, dict):
                         continue
                     merged_task = dict(task)
                     merged_task.setdefault("agent_id", agent_id)
-                    tasks.append(merged_task)
-            return tasks
-
-        def _collect_background_tools_for_agent(self, agent_id: str) -> List[Dict[str, Any]]:
-            """Collect background jobs from a single agent panel."""
-            panel = self.agent_widgets.get(agent_id)
-            if panel is None:
-                return []
+                    is_active = bool(merged_task.get("is_active", True))
+                    if is_active:
+                        active.append(merged_task)
+                    else:
+                        recent.append(merged_task)
+                if active or recent:
+                    return self._sort_background_tasks(active), self._sort_background_tasks(recent)
 
             get_tools = getattr(panel, "_get_background_tools", None)
             if not callable(get_tools):
-                return []
+                return [], []
 
             try:
                 panel_tasks = get_tools() or []
             except Exception as e:
                 tui_log(f"[TextualDisplay] {e}")
-                return []
+                return [], []
 
             tasks: List[Dict[str, Any]] = []
             for task in panel_tasks:
@@ -9514,7 +9585,7 @@ Type your question and press Enter to ask the agents.
                 merged_task = dict(task)
                 merged_task.setdefault("agent_id", agent_id)
                 tasks.append(merged_task)
-            return tasks
+            return self._sort_background_tasks(tasks), []
 
         def _update_running_tools_count(self) -> None:
             """Refresh status-bar tool counters across all agent panels."""
@@ -9554,11 +9625,16 @@ Type your question and press Enter to ask the agents.
 
         def action_open_background_tools(self) -> None:
             """Open modal showing active background tool jobs."""
-            background_tasks = self._collect_background_tools()
-            if not background_tasks:
+            background_tasks, recent_tasks = self._collect_background_activity()
+            if not background_tasks and not recent_tasks:
                 self.notify("No background jobs running", severity="warning", timeout=3)
                 return
-            self._show_modal_async(BackgroundTasksModal(background_tasks))
+            self._show_modal_async(
+                BackgroundTasksModal(
+                    background_tasks,
+                    recent_tasks=recent_tasks,
+                ),
+            )
 
         def action_open_cost_breakdown(self):
             """Open cost breakdown modal."""
@@ -11820,7 +11896,12 @@ Type your question and press Enter to ask the agents.
             tool_lower = tool_name.lower()
             return any(st in tool_lower for st in subagent_tools)
 
-        def _show_subagent_card_from_args(self, tool_data, timeline) -> None:
+        def _show_subagent_card_from_args(
+            self,
+            tool_data,
+            timeline,
+            round_number: Optional[int] = None,
+        ) -> None:
             """Show SubagentCard when spawn_subagents tool starts, parsing tasks from args.
 
             This allows users to see subagents as they're being spawned, not just after completion.
@@ -11828,12 +11909,10 @@ Type your question and press Enter to ask the agents.
             should create the card immediately. This path only runs when the "running" chunk
             arrives (which may be delayed due to stream buffering).
             """
-            import json
-
             from massgen.subagent.models import SubagentDisplayData
 
             # Check if card already exists (created by callback)
-            card_id = f"subagent_{tool_data.tool_id}"
+            card_id = _subagent_card_dom_id(tool_data.tool_id)
             try:
                 timeline.query_one(f"#{card_id}", SubagentCard)
                 tui_log(f"_show_subagent_card_from_args: card {card_id} already exists, skipping")
@@ -11845,7 +11924,8 @@ Type your question and press Enter to ask the agents.
             # (callback path might use a different ID scheme)
             try:
                 for existing_card in timeline.query(SubagentCard):
-                    if getattr(existing_card, "tool_call_id", None) == tool_data.tool_id:
+                    existing_tool_call_id = getattr(existing_card, "tool_call_id", None) or getattr(existing_card, "_tool_call_id", None)
+                    if str(existing_tool_call_id) == str(tool_data.tool_id):
                         tui_log(f"_show_subagent_card_from_args: card for tool {tool_data.tool_id} already exists ({existing_card.id}), skipping")
                         return
             except Exception as e:
@@ -11857,13 +11937,9 @@ Type your question and press Enter to ask the agents.
                 tui_log("_show_subagent_card_from_args: no args_full")
                 return
 
-            try:
-                args_data = json.loads(args)
-            except (json.JSONDecodeError, TypeError):
-                tui_log(f"_show_subagent_card_from_args: failed to parse args: {args[:100]}")
-                return
-
-            if not isinstance(args_data, dict):
+            args_data = _parse_spawn_subagents_args(args)
+            if args_data is None:
+                tui_log(f"_show_subagent_card_from_args: failed to parse args: {str(args)[:100]}")
                 return
 
             # Extract tasks from args
@@ -11913,9 +11989,13 @@ Type your question and press Enter to ask the agents.
                 return
 
             # Create and add SubagentCard to timeline
-            import re as _re
-
-            _safe_id = _re.sub(r"[^a-zA-Z0-9_-]", "_", tool_data.tool_id)
+            resolved_round = round_number
+            if resolved_round is None:
+                resolved_round = getattr(self, "_current_round", getattr(timeline, "_viewed_round", 1))
+            try:
+                resolved_round = max(1, int(resolved_round or 1))
+            except Exception:
+                resolved_round = 1
             status_callback = None
             app = getattr(self, "app", None)
             if app and hasattr(app, "_build_spawn_status_callback"):
@@ -11930,9 +12010,9 @@ Type your question and press Enter to ask the agents.
                 subagents=subagents,
                 tool_call_id=tool_data.tool_id,
                 status_callback=status_callback,
-                id=f"subagent_{_safe_id}",
+                id=card_id,
             )
-            timeline.add_widget(card)
+            timeline.add_widget(card, round_number=resolved_round)
             tui_log(f"_show_subagent_card_from_args: added SubagentCard with {len(subagents)} pending subagents")
 
         def _update_subagent_card_with_results(self, tool_data, timeline) -> None:
@@ -11941,7 +12021,7 @@ Type your question and press Enter to ask the agents.
             Called when spawn_subagents tool completes to update status, progress, answers, etc.
             """
             # Find existing card - check both possible IDs since callback might use different ID
-            card_id = f"subagent_{tool_data.tool_id}"
+            card_id = _subagent_card_dom_id(tool_data.tool_id)
             card = None
             try:
                 card = timeline.query_one(f"#{card_id}", SubagentCard)
@@ -11949,20 +12029,28 @@ Type your question and press Enter to ask the agents.
             except Exception:
                 # Also try querying by tool_call_id if different
                 if hasattr(tool_data, "tool_call_id") and tool_data.tool_call_id != tool_data.tool_id:
-                    alt_id = f"subagent_{tool_data.tool_call_id}"
+                    alt_id = _subagent_card_dom_id(tool_data.tool_call_id)
                     try:
                         card = timeline.query_one(f"#{alt_id}", SubagentCard)
                         tui_log(f"_update_subagent_card_with_results: found card by tool_call_id: {alt_id}")
                     except Exception as e:
                         tui_log(f"[TextualDisplay] {e}")
 
-                # Try finding ANY SubagentCard in the timeline
+                # Try finding card by explicit tool_call_id metadata.
                 if card is None:
                     try:
                         cards = list(timeline.query(SubagentCard))
-                        if cards:
-                            card = cards[0]  # Use first matching card
-                            tui_log(f"_update_subagent_card_with_results: found card by query: {card.id}")
+                        target_ids = {str(tool_data.tool_id)}
+                        if hasattr(tool_data, "tool_call_id") and tool_data.tool_call_id:
+                            target_ids.add(str(tool_data.tool_call_id))
+                        for candidate in cards:
+                            candidate_tool_call_id = getattr(candidate, "tool_call_id", None) or getattr(candidate, "_tool_call_id", None)
+                            if candidate_tool_call_id is not None and str(candidate_tool_call_id) in target_ids:
+                                card = candidate
+                                tui_log(
+                                    "_update_subagent_card_with_results: " f"found card by metadata: {candidate.id}",
+                                )
+                                break
                     except Exception as e:
                         tui_log(f"[TextualDisplay] {e}")
 
@@ -12640,6 +12728,14 @@ Type your question and press Enter to ask the agents.
             try:
                 timeline = self.query_one(f"#{self._timeline_section_id}", TimelineSection)
                 return timeline.get_background_tools()
+            except Exception:
+                return []
+
+        def _get_background_tool_history(self) -> list:
+            """Get background job history (active + recent terminal statuses)."""
+            try:
+                timeline = self.query_one(f"#{self._timeline_section_id}", TimelineSection)
+                return timeline.get_background_tool_history()
             except Exception:
                 return []
 

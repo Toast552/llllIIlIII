@@ -205,6 +205,66 @@ async def test_registered_custom_tool_mode_background_auto_starts_job():
 
 
 @pytest.mark.asyncio
+async def test_registered_mcp_tool_preserves_real_background_param_for_auto_background():
+    """When a tool defines background itself, wrapper must pass it through."""
+
+    class _RecordingBackgroundManager:
+        def __init__(self):
+            self.calls = []
+
+        async def start(self, tool_name: str, arguments: dict):
+            self.calls.append({"tool_name": tool_name, "arguments": arguments})
+            return {
+                "success": True,
+                "status": "running",
+                "job_id": "bgtool_test123",
+                "tool_name": tool_name,
+            }
+
+    manager = _RecordingBackgroundManager()
+    mcp = fastmcp.FastMCP("test_mcp_tools")
+
+    _register_mcp_tool(
+        mcp=mcp,
+        tool_name="mcp__subagent_agent_a__spawn_subagents",
+        tool_desc="spawn subagents",
+        tool_params={
+            "type": "object",
+            "properties": {
+                "tasks": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                },
+                "background": {"type": "boolean"},
+            },
+            "required": ["tasks"],
+        },
+        tool_manager=ToolManager(),
+        execution_context={"agent_id": "agent_x"},
+        background_manager=manager,
+    )
+
+    handler = None
+    for tool in mcp._tool_manager._tools.values():
+        if tool.name == "mcp__subagent_agent_a__spawn_subagents":
+            handler = tool.fn
+            break
+    assert handler is not None
+
+    started = json.loads(
+        await handler(
+            tasks=[{"task": "test task"}],
+            background=True,
+        ),
+    )
+
+    assert started["success"] is True
+    assert manager.calls
+    assert manager.calls[0]["tool_name"] == "mcp__subagent_agent_a__spawn_subagents"
+    assert manager.calls[0]["arguments"]["background"] is True
+
+
+@pytest.mark.asyncio
 async def test_background_tool_manager_waits_for_next_completion():
     """Wait API should return the next unseen background job completion."""
     tool_manager = ToolManager()
@@ -291,7 +351,7 @@ def test_custom_tools_server_media_tools_default_to_background():
     assert (
         _should_auto_background_execution(
             "custom_tool__read_media",
-            {"async": False},
+            {"background": False},
         )
         is False
     )
@@ -299,6 +359,14 @@ def test_custom_tools_server_media_tools_default_to_background():
         _should_auto_background_execution(
             "custom_tool__generate_media",
             {"background": False},
+        )
+        is False
+    )
+    # Legacy async alias should not enable background dispatch anymore.
+    assert (
+        _should_auto_background_execution(
+            "custom_tool__slow_echo",
+            {"async": True},
         )
         is False
     )

@@ -1452,18 +1452,37 @@ class CustomToolAndMCPBackend(LLMBackend):
             return "mcp"
         return None
 
-    @staticmethod
-    def _strip_background_control_args(arguments: Dict[str, Any]) -> Dict[str, Any]:
-        """Remove async/background control flags before dispatching to target tools."""
+    def _mcp_tool_declares_argument(self, tool_name: str, argument_name: str) -> bool:
+        """Return True when an MCP tool schema explicitly declares an argument."""
+        function = self._mcp_functions.get(tool_name)
+        if not function:
+            return False
+        parameters = getattr(function, "parameters", None)
+        if not isinstance(parameters, dict):
+            return False
+        properties = parameters.get("properties")
+        if not isinstance(properties, dict):
+            return False
+        return argument_name in properties
+
+    def _strip_background_control_args(
+        self,
+        arguments: Dict[str, Any],
+        *,
+        tool_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Remove synthetic background control flags before dispatching tools."""
         cleaned = dict(arguments)
-        if isinstance(cleaned.get("async"), bool):
-            cleaned.pop("async", None)
-        if isinstance(cleaned.get("background"), bool):
+        preserve_background = bool(tool_name) and self._mcp_tool_declares_argument(tool_name, "background")
+        preserve_run_in_background = bool(tool_name) and self._mcp_tool_declares_argument(tool_name, "run_in_background")
+        preserve_mode = bool(tool_name) and self._mcp_tool_declares_argument(tool_name, "mode")
+
+        if not preserve_background and isinstance(cleaned.get("background"), bool):
             cleaned.pop("background", None)
-        if isinstance(cleaned.get("run_in_background"), bool):
+        if not preserve_run_in_background and isinstance(cleaned.get("run_in_background"), bool):
             cleaned.pop("run_in_background", None)
         mode = cleaned.get("mode")
-        if isinstance(mode, str) and mode.lower() in {"background", "async"}:
+        if not preserve_mode and isinstance(mode, str) and mode.lower() in {"background"}:
             cleaned.pop("mode", None)
         return cleaned
 
@@ -1484,8 +1503,6 @@ class CustomToolAndMCPBackend(LLMBackend):
     @staticmethod
     def _is_explicit_foreground_request(arguments: Dict[str, Any]) -> bool:
         """Return True when args explicitly request foreground/blocking behavior."""
-        if arguments.get("async") is False:
-            return True
         if arguments.get("background") is False:
             return True
         if arguments.get("run_in_background") is False:
@@ -1511,8 +1528,8 @@ class CustomToolAndMCPBackend(LLMBackend):
             return True
 
         mode = arguments.get("mode")
-        mode_is_background = isinstance(mode, str) and mode.lower() in {"background", "async"}
-        return arguments.get("async") is True or mode_is_background
+        mode_is_background = isinstance(mode, str) and mode.lower() in {"background"}
+        return arguments.get("background") is True or mode_is_background
 
     def _validate_background_tool_prerequisites(self, tool_name: str) -> None:
         """Validate required prerequisites before starting a background tool."""
@@ -2259,7 +2276,7 @@ class CustomToolAndMCPBackend(LLMBackend):
                 display=False,  # Verbose diagnostic - shown in tool card instead
             )
 
-            # Auto-background mode: if a tool call includes async=true or mode=background,
+            # Auto-background mode: if a tool call includes background=true or mode=background,
             # schedule it and return a pollable job ID instead of blocking inline execution.
             try:
                 parsed_arguments = self._parse_tool_arguments(arguments_str)
@@ -2271,7 +2288,10 @@ class CustomToolAndMCPBackend(LLMBackend):
                 parsed_arguments,
             )
             if auto_background:
-                background_args = self._strip_background_control_args(parsed_arguments)
+                background_args = self._strip_background_control_args(
+                    parsed_arguments,
+                    tool_name=tool_name,
+                )
                 try:
                     background_job = await self._start_background_tool_job(
                         tool_name=tool_name,
@@ -2362,10 +2382,13 @@ class CustomToolAndMCPBackend(LLMBackend):
                 return
 
             # Media tools default to background mode, so explicit foreground
-            # overrides may include control args (for example async=false).
+            # overrides may include control args (for example background=false).
             # Strip these before direct execution to avoid passing them through.
             if self._is_default_media_background_tool(tool_name) and isinstance(parsed_arguments, dict):
-                foreground_args = self._strip_background_control_args(parsed_arguments)
+                foreground_args = self._strip_background_control_args(
+                    parsed_arguments,
+                    tool_name=tool_name,
+                )
                 if foreground_args != parsed_arguments:
                     arguments_str = json.dumps(foreground_args, ensure_ascii=False)
                     call["arguments"] = arguments_str
