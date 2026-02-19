@@ -32,42 +32,31 @@ Note: For MVP, E2B would require the least amount of development work with littl
 ## Container Topology Recommendation
 Topology A: One Big Container
 
+```
 ┌────────────────────────────────────┐
-
 │ Orchestrator Container             │
-
 │                                    │
-
 │  Agent 1 (subprocess)              │
-
 │  Agent 2 (subprocess)              │
-
 │  Agent 3 (subprocess)              │
-
 └────────────────────────────────────┘
+```
 
 Topology B: Container Per Agent
 
+```
 ┌────────────────────────────────────┐
-
 │ Orchestrator Container             │
-
 └──────────┬─────────────────────────┘
-
            │
-
     ┌──────┴──────┬──────────┐
-
     ▼             ▼          ▼
 ┌─────────┐  ┌─────────┐  ┌─────────┐
-
 │Agent 1  │  │Agent 2  │  │Agent 3  │
-
 │         │  │         │  │         │
-
 │Sandbox  │  │Sandbox  │  │Sandbox  │
-
 └─────────┘  └─────────┘  └─────────┘
+```
 
 Start with Topology A to test cloud setup for MVP. After successful MVP, migrate to Topology B.
 
@@ -84,7 +73,7 @@ The main risk is lots of refactoring to avoid docker-in-docker as serverless com
 | Platform | Architecture |
 |---|---|
 | OpenAI Codex | Cloud-only, ephemeral container per task. |
-| OpenHands | Three methods of running: (1) locally in LocalWorkspace, (2) sandboxed locally using Docker container (DockerWorkspace), (3) sandboxed remotely using remote container via HTTP (RemoteAPIWorkspace). Agents execute tools in the same container, not a separate container. To my knowledge, `AgentController`s are always run locally, while agent servers live in the (local/remote) workspaces |
+| OpenHands | Three methods of running: (1) locally in LocalWorkspace, (2) sandboxed locally using Docker container (DockerWorkspace), (3) sandboxed remotely using remote container via HTTP (RemoteAPIWorkspace). Agents execute tools in the same container, not a separate container. `AgentController`s are always run locally, while agent servers live in the (local/remote) workspaces |
 
 The cloud infrastructure goals for MassGen differs from existing frameworks in two key ways:
 1. Existing frameworks are essentially single agents. MassGen wants communication between orchestrator and worker agents.
