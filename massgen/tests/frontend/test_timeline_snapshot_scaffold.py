@@ -641,4 +641,8 @@ def test_timeline_snapshot_real_tui_subagent_runtime_injection_queue(
     )
     assert queue_y_match is not None
     assert running_y_match is not None
-    assert float(queue_y_match.group(1)) < float(running_y_match.group(1))
+    queue_y = float(queue_y_match.group(1))
+    running_y = float(running_y_match.group(1))
+    assert queue_y < running_y
+    # Keep a thin visual separator between queue strip and running status row.
+    assert (running_y - queue_y) >= 20

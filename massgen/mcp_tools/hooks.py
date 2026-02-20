@@ -1637,6 +1637,7 @@ class HumanInputHook(PatternHook):
         self._lock = threading.Lock()
         self._on_inject_callback: Callable[..., None] | None = None
         self._on_queue_callback: Callable[..., None] | None = None
+        self._pre_execute_callback: Callable[[], None] | None = None
         self._next_message_id: int = 1
 
     def set_pending_input(
@@ -1848,6 +1849,10 @@ class HumanInputHook(PatternHook):
         """Set a callback to be invoked when runtime input is queued."""
         self._on_queue_callback = callback
 
+    def set_pre_execute_callback(self, callback: Callable[[], None] | None) -> None:
+        """Set a callback invoked before each hook execute call."""
+        self._pre_execute_callback = callback
+
     async def execute(
         self,
         function_name: str,
@@ -1869,6 +1874,12 @@ class HumanInputHook(PatternHook):
         Returns:
             HookResult with injection content if any messages pending for this agent
         """
+        if self._pre_execute_callback:
+            try:
+                self._pre_execute_callback()
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[HumanInputHook] Pre-execute callback failed: {e}")
+
         # Get agent_id from context
         agent_id = (context or {}).get("agent_id", "unknown")
 

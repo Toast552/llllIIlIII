@@ -754,6 +754,15 @@ class SubagentView(Container):
         padding: 0;
         background: transparent;
     }
+
+    SubagentView .subagent-queued-input-region {
+        margin: 0 0 1 0;
+        padding: 0 0 1 0;
+    }
+
+    SubagentView #subagent-queue-spacer {
+        height: 1;
+    }
     """
 
     # Polling interval for live updates
@@ -875,12 +884,13 @@ class SubagentView(Container):
 
         # Runtime queued-input strip (for parity with main TUI), shown above status line.
         if self._send_message_callback:
-            with Vertical(id="queued_input_region"):
+            with Vertical(id="queued_input_region", classes="subagent-queued-input-region"):
                 with Horizontal(id="queued_input_row"):
                     yield QueuedInputBanner(id="queued_input_banner")
                     with Horizontal(id="queued_input_actions"):
                         yield Button("Cancel latest", id="queue_cancel_latest_button")
                         yield Button("Clear queue", id="queue_clear_button")
+            yield Static("", id="subagent-queue-spacer")
 
         # Execution status line
         yield SubagentStatusLine(

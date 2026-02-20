@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+import massgen.orchestrator as orchestrator_module
 from massgen.coordination_tracker import AgentAnswer
 from massgen.mcp_tools.hooks import HookType
 from massgen.subagent.models import SubagentResult
@@ -400,6 +401,43 @@ def test_runtime_inbox_poller_falls_back_to_backend_workspace_without_temp_works
     assert getattr(poller, "_inbox_dir", None) == active_workspace / ".massgen" / "runtime_inbox"
 
 
+def test_runtime_inbox_poller_ignores_global_temp_workspace_root(mock_orchestrator, tmp_path, monkeypatch):
+    orchestrator = mock_orchestrator(num_agents=1)
+    agent = orchestrator.agents["agent_a"]
+
+    active_workspace = tmp_path / "active_workspace"
+    active_workspace.mkdir(parents=True, exist_ok=True)
+
+    global_temp_root = tmp_path / ".massgen" / "temp_workspaces"
+    global_temp_root.mkdir(parents=True, exist_ok=True)
+
+    orchestrator._agent_temporary_workspace = str(global_temp_root)
+    orchestrator._runtime_inbox_poller = None
+    agent.backend.filesystem_manager = SimpleNamespace(
+        get_current_workspace=lambda: active_workspace,
+    )
+
+    log_messages: list[str] = []
+
+    def _capture_info(message, *args, **kwargs):
+        if args:
+            try:
+                message = message % args
+            except Exception:
+                pass
+        log_messages.append(str(message))
+
+    monkeypatch.setattr(orchestrator_module.logger, "info", _capture_info)
+    orchestrator._ensure_runtime_inbox_poller_initialized()
+
+    poller = orchestrator._runtime_inbox_poller
+    assert poller is not None
+    assert getattr(poller, "_inbox_dir", None) == active_workspace / ".massgen" / "runtime_inbox"
+    joined = "\n".join(log_messages)
+    assert "Initialized runtime inbox poller" in joined
+    assert str(active_workspace / ".massgen" / "runtime_inbox") in joined
+
+
 def test_poll_runtime_inbox_reads_messages_from_temp_workspace_parent(mock_orchestrator, tmp_path):
     orchestrator = mock_orchestrator(num_agents=1)
     agent = orchestrator.agents["agent_a"]
@@ -436,6 +474,70 @@ def test_poll_runtime_inbox_reads_messages_from_temp_workspace_parent(mock_orche
     pending_messages = orchestrator._human_input_hook.get_pending_messages(agent_ids=["agent_a"])
     assert len(pending_messages) == 1
     assert pending_messages[0]["content"] == "include beatles comparison"
+
+
+@pytest.mark.asyncio
+async def test_human_input_hook_execute_polls_runtime_inbox_and_logs_delivery(
+    mock_orchestrator,
+    tmp_path,
+    monkeypatch,
+):
+    orchestrator = mock_orchestrator(num_agents=1)
+    agent = orchestrator.agents["agent_a"]
+
+    run_workspace = tmp_path / "subagent_run_workspace"
+    agent_workspace = run_workspace / "agent_1_abcd1234"
+    agent_workspace.mkdir(parents=True, exist_ok=True)
+
+    inbox_dir = run_workspace / ".massgen" / "runtime_inbox"
+    inbox_dir.mkdir(parents=True, exist_ok=True)
+    msg_file = inbox_dir / "msg_1.json"
+    msg_file.write_text(
+        json.dumps(
+            {
+                "content": "please also research the beatles",
+                "source": "parent",
+                "timestamp": "2026-02-20T09:08:44.000000+00:00",
+                "target_agents": ["agent_a"],
+            },
+        ),
+    )
+
+    orchestrator._agent_temporary_workspace = str(run_workspace / "temp")
+    orchestrator._runtime_inbox_poller = None
+    orchestrator._human_input_hook = None
+    agent.backend.filesystem_manager = SimpleNamespace(
+        get_current_workspace=lambda: agent_workspace,
+    )
+
+    log_messages: list[str] = []
+
+    def _capture_info(message, *args, **kwargs):
+        if args:
+            try:
+                message = message % args
+            except Exception:
+                pass
+        log_messages.append(str(message))
+
+    monkeypatch.setattr(orchestrator_module.logger, "info", _capture_info)
+    orchestrator._ensure_runtime_human_input_hook_initialized()
+    orchestrator._ensure_runtime_inbox_poller_initialized()
+
+    human_hook = orchestrator._human_input_hook
+    assert human_hook is not None
+    result = await human_hook.execute(
+        "mcp__filesystem__write_file",
+        "{}",
+        {"agent_id": "agent_a"},
+    )
+
+    assert result.inject is not None
+    assert "please also research the beatles" in result.inject["content"]
+    assert not msg_file.exists()
+    joined = "\n".join(log_messages)
+    assert "Injecting runtime inbox message" in joined
+    assert "please also research the beatles" in joined
 
 
 @pytest.mark.asyncio

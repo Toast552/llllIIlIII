@@ -6343,8 +6343,27 @@ Your answer:"""
             return
 
         workspace_path: Path | None = None
+        backend_workspace_path: Path | None = None
 
-        # Prefer orchestrator workspace root derived from temp workspace.
+        for agent in self.agents.values():
+            backend = getattr(agent, "backend", None)
+            filesystem_manager = getattr(backend, "filesystem_manager", None) if backend else None
+            if not filesystem_manager:
+                continue
+
+            get_workspace = getattr(filesystem_manager, "get_current_workspace", None)
+            if callable(get_workspace):
+                resolved = get_workspace()
+                if resolved:
+                    backend_workspace_path = Path(resolved)
+                    break
+
+            cwd = getattr(filesystem_manager, "cwd", None)
+            if cwd:
+                backend_workspace_path = Path(cwd)
+                break
+
+        # Prefer orchestrator workspace root derived from subagent temp workspace.
         # In subagent runs, backend cwd may point to per-agent subfolders
         # (e.g., workspace/agent_1_xxx), while parent-injected runtime inbox
         # messages are written under the orchestrator workspace root
@@ -6353,28 +6372,16 @@ Your answer:"""
             temp_workspace = Path(self._agent_temporary_workspace)
             if temp_workspace.name == "temp" and temp_workspace.parent:
                 workspace_path = temp_workspace.parent
-            else:
+            elif temp_workspace.name == "temp_workspaces":
+                # This is a global pool directory in top-level runs, not a per-run workspace.
+                workspace_path = None
+            elif temp_workspace.parent.name == "temp_workspaces":
+                # Some runs may provide a per-run path under temp_workspaces.
                 workspace_path = temp_workspace
 
         # Fallback: use agent backend workspace when temp-root metadata is unavailable.
         if workspace_path is None:
-            for agent in self.agents.values():
-                backend = getattr(agent, "backend", None)
-                filesystem_manager = getattr(backend, "filesystem_manager", None) if backend else None
-                if not filesystem_manager:
-                    continue
-
-                get_workspace = getattr(filesystem_manager, "get_current_workspace", None)
-                if callable(get_workspace):
-                    resolved = get_workspace()
-                    if resolved:
-                        workspace_path = Path(resolved)
-                        break
-
-                cwd = getattr(filesystem_manager, "cwd", None)
-                if cwd:
-                    workspace_path = Path(cwd)
-                    break
+            workspace_path = backend_workspace_path
 
         if workspace_path is None:
             return
@@ -6711,6 +6718,7 @@ Your answer:"""
                 )
 
         self._human_input_hook.set_queue_callback(_on_human_input_queued)
+        self._human_input_hook.set_pre_execute_callback(self._poll_runtime_inbox)
 
     async def _maybe_interrupt_background_wait_for_agent(
         self,
