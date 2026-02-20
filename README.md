@@ -69,7 +69,7 @@ This project started with the "threads of thought" and "iterative refinement" id
 <details open>
 <summary><h3>🆕 Latest Features</h3></summary>
 
-- [v0.1.47 Features](#-latest-features-v0147)
+- [v0.1.53 Features](#-latest-features-v0153)
 </details>
 
 <details open>
@@ -122,15 +122,15 @@ This project started with the "threads of thought" and "iterative refinement" id
 <details open>
 <summary><h3>🗺️ Roadmap</h3></summary>
 
-- [Recent Achievements (v0.1.47)](#recent-achievements-v0147)
-- [Previous Achievements (v0.0.3 - v0.1.46)](#previous-achievements-v003---v0146)
+- [Recent Achievements (v0.1.53)](#recent-achievements-v0153)
+- [Previous Achievements (v0.0.3 - v0.1.52)](#previous-achievements-v003---v0152)
 - [Key Future Enhancements](#key-future-enhancements)
   - Bug Fixes & Backend Improvements
   - Advanced Agent Collaboration
   - Expanded Model, Tool & Agent Integrations
   - Improved Performance & Scalability
   - Enhanced Developer Experience
-- [v0.1.48 Roadmap](#v0148-roadmap)
+- [v0.1.54 Roadmap](#v0154-roadmap)
 </details>
 
 <details open>
@@ -155,25 +155,26 @@ This project started with the "threads of thought" and "iterative refinement" id
 
 ---
 
-## 🆕 Latest Features (v0.1.47)
+## 🆕 Latest Features (v0.1.53)
 
-**🎉 Released: February 4, 2026**
+**🎉 Released: February 18, 2026**
 
-**What's New in v0.1.47:**
-- **🚀 Codex Backend** - Run OpenAI Codex CLI as a MassGen backend with local and Docker execution
-- **🎨 TUI Theme System** - Palette-based theming with dark and light variants
-- **🗳️ Per-agent Voting Sensitivity** - Set different voting standards (strict/balanced/lenient) for each agent
-- **🔧 Claude Code Refactored** - Shared `NativeToolMixin` for native tool handling across CLI-based backends
-- **🐛 Bug Fixes** - Fixed final presentation display, improved MCP error handling, enhanced round tracking
+**What's New in v0.1.53:**
+- **⏳ Background Tool Execution** - Non-blocking lifecycle tools for long-running work: start, monitor, wait, cancel, and list background jobs. Compatible with custom tools and MCP server tools.
+- **✅ Planning Task Verification** - Tasks now require `verification` and `verification_method` fields by default. `--no-require-verification` flag to opt out.
+- **🎯 TUI Background Job Indicators** - Agent status ribbon with background job indicators and background tasks modal with lifecycle controls.
+- **🔧 Subagent Infrastructure** - Groundwork for specialized subagent types (Evaluator, Explorer) via `SUBAGENT.md` frontmatter. Tool argument normalization across backends.
 
-**Try v0.1.47 Features:**
+**Try v0.1.53 Features:**
 ```bash
 # Install or upgrade
 pip install --upgrade massgen
 
-# First install codex with `npm install -g @openai/codex`, then authenticate and run the below.
-uv run massgen --config @examples/configs/providers/openai/codex/codex_local.yaml "Create a website about Bob Dylan"
-uv run massgen --config @examples/configs/providers/openai/codex/codex_docker.yaml "Create a website about Bob Dylan"
+# Launch — background tools available with any multi-agent config
+uv run massgen
+
+# Multi-agent coordination with background tool execution
+uv run massgen --config @examples/tools/custom_tools/docker_with_background.yaml "Create a multi-page website. Include an AI-generated image you generate in the background while building the website"
 ```
 
 → [See full release history and examples](massgen/configs/README.md#release-history--examples)
@@ -259,12 +260,14 @@ uv run massgen --quickstart
 The `--setup` command will:
 - Configure your API keys (OpenAI, Anthropic, Google, xAI)
 - Offer to set up Docker images for code execution
-- Offer to install skills (openskills, Anthropic collection)
+- Offer to install skills (openskills, Anthropic/OpenAI/Vercel collections, Agent Browser skill, Crawl4AI)
 
 The `--quickstart` command will:
 - Ask how many agents you want (1-5, default 3)
 - Ask which backend/model for each agent
+- For GPT-5x models, ask for `reasoning.effort` (`low|medium|high`; Codex GPT-5 models also include `xhigh`)
 - Auto-detect Docker availability and configure execution mode
+- If Docker mode is selected, show a Skills step where you can choose package(s) (`openskills`-based Anthropic/OpenAI/Vercel/Agent Browser plus Crawl4AI) and install them in-place with live status
 - Create a ready-to-use config and launch into interactive TUI mode
 
 **🖥️ Textual TUI (Default Display Mode):**
@@ -518,6 +521,11 @@ MassGen agents can leverage various tools to enhance their problem-solving capab
 | `--backend`        | Backend type for quick setup without a config file (`claude`, `claude_code`, `gemini`, `grok`, `openai`, `azure_openai`, `zai`). Optional for [models with default backends](massgen/utils.py).|
 | `--model`          | Model name for quick setup (e.g., `gemini-2.5-flash`, `gpt-5-nano`, ...). `--config` and `--model` are mutually exclusive - use one or the other. |
 | `--system-message` | System prompt for the agent in quick setup mode. If `--config` is provided, `--system-message` is omitted. |
+| `--cwd-context`    | Add current working directory as runtime context path: `ro`/`read` for read-only, `rw`/`write` for write access. In TUI, this initializes the same state as `Ctrl+P`. |
+| `--plan`           | Planning-only mode. Agents create a structured task plan without auto-executing it. |
+| `--plan-depth`     | Plan granularity for `--plan`: `dynamic`, `shallow`, `medium`, or `deep`. |
+| `--plan-and-execute` | Run both phases: create a plan, then execute it automatically. |
+| `--execute-plan`   | Execute an existing plan by path, plan ID, or `latest`. |
 | `--no-display`     | Disable real-time streaming UI coordination display (fallback to simple text output).|
 | `--no-logs`        | Disable real-time logging.|
 | `--debug`          | Enable debug mode with verbose logging (NEW in v0.0.13). Shows detailed orchestrator activities, agent messages, backend operations, and tool calls. Debug logs are saved to `agent_outputs/log_{time}/massgen_debug.log`. |
@@ -1024,6 +1032,12 @@ massgen --config @examples/tools/code-execution/multi_agent_playwright_automatio
 # Start interactive chat (no initial question)
 massgen --config @examples/basic/multi/three_agents_default
 
+# Add CWD context quickly (read-only)
+massgen --config @examples/basic/multi/three_agents_default --cwd-context ro
+
+# Add CWD context quickly (read+write)
+massgen --config @examples/basic/multi/three_agents_default --cwd-context rw
+
 # Debug mode for troubleshooting
 massgen --config @examples/basic/multi/three_agents_default \
   --debug "Your question"
@@ -1222,38 +1236,46 @@ MassGen is currently in its foundational stage, with a focus on parallel, asynch
 
 ⚠️ **Early Stage Notice:** As MassGen is in active development, please expect upcoming breaking architecture changes as we continue to refine and improve the system.
 
-### Recent Achievements (v0.1.47)
+### Recent Achievements (v0.1.53)
 
-**🎉 Released: February 4, 2026**
+**🎉 Released: February 18, 2026**
 
-#### Codex Backend
-- **OpenAI Codex CLI**: New `codex` backend type with local and Docker execution modes
-- **Authentication**: OAuth and API key support
-- **Native Tool Architecture**: `NativeToolMixin` for shared tool handling between Codex and Claude Code, with custom and workflow MCP servers (`custom_tools_server.py`, `workflow_tools_server.py`) exposing MassGen tools to CLI-based backends
+#### Background Tool Execution
+- **Non-Blocking Lifecycle**: Start, monitor, wait, cancel, and list background jobs — agents continue foreground work while long-running tools execute
+- **Compatible Targets**: Works with custom tools and MCP server tools
+- **Lifecycle Tools**: `start_background_tool`, `get_background_tool_status`, `get_background_tool_result`, `wait_for_background_tool`, `cancel_background_tool`, `list_background_tools`
 
-#### TUI Theme System
-- **Palette-based Architecture**: Unified `base.tcss` with semantic CSS variables replacing per-widget inline CSS
-- **Theme Variants**: Dark and light palette files
+#### Planning Task Verification
+- **Verification Fields**: Tasks now require `verification` and `verification_method` by default
+- **Opt-Out**: `--no-require-verification` flag for backwards compatibility
+- **Framework Exempt**: Framework-injected tasks exempt from verification requirements
 
-#### Per-agent Voting Sensitivity
-- **Agent-level Override**: Voting sensitivity (`strict`/`balanced`/`lenient`) now configurable per-agent, overriding orchestrator-level defaults with rewritten evaluation criteria
+#### TUI Background Job Indicators
+- **Agent Status Ribbon**: Background job indicators in agent status display
+- **Background Tasks Modal**: Lifecycle controls for managing background tools
 
-#### Changed
-- **Claude Code Backend**: Refactored to use `NativeToolMixin` with native filesystem support and OS-level sandbox
-- **Round Display Tracking**: Vote and answer submissions now track and display submission round numbers in TUI
-- **Gemini Backend**: Globally unique tool call ID generation and configuration improvements
+#### Also in this release
+- **Subagent Infrastructure**: Groundwork for specialized subagent types (Evaluator, Explorer) via `SUBAGENT.md` frontmatter
+- **Tool Argument Normalization**: Consistent argument handling across backends
 
 #### Bug Fixes
-- **Final Presentation Display**: Fixed rendering issues with final presentation box
-- **MCP Error Handling**: Enhanced handling for invalid MCP tool calls with clearer user guidance
+- Task plan verification improvements
+- Codex reasoning config alignment
 
-#### Documentation, Configurations and Resources
-- `docs/source/user_guide/backends.rst` — updated with Codex backend documentation
-- `docs/modules/interactive_mode.md` — new interactive mode architecture document
-- `massgen/backend/capabilities.py` — updated with Codex models
-- `massgen/skills/backend-integrator/SKILL.md` — new backend integration skill
+### Previous Achievements (v0.0.3 - v0.1.52)
 
-### Previous Achievements (v0.0.3 - v0.1.46)
+✅ **Final Answer Modal & Coordination Quality Gates (v0.1.52)**: Dedicated final answer modal with tabbed answer and workspace/review interface. Substantive gate prevents low-value iteration rounds. Novelty injection combats premature convergence. Agent identity versioning for answer provenance tracking.
+
+✅ **Reviewing Coordination & Change Documents (v0.1.51)**: Review modal with multi-file diff visualization. Decision journal system for multi-agent coordination traceability. Changedoc-anchored evaluation checklists with gap reports. Drift conflict policy for safer change application. `--cwd-context` CLI flag.
+
+✅ **Chunked Plan Execution & Skill Lifecycle Management (v0.1.50)**: Chunked plan execution for safer long-form task completion with progress checkpoints. Skill lifecycle management with consolidation, organizer, and previous-session skill loading. Iterative planning review modal. Responsive TUI mode bar. Worktree improvements with branch accumulation and cross-agent diff visibility.
+
+✅ **Coordination Quality: Log Analysis TUI, Fairness Gate & Checklist Voting (v0.1.49)**: Log analysis mode built into TUI mode bar for in-app run analysis. Fairness gate prevents fast agents from dominating coordination. Checklist voting tool for structured quality evaluation. Automated testing infrastructure with CI/CD and SVG snapshot baselines.
+
+
+✅ **Decomposition Mode & Worktree Isolation (v0.1.48)**: New decomposition coordination mode that decomposes tasks into subtasks assigned to individual agents with a presenter role, git worktree-based isolation for agent file writes with review modal, quickstart wizard Docker setup with animated pull progress, stop tool for agent completion signaling
+
+✅ **Codex Backend & TUI Theme Refactoring (v0.1.47)**: New Codex backend for OpenAI Codex CLI with local and Docker execution, NativeToolMixin for shared tool handling, TUI theme system refactored to palette-based architecture with dark and light variants, per-agent voting sensitivity configuration
 
 ✅ **Subagent TUI Streaming & Event Architecture Refactor (v0.1.46)**: Interactive preview cards that expand to full timeline views with real-time event streaming, unified event pipeline with single source of truth for display creation, enhanced final presentation with workspace visualization and winning agent highlighting, fixed banner display and tool call ID handling
 
@@ -1491,18 +1513,13 @@ MassGen is currently in its foundational stage, with a focus on parallel, asynch
 
 We welcome community contributions to achieve these goals.
 
-### v0.1.48 Roadmap
+### v0.1.54 Roadmap
 
-Version 0.1.48 focuses on OpenAI native compression and enhanced log analysis capabilities:
+Version 0.1.54 focuses on spec support for planning and targeted agent queries:
 
 #### Planned Features
-- **OpenAI Responses /compact Endpoint** ([#739](https://github.com/massgen/MassGen/issues/739)): Use OpenAI's native `/compact` endpoint instead of custom summarization for better token efficiency
-- **Log Analysis Model Selector** ([#766](https://github.com/massgen/MassGen/issues/766)): Allow users to choose which model to use for `massgen logs analyze` self-analysis mode
-
-Key technical approach:
-- **Native Compression**: Leverage OpenAI's API-level context compression for improved response quality
-- **Flexible Analysis**: Configurable model selection for cost/quality tradeoffs in log analysis
-- **Seamless Integration**: Compatible with existing reactive compression system
+- **Spec Support for Planning** ([#881](https://github.com/massgen/MassGen/issues/881)): Add spec/proposal support to planning workflows
+- **Targeted Agent Queries** ([#809](https://github.com/massgen/MassGen/issues/809)): Support targeted queries to specific agents via subagent for more efficient coordination
 
 ---
 

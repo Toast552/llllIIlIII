@@ -124,6 +124,7 @@ class EventType:
     # Coordination events (emitted by orchestrator for subagent TUI parity)
     ANSWER_SUBMITTED = "answer_submitted"
     VOTE = "vote"
+    AGENT_STOPPED = "agent_stopped"  # Decomposition mode: agent signaled stop
     WINNER_SELECTED = "winner_selected"
     CONTEXT_RECEIVED = "context_received"
 
@@ -317,6 +318,7 @@ class EventEmitter:
         elapsed_seconds: float,
         status: str = "success",
         is_error: bool = False,
+        async_id: Optional[str] = None,
         agent_id: Optional[str] = None,
     ) -> None:
         """Emit a tool completion event.
@@ -328,6 +330,7 @@ class EventEmitter:
             elapsed_seconds: How long the tool took
             status: Status string (success, error, etc.)
             is_error: Whether this is an error result
+            async_id: Optional async/background job ID for long-running operations
             agent_id: Override agent ID
         """
         result_str = str(result)
@@ -340,6 +343,7 @@ class EventEmitter:
             elapsed_seconds=elapsed_seconds,
             status=status,
             is_error=is_error,
+            async_id=async_id,
             agent_id=agent_id,
         )
 
@@ -567,6 +571,20 @@ class EventEmitter:
             reason=reason,
             vote_label=vote_label,
             voted_for_label=voted_for_label,
+        )
+
+    def emit_stop(
+        self,
+        agent_id: str,
+        summary: str = "",
+        status: str = "complete",
+    ) -> None:
+        """Emit an agent_stopped coordination event (decomposition mode)."""
+        self.emit_raw(
+            EventType.AGENT_STOPPED,
+            agent_id=agent_id,
+            summary=summary,
+            status=status,
         )
 
     def emit_winner_selected(
@@ -905,6 +923,7 @@ class EventReader:
                         "elapsed_seconds": event.data.get("elapsed_seconds"),
                         "status": event.data.get("status"),
                         "is_error": event.data.get("is_error", False),
+                        "async_id": event.data.get("async_id"),
                         "agent_id": event.agent_id,
                     },
                 )

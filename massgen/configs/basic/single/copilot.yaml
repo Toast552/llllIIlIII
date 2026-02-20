@@ -1,11 +1,11 @@
 # MassGen Copilot Configuration
+# `uv run massgen --config @examples/basic/single/copilot.yaml "What is GitHub copilot?"`
 
 agents:
   - id: "copilot-assistant"
     backend:
       type: "copilot"
-      model: "gpt-4"
-    system_message: "You are GitHub Copilot CLI, an AI assistant for developers. Help the user with their coding tasks efficiently."
+      model: "gpt-5-mini"
 
 ui:
   display_type: "textual_terminal"

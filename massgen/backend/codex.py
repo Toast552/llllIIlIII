@@ -12,7 +12,8 @@ Key Features:
 - Session persistence and resumption
 - JSON event stream parsing for real-time streaming
 - MCP tool support via project-scoped .codex/config.toml in workspace
-- System prompt injection via AGENTS.md in workspace root
+- System prompt injection via .codex/AGENTS.md + model_instructions_file
+- Skills mirroring into .codex/skills for CODEX_HOME-scoped discovery
 - Full conversation context maintained across turns
 - Uses CODEX_HOME env var to isolate config from user's global ~/.codex/
 
@@ -61,6 +62,8 @@ import asyncio
 import json
 import os
 import shutil
+import time
+import uuid
 from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
@@ -69,7 +72,7 @@ try:
 except ImportError:
     tomli_w = None
 
-from ..logger_config import logger
+from ..logger_config import get_event_emitter, logger
 from .base import (
     FilesystemSupport,
     LLMBackend,
@@ -106,7 +109,7 @@ class CodexBackend(NativeToolBackendMixin, LLMBackend):
             api_key: OpenAI API key (falls back to OPENAI_API_KEY env var).
                     If None, will attempt OAuth authentication.
             **kwargs: Additional configuration options including:
-                - model: Model name (default: gpt-5.2-codex)
+                - model: Model name (default: gpt-5.3-codex)
                 - model_reasoning_effort: Reasoning effort level (low, medium, high, xhigh)
                 - cwd: Current working directory for Codex
                 - system_prompt: System prompt to prepend
@@ -125,8 +128,16 @@ class CodexBackend(NativeToolBackendMixin, LLMBackend):
         self._session_file: Optional[Path] = None
 
         # Configuration
-        self.model = kwargs.get("model", "gpt-5.2-codex")
+        self.model = kwargs.get("model", "gpt-5.3-codex")
+        # Prefer native Codex setting, but accept OpenAI-style nesting for compatibility:
+        # backend.reasoning.effort -> model_reasoning_effort
         self.model_reasoning_effort = kwargs.get("model_reasoning_effort")  # low, medium, high, xhigh
+        if self.model_reasoning_effort is None:
+            reasoning_cfg = kwargs.get("reasoning")
+            if isinstance(reasoning_cfg, dict):
+                effort = reasoning_cfg.get("effort")
+                if isinstance(effort, str) and effort.strip():
+                    self.model_reasoning_effort = effort.strip()
         self._config_cwd = kwargs.get("cwd")  # May be relative; resolved at execution time
         self.system_prompt = kwargs.get("system_prompt", "")
         self.approval_mode = kwargs.get("approval_mode", "full-auto")
@@ -136,6 +147,10 @@ class CodexBackend(NativeToolBackendMixin, LLMBackend):
 
         # Agent ID (needed for Docker container lookup)
         self.agent_id = kwargs.get("agent_id")
+
+        # Tool event tracking (for emit_tool_start/emit_tool_complete)
+        self._tool_start_times: Dict[str, float] = {}
+        self._tool_id_to_name: Dict[str, str] = {}
 
         # Docker execution mode
         self._docker_execution = kwargs.get("command_line_execution_mode") == "docker"
@@ -154,16 +169,14 @@ class CodexBackend(NativeToolBackendMixin, LLMBackend):
             custom_tools.extend(get_multimodal_tool_definitions())
             logger.info("Codex backend: multimodal tools enabled (read_media, generate_media)")
 
-        if custom_tools:
-            self._setup_custom_tools_mcp(custom_tools)
+        # Codex exposes MassGen custom tools through an MCP wrapper server.
+        # Always configure this server so framework background lifecycle tools
+        # are available even when no user custom tools are defined.
+        self._setup_custom_tools_mcp(custom_tools)
 
         # Verify Codex CLI is available (skip in docker mode — resolved inside container)
         if self._docker_execution:
             self._codex_path = "codex"
-            # Auto-enable mounting ~/.codex/ for OAuth tokens
-            if self.filesystem_manager and self.filesystem_manager.docker_manager:
-                self.filesystem_manager.docker_manager.mount_codex_config = True
-            logger.info("Codex backend: docker execution mode — CLI will be resolved inside container")
         else:
             self._codex_path = self._find_codex_cli()
             if not self._codex_path:
@@ -322,6 +335,49 @@ class CodexBackend(NativeToolBackendMixin, LLMBackend):
         env_vars["FASTMCP_SHOW_CLI_BANNER"] = "false"
         return env_vars
 
+    def _collect_background_mcp_servers(self) -> List[Dict[str, Any]]:
+        """Collect MCP server configs available for background target execution."""
+        merged: List[Dict[str, Any]] = []
+
+        config_mcp = self.config.get("mcp_servers") if self.config else None
+        if isinstance(config_mcp, dict):
+            for name, server_cfg in config_mcp.items():
+                if not isinstance(server_cfg, dict):
+                    continue
+                entry = server_cfg.copy()
+                entry["name"] = name
+                merged.append(entry)
+        elif isinstance(config_mcp, list):
+            for server_cfg in config_mcp:
+                if isinstance(server_cfg, dict):
+                    merged.append(server_cfg.copy())
+
+        existing_names = {s.get("name") for s in merged if isinstance(s, dict)}
+        for server_cfg in self.mcp_servers:
+            if not isinstance(server_cfg, dict):
+                continue
+            name = server_cfg.get("name")
+            if name in existing_names:
+                continue
+            merged.append(server_cfg.copy())
+
+        filtered: List[Dict[str, Any]] = []
+        for server_cfg in merged:
+            if not isinstance(server_cfg, dict):
+                continue
+            name = server_cfg.get("name")
+            if not isinstance(name, str) or not name:
+                continue
+            if name == "massgen_custom_tools":
+                continue
+            if server_cfg.get("type") == "sdk":
+                continue
+            if "__sdk_server__" in server_cfg:
+                continue
+            filtered.append(server_cfg)
+
+        return filtered
+
     def _setup_custom_tools_mcp(self, custom_tools: List[Dict[str, Any]]) -> None:
         """Wrap MassGen custom tools as an MCP server and add to mcp_servers.
 
@@ -342,7 +398,11 @@ class CodexBackend(NativeToolBackendMixin, LLMBackend):
 
         # Write specs to workspace
         specs_path = Path(self.cwd) / ".codex" / "custom_tool_specs.json"
-        write_tool_specs(custom_tools, specs_path)
+        write_tool_specs(
+            custom_tools,
+            specs_path,
+            background_mcp_servers=self._collect_background_mcp_servers(),
+        )
         self._custom_tools_specs_path = specs_path
 
         # Build MCP server config and add to mcp_servers
@@ -352,8 +412,13 @@ class CodexBackend(NativeToolBackendMixin, LLMBackend):
             agent_id="codex",
             env=self._build_custom_tools_mcp_env(),
         )
+        # Replace existing massgen_custom_tools entry if present
+        self.mcp_servers = [s for s in self.mcp_servers if not (isinstance(s, dict) and s.get("name") == "massgen_custom_tools")]
         self.mcp_servers.append(server_config)
-        logger.info(f"Custom tools MCP server configured with {len(custom_tools)} tool configs")
+        logger.info(
+            "Custom tools MCP server configured with %s user tool config(s) + background lifecycle tools",
+            len(custom_tools),
+        )
 
     def _write_workspace_config(self) -> None:
         """Write config.toml to workspace/.codex directory.
@@ -363,6 +428,8 @@ class CodexBackend(NativeToolBackendMixin, LLMBackend):
         so it reads this config instead of ~/.codex/config.toml.
         """
         config: Dict[str, Any] = {}
+        config_dir = Path(self.cwd) / ".codex"
+        config_dir.mkdir(parents=True, exist_ok=True)
 
         # Model settings
         if self.model:
@@ -370,15 +437,20 @@ class CodexBackend(NativeToolBackendMixin, LLMBackend):
         if self.model_reasoning_effort:
             config["model_reasoning_effort"] = self.model_reasoning_effort
 
-        # Always write custom tool specs to current workspace (cwd may change between runs)
-        if getattr(self, "_custom_tools_config", None):
+        # Always write custom tool specs to current workspace (cwd may change between runs).
+        # Includes framework background lifecycle tools even when user custom_tools is empty.
+        if hasattr(self, "_custom_tools_config"):
             from ..mcp_tools.custom_tools_server import (
                 build_server_config,
                 write_tool_specs,
             )
 
-            specs_path = Path(self.cwd) / ".codex" / "custom_tool_specs.json"
-            write_tool_specs(self._custom_tools_config, specs_path)
+            specs_path = config_dir / "custom_tool_specs.json"
+            write_tool_specs(
+                self._custom_tools_config,
+                specs_path,
+                background_mcp_servers=self._collect_background_mcp_servers(),
+            )
             self._custom_tools_specs_path = specs_path
             # Update the MCP server config to point to current workspace
             for s in self.mcp_servers:
@@ -393,6 +465,26 @@ class CodexBackend(NativeToolBackendMixin, LLMBackend):
                     )
                     break
 
+        # Write checklist specs file and add stdio MCP config if checklist is active.
+        # The orchestrator stores _checklist_state/_checklist_items on the backend;
+        # we write the specs here because the workspace path is now resolved.
+        if hasattr(self, "_checklist_state") and hasattr(self, "_checklist_items"):
+            from ..mcp_tools.checklist_tools_server import (
+                build_server_config as build_checklist_config,
+            )
+            from ..mcp_tools.checklist_tools_server import write_checklist_specs
+
+            specs_path = config_dir / "checklist_specs.json"
+            write_checklist_specs(
+                items=self._checklist_items,
+                state=self._checklist_state,
+                output_path=specs_path,
+            )
+            checklist_mcp = build_checklist_config(specs_path)
+            # Replace any previous checklist entry
+            self.mcp_servers = [s for s in self.mcp_servers if not (isinstance(s, dict) and s.get("name") == "massgen_checklist")]
+            self.mcp_servers.append(checklist_mcp)
+
         # Convert MassGen mcp_servers list to Codex config.toml format
         # Merge orchestrator-injected servers (self.config) with init-time servers (self.mcp_servers)
         # which may include custom_tools MCP added by _setup_custom_tools_mcp()
@@ -404,7 +496,7 @@ class CodexBackend(NativeToolBackendMixin, LLMBackend):
         if config_mcp is not None:
             if isinstance(config_mcp, dict):
                 for name, srv_config in config_mcp.items():
-                    if isinstance(srv_config, dict):
+                    if isinstance(srv_config, dict) and srv_config.get("type") != "sdk":
                         srv_config["name"] = name
                         mcp_servers.append(srv_config)
             elif isinstance(config_mcp, list):
@@ -425,8 +517,15 @@ class CodexBackend(NativeToolBackendMixin, LLMBackend):
                     name = server.get("name", "")
                     if not name:
                         continue
-                    entry: Dict[str, Any] = {}
                     server_type = server.get("type", "stdio")
+
+                    # Skip SDK MCP servers — they are in-process Python objects
+                    # that cannot be serialized to config.toml.
+                    if server_type == "sdk":
+                        logger.info(f"Codex: skipping SDK server '{name}' (not serializable to config.toml)")
+                        continue
+
+                    entry: Dict[str, Any] = {}
 
                     if server_type == "stdio":
                         if server.get("command"):
@@ -458,15 +557,20 @@ class CodexBackend(NativeToolBackendMixin, LLMBackend):
             if mcp_section:
                 config["mcp_servers"] = mcp_section
 
-        # Inject system prompt + workflow instructions via AGENTS.md in workspace root.
-        # Codex automatically reads AGENTS.md from the working directory.
+        # Mirror skills into CODEX_HOME/skills so Codex skill discovery can find
+        # project/merged skills under the same scoped home directory.
+        self._sync_skills_into_codex_home(config_dir)
+
+        # Inject system prompt + workflow instructions via .codex/AGENTS.md and
+        # point Codex at it explicitly via model_instructions_file.
         full_prompt = self.system_prompt or ""
         pending = getattr(self, "_pending_workflow_instructions", "")
         if pending:
             full_prompt = (full_prompt + "\n" + pending) if full_prompt else pending
         if full_prompt:
-            agents_md_path = Path(self.cwd) / "AGENTS.md"
+            agents_md_path = config_dir / "AGENTS.md"
             agents_md_path.write_text(full_prompt)
+            config["model_instructions_file"] = str(agents_md_path)
             logger.info(f"Wrote Codex AGENTS.md: {agents_md_path} ({len(full_prompt)} chars)")
 
         # Configure sandbox for local (non-Docker) workspace-write mode.
@@ -509,8 +613,6 @@ class CodexBackend(NativeToolBackendMixin, LLMBackend):
             return
 
         # Write config
-        config_dir = Path(self.cwd) / ".codex"
-        config_dir.mkdir(parents=True, exist_ok=True)
         config_path = config_dir / "config.toml"
 
         if tomli_w:
@@ -521,8 +623,6 @@ class CodexBackend(NativeToolBackendMixin, LLMBackend):
             self._write_toml_fallback(config, config_path)
 
         self._workspace_config_written = True
-        logger.info(f"Wrote Codex workspace config: {config_path}")
-        logger.info(f"Codex workspace config contents: {config}")
 
     @staticmethod
     def _toml_value(v: Any) -> str:
@@ -605,14 +705,14 @@ class CodexBackend(NativeToolBackendMixin, LLMBackend):
         config_dir = Path(self.cwd) / ".codex"
         try:
             # Remove individual files we created
-            for filename in ("config.toml", "custom_tool_specs.json", "workflow_tool_specs.json"):
+            for filename in ("config.toml", "custom_tool_specs.json", "workflow_tool_specs.json", "checklist_specs.json", "AGENTS.md"):
                 filepath = config_dir / filename
                 if filepath.exists():
                     filepath.unlink()
             # Remove dir if empty
             if config_dir.exists() and not any(config_dir.iterdir()):
                 config_dir.rmdir()
-            # Also remove AGENTS.md we wrote in workspace root
+            # Cleanup legacy workspace-root AGENTS.md (older backend behavior).
             agents_md = Path(self.cwd) / "AGENTS.md"
             if agents_md.exists():
                 agents_md.unlink()
@@ -638,6 +738,68 @@ class CodexBackend(NativeToolBackendMixin, LLMBackend):
         if agent_id and dm.get_container(agent_id):
             return True
         return False
+
+    def _resolve_codex_skills_source(self) -> Optional[Path]:
+        """Resolve the best available skills source directory, if any."""
+        fm = self.filesystem_manager
+        if fm is not None:
+            if self._is_docker_mode:
+                dm = getattr(fm, "docker_manager", None)
+                agent_id = self.agent_id or getattr(fm, "agent_id", None)
+                temp_skills_dirs = getattr(dm, "temp_skills_dirs", None) if dm else None
+                if isinstance(temp_skills_dirs, dict) and agent_id in temp_skills_dirs:
+                    source = Path(temp_skills_dirs[agent_id])
+                    if source.exists():
+                        return source
+
+            local_skills_directory = getattr(fm, "local_skills_directory", None)
+            if local_skills_directory:
+                source = Path(local_skills_directory)
+                if source.exists():
+                    return source
+
+        project_skills = Path(self.cwd) / ".agent" / "skills"
+        if project_skills.exists():
+            return project_skills
+
+        home_skills = Path.home() / ".agent" / "skills"
+        if home_skills.exists():
+            return home_skills
+
+        return None
+
+    def _sync_skills_into_codex_home(self, codex_home: Path) -> None:
+        """Copy discovered skills into CODEX_HOME/skills for Codex discovery."""
+        source = self._resolve_codex_skills_source()
+        if source is None:
+            return
+
+        dest = codex_home / "skills"
+        dest.mkdir(parents=True, exist_ok=True)
+
+        try:
+            if source.resolve() == dest.resolve():
+                return
+        except OSError:
+            # Continue best-effort copy if either path cannot be resolved.
+            pass
+
+        copied_entries = 0
+        try:
+            for entry in source.iterdir():
+                target = dest / entry.name
+                if entry.is_dir():
+                    shutil.copytree(entry, target, dirs_exist_ok=True)
+                    copied_entries += 1
+                elif entry.is_file():
+                    shutil.copy2(entry, target)
+                    copied_entries += 1
+        except OSError as e:
+            logger.warning(f"Codex skills sync failed from {source} to {dest}: {e}")
+            return
+
+        if copied_entries:
+            logger.info(f"Codex skills sync: copied {copied_entries} entries from {source} to {dest}")
 
     def _get_docker_container(self):
         """Get the Docker container for this agent.
@@ -722,8 +884,8 @@ class CodexBackend(NativeToolBackendMixin, LLMBackend):
 
         return cmd
 
-    def _parse_codex_event(self, event: Dict[str, Any]) -> Optional[StreamChunk]:
-        """Parse a Codex JSON event into a StreamChunk.
+    def _parse_codex_event(self, event: Dict[str, Any]) -> List[StreamChunk]:
+        """Parse a Codex JSON event into StreamChunks.
 
         Handles both the documented item.started/item.completed wrapper format
         (with nested item.type) and legacy direct event names as fallback.
@@ -732,7 +894,7 @@ class CodexBackend(NativeToolBackendMixin, LLMBackend):
             event: Parsed JSON event from Codex
 
         Returns:
-            StreamChunk or None if event should be skipped
+            List of StreamChunks (empty list if event should be skipped)
         """
         event_type = event.get("type", "")
 
@@ -740,60 +902,71 @@ class CodexBackend(NativeToolBackendMixin, LLMBackend):
         if event_type == "thread.started":
             self.session_id = event.get("session_id") or event.get("thread_id")
             logger.info(f"Codex session started: {self.session_id}")
-            return StreamChunk(
-                type="agent_status",
-                status="session_started",
-                detail=f"Session: {self.session_id}",
-            )
+            return [
+                StreamChunk(
+                    type="agent_status",
+                    status="session_started",
+                    detail=f"Session: {self.session_id}",
+                ),
+            ]
 
         # Handle item.started / item.completed wrapper format
         # These wrap a nested "item" dict with its own "type" field
         if event_type in ("item.started", "item.completed"):
             item = event.get("item", {})
             item_type = item.get("type", "")
-            return self._parse_item(item_type, item)
+            is_completed = event_type == "item.completed"
+            return self._parse_item(item_type, item, is_completed=is_completed)
 
         # Legacy direct event names (fallback)
         if event_type.startswith("item."):
-            return self._parse_item(event_type, event)
+            return self._parse_item(event_type, event, is_completed=True)
 
         # Handle turn completion
         if event_type == "turn.completed":
             usage = event.get("usage", {})
-            return StreamChunk(
-                type="done",
-                usage={
-                    "prompt_tokens": usage.get("input_tokens", 0),
-                    "completion_tokens": usage.get("output_tokens", 0),
-                    "total_tokens": usage.get("total_tokens", 0),
-                },
-            )
+            return [
+                StreamChunk(
+                    type="done",
+                    usage={
+                        "prompt_tokens": usage.get("input_tokens", 0),
+                        "completion_tokens": usage.get("output_tokens", 0),
+                        "total_tokens": usage.get("total_tokens", 0),
+                    },
+                ),
+            ]
 
         if event_type == "turn.started":
-            return StreamChunk(
-                type="agent_status",
-                status="turn_started",
-            )
+            return [
+                StreamChunk(
+                    type="agent_status",
+                    status="turn_started",
+                ),
+            ]
 
         # Handle errors - message is at top level, not nested
         if event_type in ("turn.failed", "error"):
             error_msg = event.get("message") or event.get("error", {}).get("message") or str(event)
-            return StreamChunk(type="error", error=error_msg)
+            return [StreamChunk(type="error", error=error_msg)]
 
         # Skip unknown events
         logger.debug(f"Skipping unknown Codex event type: {event_type}")
-        return None
+        return []
 
-    def _parse_item(self, item_type: str, item: Dict[str, Any]) -> Optional[StreamChunk]:
-        """Parse an item by its type, used by both wrapper and legacy formats.
+    def _parse_item(self, item_type: str, item: Dict[str, Any], *, is_completed: bool = True) -> List[StreamChunk]:
+        """Parse an item by its type, emitting structured tool events.
 
-        Actual Codex v0.92 item types (from JSONL):
-          - agent_message: {text: "..."} — main assistant output
-          - reasoning: {text: "..."} — thinking/reasoning
-          - command_execution: {command, aggregated_output, exit_code, status}
-          - file_write: {path, content} — file creation/modification
-          - tool_call / tool_result — MCP tool usage
+        Returns a list of StreamChunks. Tool items emit mcp_status chunks
+        (for non-Textual displays) and fire emit_tool_start/emit_tool_complete
+        events (for the Textual TUI event pipeline), following the same pattern
+        as claude_code.py.
+
+        Args:
+            item_type: The Codex item type string
+            item: The item dict from the event
+            is_completed: True for item.completed events, False for item.started
         """
+        agent_id = self.agent_id
 
         # Agent message (main content output)
         if item_type in ("agent_message", "message", "item.message"):
@@ -801,103 +974,313 @@ class CodexBackend(NativeToolBackendMixin, LLMBackend):
             if isinstance(text, list):
                 text_parts = [c.get("text", "") for c in text if c.get("type") == "text"]
                 text = "".join(text_parts)
-            return StreamChunk(type="content", content=text)
+            return [StreamChunk(type="content", content=text)]
 
         # Reasoning / thinking
         if item_type in ("reasoning", "item.reasoning"):
-            return StreamChunk(
-                type="reasoning",
-                reasoning_delta=item.get("text") or item.get("content", ""),
-            )
+            return [
+                StreamChunk(
+                    type="reasoning",
+                    reasoning_delta=item.get("text") or item.get("content", ""),
+                ),
+            ]
 
         # Command execution (shell commands)
         if item_type in ("command_execution", "command", "item.command"):
             command = item.get("command", "")
-            output = item.get("aggregated_output") or item.get("output", "")
-            status = item.get("status", "")
-            exit_code = item.get("exit_code")
-            suffix = ""
-            if exit_code is not None and exit_code != 0:
-                suffix = f" (exit {exit_code})"
-            # Only emit for completed commands (skip in_progress)
-            if status == "in_progress":
-                return None
-            return StreamChunk(
-                type="content",
-                content=f"$ {command}{suffix}\n{output}".rstrip(),
-            )
+            item_id = item.get("id") or str(uuid.uuid4())
+            tool_name = "codex_shell"
 
-        # File write / change (docs: fileChange has changes: [{path, kind, diff}])
+            if not is_completed:
+                # item.started — record start time, emit tool_start
+                self._tool_start_times[item_id] = time.time()
+                self._tool_id_to_name[item_id] = tool_name
+                emitter = get_event_emitter()
+                if emitter:
+                    emitter.emit_tool_start(
+                        tool_id=item_id,
+                        tool_name=tool_name,
+                        args={"command": command},
+                        server_name="codex",
+                        agent_id=agent_id,
+                    )
+                return [
+                    StreamChunk(
+                        type="mcp_status",
+                        status="mcp_tool_called",
+                        content=f"Calling {tool_name}...",
+                        source="codex",
+                        tool_call_id=item_id,
+                    ),
+                    StreamChunk(
+                        type="mcp_status",
+                        status="function_call",
+                        content=f"Arguments for Calling {tool_name}: {json.dumps({'command': command})}",
+                        source="codex",
+                        tool_call_id=item_id,
+                    ),
+                ]
+            else:
+                # item.completed — emit tool_complete with result
+                output = item.get("aggregated_output") or item.get("output", "")
+                exit_code = item.get("exit_code")
+                is_error = exit_code is not None and exit_code != 0
+                suffix = f" (exit {exit_code})" if is_error else ""
+                result_str = f"$ {command}{suffix}\n{output}".rstrip()
+
+                elapsed = time.time() - self._tool_start_times.pop(item_id, time.time())
+                self._tool_id_to_name.pop(item_id, None)
+                emitter = get_event_emitter()
+                if emitter:
+                    emitter.emit_tool_complete(
+                        tool_id=item_id,
+                        tool_name=tool_name,
+                        result=result_str,
+                        elapsed_seconds=elapsed,
+                        status="error" if is_error else "success",
+                        is_error=is_error,
+                        agent_id=agent_id,
+                    )
+                return [
+                    StreamChunk(
+                        type="mcp_status",
+                        status="function_call_output",
+                        content=result_str,
+                        source="codex",
+                        tool_call_id=item_id,
+                    ),
+                ]
+
+        # File write / change — only arrives as item.completed
         if item_type in ("file_write", "file_change", "fileChange", "item.file_change"):
+            item_id = item.get("id") or str(uuid.uuid4())
+            tool_name = "codex_file_edit"
+
+            # Build display info from changes list or simple path
             changes = item.get("changes", [])
             if changes:
+                paths = [c.get("path", "unknown") for c in changes]
                 parts = []
                 for change in changes:
                     path = change.get("path", "unknown")
                     kind = change.get("kind", "edit")
-                    diff = change.get("diff", "")
                     parts.append(f"[File {kind}: {path}]")
-                    if diff:
-                        parts.append(diff)
-                return StreamChunk(type="content", content="\n".join(parts))
-            # Fallback for simpler format
-            file_path = item.get("path", "unknown")
-            return StreamChunk(type="content", content=f"[File written: {file_path}]")
+                result_str = "\n".join(parts)
+                args = {"paths": paths}
+            else:
+                file_path = item.get("path", "unknown")
+                result_str = f"[File written: {file_path}]"
+                args = {"path": file_path}
 
-        # MCP tool calls (docs: mcpToolCall {server, tool, status, arguments, result, error})
+            # Emit both start + complete (file_change only arrives as completed)
+            emitter = get_event_emitter()
+            if emitter:
+                emitter.emit_tool_start(
+                    tool_id=item_id,
+                    tool_name=tool_name,
+                    args=args,
+                    server_name="codex",
+                    agent_id=agent_id,
+                )
+                emitter.emit_tool_complete(
+                    tool_id=item_id,
+                    tool_name=tool_name,
+                    result=result_str,
+                    elapsed_seconds=0.0,
+                    status="success",
+                    is_error=False,
+                    agent_id=agent_id,
+                )
+            return [
+                StreamChunk(
+                    type="mcp_status",
+                    status="mcp_tool_called",
+                    content=f"Calling {tool_name}...",
+                    source="codex",
+                    tool_call_id=item_id,
+                ),
+                StreamChunk(
+                    type="mcp_status",
+                    status="function_call",
+                    content=f"Arguments for Calling {tool_name}: {json.dumps(args)}",
+                    source="codex",
+                    tool_call_id=item_id,
+                ),
+                StreamChunk(
+                    type="mcp_status",
+                    status="function_call_output",
+                    content=result_str,
+                    source="codex",
+                    tool_call_id=item_id,
+                ),
+            ]
+
+        # MCP tool calls (mcpToolCall {server, tool, status, arguments, result, error})
         if item_type in ("mcp_tool_call", "mcpToolCall", "tool_call", "item.tool_call"):
             tool_name = item.get("tool") or item.get("name", "")
             server = item.get("server", "")
-            status = item.get("status", "")
-            # For completed calls with results, emit as content
-            if status == "completed" and item.get("result") is not None:
+            item_id = item.get("id") or str(uuid.uuid4())
+            full_tool_name = f"{server}/{tool_name}" if server else tool_name
+
+            if not is_completed:
+                # item.started (in_progress) — emit tool_start
+                # Skip workflow MCP tools — only the completed result matters
+                if server == "massgen_workflow_tools":
+                    return []
+                self._tool_start_times[item_id] = time.time()
+                self._tool_id_to_name[item_id] = full_tool_name
+                arguments = item.get("arguments", {})
+                emitter = get_event_emitter()
+                if emitter:
+                    emitter.emit_tool_start(
+                        tool_id=item_id,
+                        tool_name=full_tool_name,
+                        args=arguments if isinstance(arguments, dict) else {"input": arguments},
+                        server_name=server or None,
+                        agent_id=agent_id,
+                    )
+                # Event emitter handles TUI rendering — no mcp_status StreamChunks
+                # needed (they caused duplicate tool entries in the Textual TUI).
+                return []
+            else:
+                # item.completed — emit tool_complete or workflow tool_calls
                 result = item.get("result", "")
-                # Check if this is a workflow MCP tool result — extract and emit as tool_calls
+
+                # Workflow MCP tools: extract as tool_calls (preserve existing behavior)
                 if server == "massgen_workflow_tools":
                     workflow_call = self._try_extract_workflow_mcp_result_from_codex(result)
                     if workflow_call:
-                        return StreamChunk(
-                            type="tool_calls",
-                            tool_calls=[workflow_call],
-                            source="codex",
-                        )
-                return StreamChunk(
-                    type="content",
-                    content=f"[MCP {server}/{tool_name}]: {result}",
-                )
-            # For in-progress or started, emit as tool_call
-            # Skip workflow MCP tools — only the completed result matters
-            if status != "completed":
-                if server == "massgen_workflow_tools":
-                    return None
-                tool_call = {
-                    "id": item.get("id", ""),
-                    "name": f"{server}/{tool_name}" if server else tool_name,
-                    "arguments": item.get("arguments", {}),
-                }
-                return StreamChunk(type="tool_calls", tool_calls=[tool_call])
-            # Completed with error
-            if item.get("error"):
-                return StreamChunk(
-                    type="content",
-                    content=f"[MCP {server}/{tool_name} error]: {item['error']}",
-                )
-            return None
+                        return [
+                            StreamChunk(
+                                type="tool_calls",
+                                tool_calls=[workflow_call],
+                                source="codex",
+                            ),
+                        ]
+                    return []
 
-        # Web search (docs: webSearch {query})
+                # Non-workflow: emit tool_complete
+                result_str = str(result) if not isinstance(result, str) else result
+                is_error = bool(item.get("error"))
+                if is_error:
+                    result_str = f"[Error]: {item.get('error', '')}"
+
+                elapsed = time.time() - self._tool_start_times.pop(item_id, time.time())
+                self._tool_id_to_name.pop(item_id, None)
+                emitter = get_event_emitter()
+                if emitter:
+                    emitter.emit_tool_complete(
+                        tool_id=item_id,
+                        tool_name=full_tool_name,
+                        result=result_str,
+                        elapsed_seconds=elapsed,
+                        status="error" if is_error else "success",
+                        is_error=is_error,
+                        agent_id=agent_id,
+                    )
+                # Event emitter handles TUI rendering — no mcp_status StreamChunks.
+                return []
+
+        # Web search — typically only item.completed
         if item_type in ("web_search", "webSearch"):
+            item_id = item.get("id") or str(uuid.uuid4())
+            tool_name = "codex_web_search"
             query = item.get("query", "")
-            return StreamChunk(type="content", content=f"[Web search: {query}]")
+            result_str = f"[Web search: {query}]"
 
-        # Image view (docs: imageView {path})
+            emitter = get_event_emitter()
+            if emitter:
+                emitter.emit_tool_start(
+                    tool_id=item_id,
+                    tool_name=tool_name,
+                    args={"query": query},
+                    server_name="codex",
+                    agent_id=agent_id,
+                )
+                emitter.emit_tool_complete(
+                    tool_id=item_id,
+                    tool_name=tool_name,
+                    result=result_str,
+                    elapsed_seconds=0.0,
+                    status="success",
+                    is_error=False,
+                    agent_id=agent_id,
+                )
+            return [
+                StreamChunk(
+                    type="mcp_status",
+                    status="mcp_tool_called",
+                    content=f"Calling {tool_name}...",
+                    source="codex",
+                    tool_call_id=item_id,
+                ),
+                StreamChunk(
+                    type="mcp_status",
+                    status="function_call",
+                    content=f"Arguments for Calling {tool_name}: {json.dumps({'query': query})}",
+                    source="codex",
+                    tool_call_id=item_id,
+                ),
+                StreamChunk(
+                    type="mcp_status",
+                    status="function_call_output",
+                    content=result_str,
+                    source="codex",
+                    tool_call_id=item_id,
+                ),
+            ]
+
+        # Image view — typically only item.completed
         if item_type in ("image_view", "imageView"):
-            return StreamChunk(
-                type="content",
-                content=f"[Image: {item.get('path', '')}]",
-            )
+            item_id = item.get("id") or str(uuid.uuid4())
+            tool_name = "codex_image_view"
+            img_path = item.get("path", "")
+            result_str = f"[Image: {img_path}]"
+
+            emitter = get_event_emitter()
+            if emitter:
+                emitter.emit_tool_start(
+                    tool_id=item_id,
+                    tool_name=tool_name,
+                    args={"path": img_path},
+                    server_name="codex",
+                    agent_id=agent_id,
+                )
+                emitter.emit_tool_complete(
+                    tool_id=item_id,
+                    tool_name=tool_name,
+                    result=result_str,
+                    elapsed_seconds=0.0,
+                    status="success",
+                    is_error=False,
+                    agent_id=agent_id,
+                )
+            return [
+                StreamChunk(
+                    type="mcp_status",
+                    status="mcp_tool_called",
+                    content=f"Calling {tool_name}...",
+                    source="codex",
+                    tool_call_id=item_id,
+                ),
+                StreamChunk(
+                    type="mcp_status",
+                    status="function_call",
+                    content=f"Arguments for Calling {tool_name}: {json.dumps({'path': img_path})}",
+                    source="codex",
+                    tool_call_id=item_id,
+                ),
+                StreamChunk(
+                    type="mcp_status",
+                    status="function_call_output",
+                    content=result_str,
+                    source="codex",
+                    tool_call_id=item_id,
+                ),
+            ]
 
         logger.debug(f"Skipping unknown Codex item type: {item_type}")
-        return None
+        return []
 
     async def stream_with_tools(
         self,
@@ -1112,8 +1495,8 @@ class CodexBackend(NativeToolBackendMixin, LLMBackend):
                     continue
 
                 logger.info(f"Codex raw event (docker): {json.dumps(event, default=str)[:500]}")
-                chunk = self._parse_codex_event(event)
-                if chunk:
+                chunks = self._parse_codex_event(event)
+                for chunk in chunks:
                     if first_content and chunk.type == "content":
                         self.record_first_token()
                         first_content = False
@@ -1190,8 +1573,8 @@ class CodexBackend(NativeToolBackendMixin, LLMBackend):
                     continue
 
                 logger.info(f"Codex raw event: {json.dumps(event, default=str)[:500]}")
-                chunk = self._parse_codex_event(event)
-                if chunk:
+                chunks = self._parse_codex_event(event)
+                for chunk in chunks:
                     # Record first token timing
                     if first_content and chunk.type == "content":
                         self.record_first_token()
@@ -1337,6 +1720,8 @@ class CodexBackend(NativeToolBackendMixin, LLMBackend):
         self.session_id = None
         self._session_file = None
         self._pending_workflow_instructions = ""
+        self._tool_start_times.clear()
+        self._tool_id_to_name.clear()
         self._cleanup_workspace_config()
         logger.info("Codex session state reset.")
 

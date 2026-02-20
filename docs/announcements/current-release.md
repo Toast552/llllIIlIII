@@ -1,4 +1,4 @@
-# MassGen v0.1.47 Release Announcement
+# MassGen v0.1.53 Release Announcement
 
 <!--
 This is the current release announcement. Copy this + feature-highlights.md to LinkedIn/X.
@@ -7,17 +7,17 @@ After posting, update the social links below.
 
 ## Release Summary
 
-We're excited to release MassGen v0.1.47, adding Codex Backend Support! 🚀 OpenAI Codex CLI is now a fully supported backend with local and Docker execution, OAuth and API key authentication. A new NativeToolMixin provides shared native tool handling across CLI-based backends (Codex and Claude Code). Plus: TUI theme system refactored to palette-based architecture and per-agent voting sensitivity.
+We're excited to release MassGen v0.1.53, focused on Background Tool Execution! 🚀 Background tool execution for non-blocking long-running work. Planning task verification requirements. TUI background job indicators and lifecycle controls. Subagent infrastructure groundwork with Evaluator and Explorer types.
 
 ## Install
 
 ```bash
-pip install massgen==0.1.47
+pip install massgen==0.1.53
 ```
 
 ## Links
 
-- **Release notes:** https://github.com/massgen/MassGen/releases/tag/v0.1.47
+- **Release notes:** https://github.com/massgen/MassGen/releases/tag/v0.1.53
 - **X post:** [TO BE ADDED AFTER POSTING]
 - **LinkedIn post:** [TO BE ADDED AFTER POSTING]
 
@@ -29,25 +29,30 @@ Copy everything below this line, then append content from `feature-highlights.md
 
 ---
 
-We're excited to release MassGen v0.1.47, adding Codex Backend Support! 🚀 OpenAI Codex CLI is now a fully supported backend with local and Docker execution, OAuth and API key authentication. A new NativeToolMixin provides shared native tool handling across CLI-based backends (Codex and Claude Code). Plus: TUI theme system refactored to palette-based architecture, per-agent voting sensitivity, and bug fixes.
+We're excited to release MassGen v0.1.53, focused on Background Tool Execution! 🚀 Background tool execution for non-blocking long-running work. Planning task verification requirements. TUI background job indicators and lifecycle controls. Subagent infrastructure groundwork with Evaluator and Explorer types.
 
 **Key Features:**
 
-**Codex Backend** - New `codex` backend type for OpenAI Codex CLI:
-- Local and Docker execution modes with workspace mounting
-- OAuth and API key authentication
-- Custom and workflow MCP servers for exposing MassGen tools to CLI-based backends
-- NativeToolMixin abstract mixin shared between Codex and Claude Code
+**Background Tool Execution** - Non-blocking lifecycle tools:
+- Start, monitor, wait, cancel, and list background jobs -- agents continue foreground work while long-running tools execute
+- `start_background_tool`, `get_background_tool_status`, `get_background_tool_result`, `wait_for_background_tool`, `cancel_background_tool`, `list_background_tools`
+- Compatible with custom tools and MCP server tools
 
-**TUI Theme Refactoring** - Palette-based architecture with unified base styles:
-- Semantic CSS variables for consistent cross-component theming
-- Theme palette files for dark and light variants
+**Planning Task Verification** - Quality assurance for planning:
+- Tasks now require `verification` and `verification_method` fields by default
+- `--no-require-verification` flag to opt out
+- Framework-injected tasks exempt
 
-**Per-agent Voting Sensitivity** - Per-agent override for voting evaluation criteria (strict/balanced/lenient)
+**Also in this release:**
+- TUI background job indicators: Agent status ribbon and background tasks modal with lifecycle controls
+- Subagent infrastructure: Groundwork for specialized subagent types (Evaluator, Explorer) via `SUBAGENT.md` frontmatter
+- Tool argument normalization: Consistent argument handling across backends
 
-**Claude Code Backend Refactored** - Now uses NativeToolMixin with native filesystem support and OS-level sandbox
+**Bug Fixes:**
+- Task plan verification improvements
+- Codex reasoning config alignment
 
-Release notes: https://github.com/massgen/MassGen/releases/tag/v0.1.47
+Release notes: https://github.com/massgen/MassGen/releases/tag/v0.1.53
 
 Feature highlights:
 

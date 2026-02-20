@@ -18,6 +18,7 @@ MCP tools configured.
 import os
 import shutil
 import stat
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -31,15 +32,23 @@ from ._constants import FRAMEWORK_MCPS
 from ._path_permission_manager import PathPermissionManager
 
 
-def _remove_readonly_onexc(func, path, exc):
-    """Error handler for shutil.rmtree to handle read-only files on Windows (e.g. .git/objects)."""
+def _remove_readonly(func, path, _exc_unused):
+    """Error handler for shutil.rmtree to handle read-only files on Windows (e.g. .git/objects).
+
+    Signature accepts three args so it works with both the ``onerror``
+    callback (func, path, exc_info) and the ``onexc`` callback
+    (func, path, exc) introduced in Python 3.12.
+    """
     os.chmod(path, stat.S_IWRITE)
     func(path)
 
 
 def _safe_rmtree(path):
     """shutil.rmtree that handles read-only files on Windows."""
-    shutil.rmtree(path, onexc=_remove_readonly_onexc)
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=_remove_readonly)
+    else:
+        shutil.rmtree(path, onerror=_remove_readonly)
 
 
 def git_commit_if_changed(workspace: Path, message: str) -> bool:
@@ -159,6 +168,7 @@ class FilesystemManager:
         filesystem_session_id: Optional[str] = None,
         session_storage_base: Optional[str] = None,
         use_two_tier_workspace: bool = False,
+        write_mode: Optional[str] = None,
     ):
         """
         Initialize FilesystemManager.
@@ -209,9 +219,16 @@ class FilesystemManager:
                                  Required along with filesystem_session_id for session pre-mounting.
             use_two_tier_workspace: If True, create scratch/ and deliverable/ subdirectories in workspace
                                    and initialize git versioning for audit trails.
+            write_mode: Isolation mode for agent writes - "auto", "worktree", "isolated", or "legacy".
+                       When set (not None or "legacy"), creates isolated write contexts for context paths.
         """
         self.agent_id = None  # Will be set by orchestrator via setup_orchestration_paths
-        self.use_two_tier_workspace = use_two_tier_workspace
+        self.write_mode = write_mode
+        # write_mode replaces the old two-tier workspace — suppress it when write_mode is active
+        if write_mode and write_mode != "legacy":
+            self.use_two_tier_workspace = False
+        else:
+            self.use_two_tier_workspace = use_two_tier_workspace
         self.instance_id = instance_id  # Unique instance ID for parallel execution
         self.enable_image_generation = enable_image_generation
         self.enable_mcp_command_line = enable_mcp_command_line
@@ -356,6 +373,19 @@ class FilesystemManager:
         self._using_temporary = False
         self._original_cwd = self.cwd
 
+        # Initialize isolation context manager if write_mode is set (and not legacy)
+        self.isolation_manager = None
+        if write_mode and write_mode != "legacy":
+            from ._isolation_context_manager import IsolationContextManager
+
+            # Use filesystem_session_id if available, otherwise generate one
+            session_id = filesystem_session_id or f"fm_{id(self)}"
+            self.isolation_manager = IsolationContextManager(
+                session_id=session_id,
+                write_mode=write_mode,
+            )
+            logger.info(f"[FilesystemManager] IsolationContextManager initialized: mode={write_mode}")
+
     def setup_orchestration_paths(
         self,
         agent_id: str,
@@ -399,6 +429,35 @@ class FilesystemManager:
         if self.docker_manager and self.agent_id:
             context_paths = self.path_permission_manager.get_context_paths()
 
+            # When write_mode is active, worktrees (inside workspace) replace original
+            # context paths. Don't mount the originals — mount only .git/ dirs so
+            # worktree git operations (commit, branch) can resolve references.
+            extra_mount_paths = None
+            if self.write_mode and self.write_mode != "legacy" and context_paths:
+                extra_mount_paths = []
+                preserved_context_paths = []
+                suppressed_repo_paths = []
+                for ctx_path_config in context_paths:
+                    ctx_path = ctx_path_config.get("path", "")
+                    git_dir = os.path.join(ctx_path, ".git")
+                    if ctx_path and os.path.isdir(git_dir):
+                        suppressed_repo_paths.append(ctx_path)
+                        extra_mount_paths.append((git_dir, git_dir, "rw"))
+                        logger.info(
+                            f"[FilesystemManager] write_mode: mounting .git/ dir for worktree refs: {git_dir}",
+                        )
+                    else:
+                        # Preserve non-git context paths (e.g., log/session directories)
+                        # so agents can still read external artifacts in Docker.
+                        preserved_context_paths.append(ctx_path_config)
+                context_paths = preserved_context_paths
+                logger.info(
+                    "[FilesystemManager] write_mode: suppressed {} repo context path mounts, preserved {} non-repo context paths, added {} .git/ mounts",
+                    len(suppressed_repo_paths),
+                    len(context_paths),
+                    len(extra_mount_paths),
+                )
+
             # Get session mount config if session manager is initialized
             session_mount = None
             if self.session_mount_manager:
@@ -415,8 +474,19 @@ class FilesystemManager:
                 massgen_skills=massgen_skills,
                 shared_tools_directory=self.shared_tools_base,
                 load_previous_session_skills=load_previous_session_skills,
+                extra_mount_paths=extra_mount_paths,
             )
             logger.info(f"[FilesystemManager] Docker container created for agent {self.agent_id}")
+
+            # Log context path mount summary for debugging
+            original_context_paths = self.path_permission_manager.get_context_paths() if self.path_permission_manager else []
+            logger.info(
+                f"[FilesystemManager] Docker mount summary for {self.agent_id}: "
+                f"original_context_paths={[p.get('path', '') for p in original_context_paths]}, "
+                f"mounted_context_paths={[p.get('path', '') for p in context_paths]}, "
+                f"extra_mount_paths={extra_mount_paths}, "
+                f"write_mode={self.write_mode}",
+            )
 
             # Add Docker skills directory to allowed paths if created
             if docker_skills_dir:
@@ -427,13 +497,27 @@ class FilesystemManager:
 
         # Setup local skills if local mode enabled and skills configured
         if self.enable_mcp_command_line and self.command_line_execution_mode == "local" and (skills_directory or massgen_skills):
-            self.setup_local_skills(skills_directory, massgen_skills)
+            self.setup_local_skills(
+                skills_directory,
+                massgen_skills,
+                load_previous_session_skills=load_previous_session_skills,
+            )
+        # For agents without command-line execution (non-Docker),
+        # still add the skills directory to allowed paths for filesystem MCP read access
+        elif not self.docker_manager and skills_directory:
+            from ._base import Permission
+
+            skills_path = Path(skills_directory).resolve()
+            if skills_path.exists() and skills_path.is_dir():
+                self.path_permission_manager.add_path(skills_path, Permission.READ, "skills_read")
+                self.local_skills_directory = skills_path
 
     def recreate_container_for_write_access(
         self,
         skills_directory: Optional[str] = None,
         massgen_skills: Optional[List[str]] = None,
         load_previous_session_skills: bool = False,
+        extra_mount_paths: Optional[List[tuple]] = None,
     ) -> None:
         """
         Recreate the Docker container with write access enabled for context paths.
@@ -447,6 +531,8 @@ class FilesystemManager:
             skills_directory: Path to skills directory to mount in Docker
             massgen_skills: List of MassGen built-in skills to enable
             load_previous_session_skills: If True, include evolving skills from previous sessions
+            extra_mount_paths: Optional list of (host_path, container_path, mode) tuples
+                for additional volume mounts (e.g., worktree paths for isolation)
 
         Note:
             This method preserves the agent's workspace and other state - only the
@@ -498,7 +584,9 @@ class FilesystemManager:
         if self.session_mount_manager:
             session_mount = self.session_mount_manager.get_mount_config()
 
-        # Recreate the container with write-enabled context paths
+        # Recreate the container with write-enabled context paths and writable skills dir.
+        # skills_writable=True mounts the actual project skills dir with rw access instead
+        # of creating a read-only temp merged copy, so the agent can persist skill changes.
         docker_skills_dir = self.docker_manager.create_container(
             agent_id=self.agent_id,
             workspace_path=self.cwd,
@@ -509,6 +597,8 @@ class FilesystemManager:
             massgen_skills=massgen_skills,
             shared_tools_directory=self.shared_tools_base,
             load_previous_session_skills=load_previous_session_skills,
+            extra_mount_paths=extra_mount_paths,
+            skills_writable=True,
         )
 
         logger.info(
@@ -525,7 +615,12 @@ class FilesystemManager:
                 self.path_permission_manager.add_path(docker_skills_dir, Permission.READ, "docker_skills")
                 logger.info(f"[Docker] Added skills directory to allowed paths: {docker_skills_dir}")
 
-    def setup_local_skills(self, skills_directory: Optional[str] = None, massgen_skills: Optional[List[str]] = None) -> None:
+    def setup_local_skills(
+        self,
+        skills_directory: Optional[str] = None,
+        massgen_skills: Optional[List[str]] = None,
+        load_previous_session_skills: bool = False,
+    ) -> None:
         """
         Setup merged skills directory for local command line execution mode.
 
@@ -535,6 +630,8 @@ class FilesystemManager:
         Args:
             skills_directory: Path to user's skills directory (e.g., .agent/skills)
             massgen_skills: List of MassGen built-in skills to enable
+            load_previous_session_skills: If True, include evolving skills from
+                previous sessions in the merged local skills directory.
         """
         import shutil
         import tempfile
@@ -588,6 +685,27 @@ class FilesystemManager:
                         logger.info(f"[Local] Adding MassGen skill: {skill_dir.name}")
                         shutil.copytree(skill_dir, skill_dest, dirs_exist_ok=True)
                         added_skills.add(skill_dir.name)
+
+        if load_previous_session_skills:
+            from .skills_manager import scan_previous_session_skills
+
+            logs_dir = Path(".massgen/massgen_logs")
+            logger.info(f"[Local] load_previous_session_skills enabled, scanning: {logs_dir}")
+            prev_skills = scan_previous_session_skills(logs_dir)
+            logger.info(f"[Local] Found {len(prev_skills)} previous session skills")
+
+            for skill in prev_skills:
+                source_path = skill.get("source_path")
+                if not source_path:
+                    continue
+                source = Path(source_path)
+                if not source.exists():
+                    continue
+                skill_name = str(skill.get("name", "unknown")).strip() or "unknown"
+                skill_dest = temp_skills_dir / skill_name
+                skill_dest.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, skill_dest / "SKILL.md")
+                logger.info(f"[Local] Added previous session skill: {skill_name} from {source}")
 
         # Store the merged skills directory path
         self.local_skills_directory = temp_skills_dir
@@ -1447,7 +1565,7 @@ class FilesystemManager:
 
         return config
 
-    def get_workspace_tools_mcp_config(self) -> Dict[str, Any]:
+    def get_workspace_tools_mcp_config(self, backend_type: Optional[str] = None) -> Dict[str, Any]:
         """
         Generate workspace tools MCP server configuration.
 
@@ -1645,13 +1763,13 @@ class FilesystemManager:
                 # If file ops excluded, only add workspace_tools if media generation is enabled
                 if self.exclude_file_operation_mcps:
                     if self.enable_image_generation or self.enable_audio_generation:
-                        mcp_servers.append(self.get_workspace_tools_mcp_config())
+                        mcp_servers.append(self.get_workspace_tools_mcp_config(backend_type=backend_config.get("type")))
                         logger.info("[FilesystemManager.inject_filesystem_mcp] Added workspace_tools MCP with media tools only (exclude_file_operation_mcps=True)")
                     else:
                         logger.info("[FilesystemManager.inject_filesystem_mcp] Skipping workspace_tools MCP entirely (exclude_file_operation_mcps=True, no media enabled)")
                 else:
                     # Normal case - add all workspace tools
-                    mcp_servers.append(self.get_workspace_tools_mcp_config())
+                    mcp_servers.append(self.get_workspace_tools_mcp_config(backend_type=backend_config.get("type")))
             else:
                 logger.warning("[FilesystemManager.inject_filesystem_mcp] Custom workspace_tools MCP server already present")
 
@@ -1993,22 +2111,18 @@ class FilesystemManager:
         try:
             logger.info(f"[FilesystemManager] Clearing temp workspace parent at orchestration startup: {self.agent_temporary_workspace_parent}")
 
-            items_to_clear = list(self.agent_temporary_workspace_parent.iterdir())
-            for item in items_to_clear:
-                logger.info(f" - Removing temp workspace item: {item}")
-                if item.is_symlink():
-                    logger.debug(f"[FilesystemManager] Skipping symlink during temp clear: {item}")
-                    continue
-                if item.is_file():
-                    item.unlink()
-                elif item.is_dir():
-                    _safe_rmtree(item)
+            shutil.rmtree(self.agent_temporary_workspace_parent)
+            self.agent_temporary_workspace_parent.mkdir(parents=True, exist_ok=True)
 
             logger.info("[FilesystemManager] Temp workspace parent cleared successfully")
 
         except Exception as e:
             logger.error(f"[FilesystemManager] Failed to clear temp workspace parent: {e}")
-            # Don't raise - orchestration can continue without clean temp workspace
+            # Last resort: try to recreate it fresh even if rmtree partially failed
+            try:
+                self.agent_temporary_workspace_parent.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
 
     async def copy_snapshots_to_temp_workspace(self, all_snapshots: Dict[str, Path], agent_mapping: Dict[str, str]) -> Optional[Path]:
         """
@@ -2155,6 +2269,14 @@ class FilesystemManager:
 
     def cleanup(self) -> None:
         """Cleanup temporary resources (not the main workspace) and Docker containers."""
+        # Cleanup isolation contexts if manager is active
+        if self.isolation_manager:
+            try:
+                logger.info("[FilesystemManager] Cleaning up isolation contexts")
+                self.isolation_manager.cleanup_all()
+            except Exception as e:
+                logger.warning(f"[FilesystemManager] Failed to cleanup isolation contexts: {e}")
+
         # Cleanup Docker container if Docker mode enabled
         if self.docker_manager and self.agent_id:
             self.docker_manager.cleanup(self.agent_id)

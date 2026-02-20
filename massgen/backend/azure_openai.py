@@ -41,6 +41,15 @@ class AzureOpenAIBackend(LLMBackend):
                 "Azure OpenAI API key is required. Set AZURE_OPENAI_API_KEY environment variable or pass api_key parameter.",
             )
 
+        # Persist normalized Azure settings for introspection/tests and sensible defaults.
+        self.azure_endpoint = kwargs.get("azure_endpoint") or kwargs.get("base_url") or os.getenv("AZURE_OPENAI_ENDPOINT")
+        if self.azure_endpoint and self.azure_endpoint.endswith("/"):
+            self.azure_endpoint = self.azure_endpoint[:-1]
+        self.api_version = kwargs.get("api_version") or os.getenv(
+            "AZURE_OPENAI_API_VERSION",
+            "2024-12-01-preview",
+        )
+
     def get_provider_name(self) -> str:
         """Get the name of this provider."""
         return "Azure OpenAI"
@@ -76,11 +85,8 @@ class AzureOpenAIBackend(LLMBackend):
             # Import Azure OpenAI client
             from openai import AsyncAzureOpenAI, AsyncOpenAI
 
-            azure_endpoint = all_params.get("azure_endpoint") or all_params.get("base_url") or os.getenv("AZURE_OPENAI_ENDPOINT")
-            api_version = all_params.get("api_version") or os.getenv(
-                "AZURE_OPENAI_API_VERSION",
-                "2024-12-01-preview",
-            )
+            azure_endpoint = all_params.get("azure_endpoint") or all_params.get("base_url") or self.azure_endpoint
+            api_version = all_params.get("api_version") or self.api_version
 
             # Validate required configuration
             if not azure_endpoint:
@@ -135,7 +141,7 @@ class AzureOpenAIBackend(LLMBackend):
                 )
 
             # Check if workflow tools are present
-            workflow_tools = [t for t in tools if t.get("function", {}).get("name") in ["new_answer", "vote", "submit", "restart_orchestration"]] if tools else []
+            workflow_tools = [t for t in tools if t.get("function", {}).get("name") in ["new_answer", "vote", "stop", "submit", "restart_orchestration"]] if tools else []
             has_workflow_tools = len(workflow_tools) > 0
 
             # CRITICAL DEBUG: Log tool detection (using logger.info to ensure it appears)
@@ -421,6 +427,10 @@ class AzureOpenAIBackend(LLMBackend):
                         system_parts.append(
                             '    Usage: {"tool_name": "vote", ' '"arguments": {"agent_id": "agent1", ' '"reason": "explanation"}}',
                         )
+                elif name == "stop":
+                    system_parts.append(
+                        '    Usage: {"tool_name": "stop", "arguments": {"summary": "Brief summary of completed work", ' '"status": "complete"}}  // status: "complete" or "blocked"',
+                    )
                 elif name == "submit":
                     system_parts.append(
                         '    Usage: {"tool_name": "submit", ' '"arguments": {"confirmed": true}}',

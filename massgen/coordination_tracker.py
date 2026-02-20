@@ -50,6 +50,7 @@ class EventType(str, Enum):
     AGENT_CANCELLED = "agent_cancelled"
     UPDATE_INJECTED = "update_injected"
     VOTE_IGNORED = "vote_ignored"
+    AGENT_STOPPED = "agent_stopped"  # Agent stopped in decomposition mode
 
     # Broadcast/communication events
     BROADCAST_CREATED = "broadcast_created"
@@ -65,6 +66,7 @@ ACTION_TO_EVENT = {
     ActionType.CANCELLED: EventType.AGENT_CANCELLED,
     ActionType.UPDATE_INJECTED: EventType.UPDATE_INJECTED,
     ActionType.VOTE_IGNORED: EventType.VOTE_IGNORED,
+    ActionType.STOP: EventType.AGENT_STOPPED,
 }
 
 
@@ -96,6 +98,7 @@ class AgentAnswer:
     agent_id: str
     content: str
     timestamp: float
+    changedoc: Optional[str] = None  # Content from changedoc.md decision journal
 
     @property
     def label(self) -> str:
@@ -289,6 +292,22 @@ class CoordinationTracker:
         """
         sorted_ids = sorted(self.agent_ids)
         return {real_id: f"agent{i}" for i, real_id in enumerate(sorted_ids, 1)}
+
+    def get_answer_label_mapping(self) -> Dict[str, str]:
+        """Get mapping from real agent ID to their latest versioned answer label.
+
+        Returns:
+            Dict mapping real IDs to versioned labels, e.g.:
+            {"agent_a": "agent1.2", "agent_b": "agent2.1"}
+
+        Only includes agents that have at least one answer.
+        """
+        mapping = {}
+        for agent_id in self.agent_ids:
+            label = self.get_latest_answer_label(agent_id)
+            if label:
+                mapping[agent_id] = label
+        return mapping
 
     def get_agents_with_answers_anon(self, answers: Dict[str, Any]) -> List[str]:
         """
@@ -734,6 +753,34 @@ class CoordinationTracker:
             available_answers=self.iteration_available_labels.copy(),
             agents_with_answers=agents_with_answers,
             answer_label_mapping=answer_label_mapping,
+        )
+
+    def add_agent_stop(
+        self,
+        agent_id: str,
+        stop_data: Dict[str, Any],
+    ):
+        """Record when an agent stops in decomposition mode.
+
+        This is a thin wrapper that records a stop event for logging/tracing.
+        The core state management (has_voted = True) happens in the orchestrator.
+
+        Args:
+            agent_id: ID of the stopping agent
+            stop_data: Dictionary with stop information (summary, status)
+        """
+        summary = stop_data.get("summary", "")
+        status = stop_data.get("status", "complete")
+
+        context = {
+            "summary": summary,
+            "status": status,
+        }
+        self._add_event(
+            EventType.AGENT_STOPPED,
+            agent_id,
+            f"Stopped ({status}): {summary[:100]}",
+            context,
         )
 
     def set_final_agent(

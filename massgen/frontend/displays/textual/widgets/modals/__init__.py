@@ -8,7 +8,7 @@ Modals are organized by function:
 - status_modals: SystemStatusModal, MCPStatusModal, CostBreakdownModal, MetricsModal
 - coordination_modals: VoteResultsModal, OrchestratorEventsModal, CoordinationTableModal, AgentSelectorModal
 - content_modals: TextContentModal, TurnDetailModal, ConversationHistoryModal, ContextModal
-- input_modals: BroadcastPromptModal, StructuredBroadcastPromptModal
+- input_modals: BroadcastPromptModal, StructuredBroadcastPromptModal, DecompositionSubtasksModal
 - shortcuts_modal: KeyboardShortcutsModal
 - workspace_modals: FileInspectionModal
 - agent_output_modal: AgentOutputModal
@@ -33,8 +33,18 @@ from .coordination_modals import (
     OrchestratorEventsModal,
     VoteResultsModal,
 )
-from .input_modals import BroadcastPromptModal, StructuredBroadcastPromptModal
+from .final_answer_modal import FinalAnswerModal, FinalAnswerModalData
+from .input_modals import (
+    BroadcastPromptModal,
+    ChunkAdvanceModal,
+    DecompositionGenerationModal,
+    DecompositionSubtasksModal,
+    StructuredBroadcastPromptModal,
+)
+from .review_changes_panel import ReviewChangesPanel
+from .review_modal import GitDiffReviewModal
 from .shortcuts_modal import KeyboardShortcutsModal
+from .skills_modals import SkillsModal
 from .status_modals import (
     CostBreakdownModal,
     MCPStatusModal,
@@ -66,9 +76,21 @@ __all__ = [
     "TurnDetailModal",
     # Input modals
     "BroadcastPromptModal",
+    "ChunkAdvanceModal",
+    "DecompositionGenerationModal",
+    "DecompositionSubtasksModal",
     "StructuredBroadcastPromptModal",
+    # Final answer modal
+    "FinalAnswerModal",
+    "FinalAnswerModalData",
+    # Review panel
+    "ReviewChangesPanel",
+    # Review modal
+    "GitDiffReviewModal",
     # Shortcuts modal
     "KeyboardShortcutsModal",
+    # Skills modals
+    "SkillsModal",
     # Workspace modals
     "FileInspectionModal",
     # Agent output modal

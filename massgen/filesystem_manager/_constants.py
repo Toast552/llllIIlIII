@@ -306,6 +306,8 @@ FRAMEWORK_MCPS = frozenset(
         "planning",  # Task planning MCP
         "memory",  # Memory management MCP
         "subagent",  # Subagent spawning (built-in when enabled)
+        "skills",  # Skill discovery and reading MCP
+        "massgen_checklist",  # Checklist-gated voting tool (must be a direct model tool)
     },
 )
 

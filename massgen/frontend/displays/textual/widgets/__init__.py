@@ -12,21 +12,26 @@ This module exports all widgets including:
 from .modal_base import MODAL_BASE_CSS, BaseDataModal, BaseModal
 
 # Extracted modals - organized by function
-from .modals import (  # Browser modals; Status modals; Coordination modals; Content modals; Input modals; Shortcuts modal; Workspace modals; Agent output modal
+from .modals import (  # Browser modals; Status modals; Coordination modals; Content modals; Input modals; Review modal; Shortcuts modal; Workspace modals; Agent output modal
     AgentOutputModal,
     AgentSelectorModal,
     AnswerBrowserModal,
     BroadcastPromptModal,
     BrowserTabsModal,
+    ChunkAdvanceModal,
     ContextModal,
     ConversationHistoryModal,
     CoordinationTableModal,
     CostBreakdownModal,
+    DecompositionGenerationModal,
+    DecompositionSubtasksModal,
     FileInspectionModal,
+    GitDiffReviewModal,
     KeyboardShortcutsModal,
     MCPStatusModal,
     MetricsModal,
     OrchestratorEventsModal,
+    SkillsModal,
     StructuredBroadcastPromptModal,
     SystemStatusModal,
     TextContentModal,
@@ -63,9 +68,16 @@ __all__ = [
     "TurnDetailModal",
     # Input modals
     "BroadcastPromptModal",
+    "ChunkAdvanceModal",
+    "DecompositionGenerationModal",
+    "DecompositionSubtasksModal",
     "StructuredBroadcastPromptModal",
+    # Review modal
+    "GitDiffReviewModal",
     # Shortcuts modal
     "KeyboardShortcutsModal",
+    # Skills modals
+    "SkillsModal",
     # Workspace modals
     "FileInspectionModal",
     # Agent output modal

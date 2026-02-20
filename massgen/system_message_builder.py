@@ -20,6 +20,7 @@ from massgen.system_prompt_sections import (
     CodeBasedToolsSection,
     CommandExecutionSection,
     CoreBehaviorsSection,
+    DecompositionSection,
     EvaluationSection,
     EvolvingSkillsSection,
     FileSearchSection,
@@ -29,6 +30,7 @@ from massgen.system_prompt_sections import (
     GrokGuidanceSection,
     MemorySection,
     MultimodalToolsSection,
+    NoveltyPressureSection,
     OutputFirstVerificationSection,
     PlanningModeSection,
     PostEvaluationSection,
@@ -83,6 +85,54 @@ class SystemMessageBuilder:
         self.session_id = session_id
         self.agent_temporary_workspace = agent_temporary_workspace
 
+    @property
+    def _changedoc_enabled(self) -> bool:
+        """Return True when changedoc decision journal is enabled."""
+        coord = getattr(self.config, "coordination_config", None)
+        return bool(coord and getattr(coord, "enable_changedoc", True))
+
+    @staticmethod
+    def _filter_skills_by_enabled_names(
+        all_skills: List[Dict[str, Any]],
+        enabled_skill_names: Optional[List[str]],
+    ) -> List[Dict[str, Any]]:
+        """Filter discovered skills using an optional runtime allowlist.
+
+        Args:
+            all_skills: All discovered skills from scan_skills().
+            enabled_skill_names: Optional list of enabled skill names. If None,
+                no filtering is applied and all discovered skills are returned.
+
+        Returns:
+            Filtered list preserving original order.
+        """
+        if enabled_skill_names is None:
+            return all_skills
+
+        enabled = {(name or "").strip().lower() for name in enabled_skill_names}
+        enabled = {name for name in enabled if name}
+        if not enabled:
+            return []
+
+        filtered: List[Dict[str, Any]] = []
+        for skill in all_skills:
+            skill_name = str(skill.get("name", "")).strip().lower()
+            if skill_name in enabled:
+                filtered.append(skill)
+        return filtered
+
+    def _discover_specialized_subagents(self):
+        """Discover specialized subagent types from disk (cached per builder instance)."""
+        if not hasattr(self, "_specialized_subagents_cache"):
+            from massgen.subagent.type_scanner import scan_subagent_types
+
+            self._specialized_subagents_cache = scan_subagent_types()
+            if self._specialized_subagents_cache:
+                logger.info(
+                    f"[SystemMessageBuilder] Discovered {len(self._specialized_subagents_cache)} " f"specialized subagent types: {[t.name for t in self._specialized_subagents_cache]}",
+                )
+        return self._specialized_subagents_cache
+
     def build_coordination_message(
         self,
         agent,  # ChatAgent
@@ -97,6 +147,18 @@ class SystemMessageBuilder:
         vote_only: bool = False,
         agent_mapping: Optional[Dict[str, str]] = None,
         voting_sensitivity_override: Optional[str] = None,
+        voting_threshold: Optional[int] = None,
+        checklist_require_gap_report: bool = True,
+        gap_report_mode: str = "changedoc",
+        answers_used: int = 0,
+        answer_cap: Optional[int] = None,
+        coordination_mode: str = "voting",
+        agent_subtask: Optional[str] = None,
+        worktree_paths: Optional[Dict[str, str]] = None,
+        branch_name: Optional[str] = None,
+        other_branches: Optional[Dict[str, str]] = None,
+        branch_diff_summaries: Optional[Dict[str, str]] = None,
+        novelty_pressure_data: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Build system message for coordination phase.
 
@@ -119,6 +181,13 @@ class SystemMessageBuilder:
                           global consistency with vote tool and injections.
             voting_sensitivity_override: Per-agent voting sensitivity override. If provided,
                                         takes precedence over the orchestrator-level setting.
+            coordination_mode: "voting" (default) or "decomposition"
+            agent_subtask: The agent's assigned subtask (decomposition mode)
+            worktree_paths: Dict of worktree_path -> original_path for worktree-based workspaces
+            branch_name: This agent's current git branch name (for display in system prompt)
+            other_branches: Dict mapping anonymous ID to branch name (e.g. {"agent1": "massgen/abc123"})
+            branch_diff_summaries: Dict mapping anonymous ID to diff summary string
+                                   (e.g. {"agent1": "3 files (+45/-12)\n  M src/auth.py | ..."})
 
         Returns:
             Complete system prompt string with XML structure
@@ -149,19 +218,68 @@ class SystemMessageBuilder:
             logger.info(f"[SystemMessageBuilder] Added Grok file encoding guidance for {agent_id} (model: {model_name})")
 
         # PRIORITY 1 (HIGH): Output-First Verification - verify outcomes, not implementations
-        builder.add_section(OutputFirstVerificationSection())
+        is_decomposition = coordination_mode == "decomposition"
+        builder.add_section(OutputFirstVerificationSection(decomposition_mode=is_decomposition))
 
-        # PRIORITY 1 (CRITICAL): MassGen Coordination - vote/new_answer primitives
-        # Use per-agent override if provided, otherwise fall back to orchestrator default
-        voting_sensitivity = voting_sensitivity_override or self.message_templates._voting_sensitivity
-        answer_novelty_requirement = self.message_templates._answer_novelty_requirement
-        builder.add_section(
-            EvaluationSection(
-                voting_sensitivity=voting_sensitivity,
-                answer_novelty_requirement=answer_novelty_requirement,
-                vote_only=vote_only,
-            ),
-        )
+        # PRIORITY 1 (CRITICAL): MassGen Coordination - vote/new_answer or decomposition primitives
+        changedoc_enabled = self._changedoc_enabled
+        if coordination_mode == "decomposition":
+            decomp_sensitivity = voting_sensitivity_override or self.message_templates._voting_sensitivity
+            builder.add_section(
+                DecompositionSection(
+                    subtask=agent_subtask,
+                    voting_threshold=voting_threshold,
+                    voting_sensitivity=decomp_sensitivity,
+                    answers_used=answers_used,
+                    answer_cap=answer_cap,
+                    checklist_require_gap_report=checklist_require_gap_report,
+                    gap_report_mode=gap_report_mode,
+                    has_changedoc=changedoc_enabled,
+                ),
+            )
+        else:
+            # Use per-agent override if provided, otherwise fall back to orchestrator default
+            voting_sensitivity = voting_sensitivity_override or self.message_templates._voting_sensitivity
+            answer_novelty_requirement = self.message_templates._answer_novelty_requirement
+            round_number = len(previous_turns) + 1 if previous_turns else 1
+            # Check if evaluator subagent type is available (for mandatory check directive)
+            has_evaluator_subagent = False
+            _enable_subagents = getattr(self.config.coordination_config, "enable_subagents", False) if hasattr(self.config, "coordination_config") else False
+            if _enable_subagents:
+                specialized_types = self._discover_specialized_subagents()
+                has_evaluator_subagent = any(t.name == "evaluator" for t in specialized_types)
+
+            builder.add_section(
+                EvaluationSection(
+                    voting_sensitivity=voting_sensitivity,
+                    answer_novelty_requirement=answer_novelty_requirement,
+                    vote_only=vote_only,
+                    round_number=round_number,
+                    voting_threshold=voting_threshold,
+                    checklist_require_gap_report=checklist_require_gap_report,
+                    gap_report_mode=gap_report_mode,
+                    answers_used=answers_used,
+                    answer_cap=answer_cap,
+                    has_changedoc=changedoc_enabled,
+                    has_evaluator_subagent=has_evaluator_subagent,
+                ),
+            )
+
+        # PRIORITY 10 (MEDIUM): Novelty Pressure (conditional)
+        if novelty_pressure_data is not None:
+            novelty_injection = getattr(
+                self.config.coordination_config,
+                "novelty_injection",
+                "none",
+            )
+            if novelty_injection != "none":
+                builder.add_section(
+                    NoveltyPressureSection(
+                        novelty_level=novelty_injection,
+                        consecutive_incremental_rounds=novelty_pressure_data.get("consecutive", 0),
+                        restart_count=novelty_pressure_data.get("restart_count", 0),
+                    ),
+                )
 
         # PRIORITY 5 (HIGH): Skills - Must be visible early
         if use_skills:
@@ -179,14 +297,21 @@ class SystemMessageBuilder:
                 logger.info(f"[SystemMessageBuilder] Will scan logs_dir: {logs_dir}")
 
             all_skills = scan_skills(skills_dir, logs_dir=logs_dir)
+            enabled_skill_names = getattr(self.config.coordination_config, "enabled_skill_names", None)
+            all_skills = self._filter_skills_by_enabled_names(all_skills, enabled_skill_names)
 
             # Log what we found
             builtin_count = len([s for s in all_skills if s["location"] == "builtin"])
             project_count = len([s for s in all_skills if s["location"] == "project"])
+            user_count = len([s for s in all_skills if s["location"] == "user"])
             previous_count = len([s for s in all_skills if s["location"] == "previous_session"])
             logger.info(
-                f"[SystemMessageBuilder] Scanned skills: {builtin_count} builtin, " f"{project_count} project, {previous_count} previous_session",
+                f"[SystemMessageBuilder] Scanned skills: {builtin_count} builtin, " f"{project_count} project, {user_count} user, {previous_count} previous_session",
             )
+            if enabled_skill_names is not None:
+                logger.info(
+                    f"[SystemMessageBuilder] Runtime skill filter active: {len(all_skills)} enabled",
+                )
 
             # Log details for each skill
             for skill in all_skills:
@@ -200,7 +325,7 @@ class SystemMessageBuilder:
 
             # Add skills section with all skills (both project and builtin)
             # Builtin skills are now treated the same as project skills - invoke with openskills read
-            builder.add_section(SkillsSection(all_skills))
+            builder.add_section(SkillsSection(all_skills, skills_dir=skills_dir))
 
         # PRIORITY 5 (HIGH): Memory - Proactive usage
         if enable_memory:
@@ -231,18 +356,43 @@ class SystemMessageBuilder:
             context_paths = agent.backend.filesystem_manager.path_permission_manager.get_context_paths() if agent.backend.filesystem_manager.path_permission_manager else []
 
             # Check if two-tier workspace is enabled
+            # Note: use_two_tier_workspace is already suppressed (set to False) on the
+            # filesystem manager when write_mode is active, so no extra check needed here
             use_two_tier_workspace = False
             if hasattr(agent.backend, "filesystem_manager") and agent.backend.filesystem_manager:
                 use_two_tier_workspace = getattr(agent.backend.filesystem_manager, "use_two_tier_workspace", False)
 
             # Add project instructions section (CLAUDE.md / AGENTS.md discovery)
             # This comes BEFORE workspace structure so project context is established first
-            if context_paths:
-                logger.info(f"[SystemMessageBuilder] Checking for project instructions in {len(context_paths)} context paths")
-                builder.add_section(ProjectInstructionsSection(context_paths, workspace_root=main_workspace))
+            # When worktree_paths is set, discover from worktrees (full checkouts with CLAUDE.md)
+            # instead of original context paths (which may not be mounted in Docker)
+            discovery_paths = context_paths
+            if worktree_paths:
+                discovery_paths = [{"path": wt_path} for wt_path in worktree_paths]
+            if discovery_paths:
+                logger.info(f"[SystemMessageBuilder] Checking for project instructions in {len(discovery_paths)} {'worktree' if worktree_paths else 'context'} paths")
+                builder.add_section(ProjectInstructionsSection(discovery_paths, workspace_root=main_workspace))
 
             # Add workspace structure section (critical paths)
-            builder.add_section(WorkspaceStructureSection(main_workspace, [p.get("path", "") for p in context_paths], use_two_tier_workspace=use_two_tier_workspace))
+            context_path_strs = [p.get("path", "") for p in context_paths]
+            logger.info(
+                f"[SystemMessageBuilder] System prompt paths: "
+                f"context_paths={context_path_strs}, "
+                f"worktree_paths={list(worktree_paths.keys()) if worktree_paths else None}, "
+                f"discovery_paths={[p.get('path', '') for p in discovery_paths] if discovery_paths else None}",
+            )
+            builder.add_section(
+                WorkspaceStructureSection(
+                    main_workspace,
+                    context_path_strs,
+                    use_two_tier_workspace=use_two_tier_workspace,
+                    decomposition_mode=is_decomposition,
+                    worktree_paths=worktree_paths,
+                    branch_name=branch_name,
+                    other_branches=other_branches,
+                    branch_diff_summaries=branch_diff_summaries,
+                ),
+            )
 
             # Check command execution settings
             enable_command_execution = False
@@ -270,6 +420,7 @@ class SystemMessageBuilder:
                 enable_sudo=enable_sudo,
                 concurrent_tool_execution=concurrent_tool_execution,
                 agent_mapping=agent_mapping,
+                decomposition_mode=is_decomposition,
             )
 
             builder.add_section(fs_ops)
@@ -311,8 +462,10 @@ class SystemMessageBuilder:
                     workspace_path = str(agent.backend.filesystem_manager.get_current_workspace())
                 # Get max concurrent from config, default to 3
                 max_concurrent = getattr(self.config.coordination_config, "subagent_max_concurrent", 3)
-                builder.add_section(SubagentSection(workspace_path, max_concurrent))
-                logger.info(f"[SystemMessageBuilder] Added subagent section for {agent_id} (max_concurrent: {max_concurrent})")
+                # Discover specialized subagent types from disk
+                specialized_subagents = self._discover_specialized_subagents()
+                builder.add_section(SubagentSection(workspace_path, max_concurrent, specialized_subagents=specialized_subagents))
+                logger.info(f"[SystemMessageBuilder] Added subagent section for {agent_id} (max_concurrent: {max_concurrent}, specialized_types: {len(specialized_subagents)})")
 
         # PRIORITY 10 (MEDIUM): Task Context (when multimodal tools OR subagents are enabled)
         # This instructs agents to create CONTEXT.md before using tools that make external API calls
@@ -331,7 +484,7 @@ class SystemMessageBuilder:
                 and agent.backend.filesystem_manager
                 and agent.backend.filesystem_manager.cwd
             )
-            builder.add_section(TaskPlanningSection(filesystem_mode=filesystem_mode))
+            builder.add_section(TaskPlanningSection(filesystem_mode=filesystem_mode, decomposition_mode=is_decomposition))
 
         # PRIORITY 10 (MEDIUM): Evolving Skills (when auto-discovery AND task planning are both enabled)
         # Both gates must be true: evolving skills are structured work plans that complement task planning
@@ -376,6 +529,15 @@ class SystemMessageBuilder:
         if planning_mode_enabled and self.config and hasattr(self.config, "coordination_config") and self.config.coordination_config and self.config.coordination_config.planning_mode_instruction:
             builder.add_section(PlanningModeSection(self.config.coordination_config.planning_mode_instruction))
             logger.info(f"[SystemMessageBuilder] Added planning mode instructions for {agent_id}")
+
+        # PRIORITY 10 (MEDIUM): Changedoc (conditional)
+        changedoc_enabled = self._changedoc_enabled
+        if changedoc_enabled:
+            from massgen.system_prompt_sections import ChangedocSection
+
+            has_prior_answers = bool(answers)
+            builder.add_section(ChangedocSection(has_prior_answers=has_prior_answers, gap_report_mode=gap_report_mode))
+            logger.info(f"[SystemMessageBuilder] Added changedoc instructions for {agent_id} (prior_answers={has_prior_answers})")
 
         # Build and return the complete structured system prompt
         return builder.build()
@@ -498,10 +660,29 @@ This makes the work reusable for similar future tasks."""
                 sections_content.append(evolving_skill_instructions)
                 logger.info("[SystemMessageBuilder] Added evolving skill output instructions for presentation")
 
+            # Add changedoc consolidation instructions if enabled
+            changedoc_enabled = self._changedoc_enabled
+            if changedoc_enabled:
+                from massgen.system_prompt_sections import (
+                    _CHANGEDOC_PRESENTER_INSTRUCTIONS,
+                )
+
+                sections_content.append(_CHANGEDOC_PRESENTER_INSTRUCTIONS)
+                logger.info("[SystemMessageBuilder] Added changedoc consolidation instructions for presentation")
+
             # Combine: filesystem sections + presentation instructions
             filesystem_content = "\n\n".join(sections_content)
             return f"{filesystem_content}\n\n## Instructions\n{presentation_instructions}"
         else:
+            # Add changedoc consolidation instructions if enabled (no filesystem case)
+            changedoc_enabled = self._changedoc_enabled
+            if changedoc_enabled:
+                from massgen.system_prompt_sections import (
+                    _CHANGEDOC_PRESENTER_INSTRUCTIONS,
+                )
+
+                presentation_instructions += _CHANGEDOC_PRESENTER_INSTRUCTIONS
+
             # No filesystem - just return presentation instructions
             return presentation_instructions
 
@@ -594,6 +775,7 @@ This makes the work reusable for similar future tasks."""
         enable_sudo: bool = False,
         concurrent_tool_execution: bool = False,
         agent_mapping: Optional[Dict[str, str]] = None,
+        decomposition_mode: bool = False,
     ) -> Tuple[Any, Any, Optional[Any]]:  # Tuple[FilesystemOperationsSection, FilesystemBestPracticesSection, Optional[CommandExecutionSection]]
         """Build filesystem-related sections.
 
@@ -619,6 +801,15 @@ This makes the work reusable for similar future tasks."""
         main_workspace = str(agent.backend.filesystem_manager.get_current_workspace())
         temp_workspace = str(agent.backend.filesystem_manager.agent_temporary_workspace) if agent.backend.filesystem_manager.agent_temporary_workspace else None
         context_paths = agent.backend.filesystem_manager.path_permission_manager.get_context_paths() if agent.backend.filesystem_manager.path_permission_manager else []
+
+        # When write_mode is active (not legacy), worktrees replace original context paths.
+        # Don't show original paths in filesystem operations — the agent works in the worktree.
+        write_mode = getattr(agent.backend.filesystem_manager, "write_mode", None)
+        if write_mode and write_mode != "legacy":
+            logger.info(
+                f"[SystemMessageBuilder] FilesystemOps: suppressing context_paths " f"{[p.get('path', '') for p in context_paths]} (write_mode={write_mode})",
+            )
+            context_paths = []
 
         # Calculate previous turns context
         current_turn_num = len(previous_turns) + 1 if previous_turns else 1
@@ -646,7 +837,7 @@ This makes the work reusable for similar future tasks."""
         )
 
         # Build filesystem best practices section
-        fs_best = FilesystemBestPracticesSection(enable_code_based_tools=enable_code_based_tools)
+        fs_best = FilesystemBestPracticesSection(enable_code_based_tools=enable_code_based_tools, decomposition_mode=decomposition_mode)
 
         # Build command execution section if enabled
         cmd_exec = None

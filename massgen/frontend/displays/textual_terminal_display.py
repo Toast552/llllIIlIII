@@ -4,23 +4,30 @@ Textual Terminal Display for MassGen Coordination
 
 """
 
+import ast
 import functools
+import json
 import os
 import re
+import sys
 import tempfile
 import threading
 import time
+import traceback
 from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Deque, Dict, List, Optional, Set, Tuple
 
 if TYPE_CHECKING:
+    from massgen.filesystem_manager import ReviewResult
     from massgen.frontend.displays.textual_widgets.plan_approval_modal import (
         PlanApprovalResult,
     )
 
 from massgen.logger_config import get_event_emitter, get_log_session_dir, logger
+from massgen.subagent.models import SubagentDisplayData
+from massgen.user_settings import get_user_settings
 
 from .terminal_display import TerminalDisplay
 
@@ -46,15 +53,19 @@ try:
         AnswerBrowserModal,
         BroadcastPromptModal,
         BrowserTabsModal,
+        ChunkAdvanceModal,
         ContextModal,
         ConversationHistoryModal,
         CoordinationTableModal,
         CostBreakdownModal,
+        DecompositionGenerationModal,
+        DecompositionSubtasksModal,
         FileInspectionModal,
         KeyboardShortcutsModal,
         MCPStatusModal,
         MetricsModal,
         OrchestratorEventsModal,
+        SkillsModal,
         StructuredBroadcastPromptModal,
         SystemStatusModal,
         TextContentModal,
@@ -66,23 +77,38 @@ try:
         AgentStatusRibbon,
         AgentTabBar,
         AgentTabChanged,
+        AnalysisProfileChanged,
+        AnalysisSkillLifecycleChanged,
+        AnalysisTargetChanged,
+        AnalysisTargetTypeChanged,
+        BackgroundTasksClicked,
+        BackgroundTasksModal,
         BroadcastModeChanged,
         CompletionFooter,
+        ContextPathsClicked,
+        ExecuteAutoContinueChanged,
+        ExecutePrefillRequested,
+        ExecuteRefinementModeChanged,
         ExecutionStatusLine,
         FinalPresentationCard,
         ModeBar,
         ModeChanged,
+        ModeHelpClicked,
         MultiLineInput,
         OverrideRequested,
         PathSuggestionDropdown,
+        PlanChunkTargetChanged,
         PlanDepthChanged,
         PlanOptionsPopover,
         PlanSelected,
         PlanSettingsClicked,
+        PlanStepTargetChanged,
         QueuedInputBanner,
         SessionInfoClicked,
+        SkillsClicked,
         SubagentCard,
         SubagentScreen,
+        SubtasksClicked,
         TaskPlanCard,
         TaskPlanModal,
         TasksClicked,
@@ -91,6 +117,7 @@ try:
         ToolCallCard,
         ToolDetailModal,
         ToolSection,
+        ViewAnalysisRequested,
         ViewPlanRequested,
         ViewSelected,
     )
@@ -102,7 +129,7 @@ except ImportError:
     TEXTUAL_AVAILABLE = False
 
 # TUI Debug logger - use shared implementation
-from .shared.tui_debug import tui_log  # noqa: E402
+from .shared.tui_debug import tui_debug_enabled, tui_log  # noqa: E402
 
 
 def _process_line_buffer(
@@ -159,6 +186,158 @@ CRITICAL_PATTERNS = {
 }
 
 CRITICAL_CONTENT_TYPES = {"status", "presentation", "tool", "vote", "error"}
+
+
+def _parse_spawn_subagents_result(result_text: Any) -> Optional[Dict[str, Any]]:
+    """Parse spawn_subagents result payloads across JSON and repr encodings.
+
+    Spawn tool results frequently arrive as:
+    - raw JSON dict
+    - Python repr dict
+    - list-wrapped Claude/Codex content blocks containing JSON/repr text
+    - wrappers with a top-level ``structured_content`` dict
+    """
+    if not isinstance(result_text, str) or not result_text.strip():
+        return None
+
+    try:
+        from .content_processor import ContentProcessor
+
+        parsed = ContentProcessor._parse_result_dict(result_text)
+    except Exception:
+        parsed = None
+
+    if not isinstance(parsed, dict):
+        return None
+
+    structured = parsed.get("structured_content")
+    if isinstance(structured, dict):
+        parsed = structured
+
+    return parsed
+
+
+def _parse_spawn_subagents_args(args_payload: Any) -> Optional[Dict[str, Any]]:
+    """Parse spawn_subagents args payloads across JSON/repr encodings."""
+    if isinstance(args_payload, dict):
+        return args_payload
+    if not isinstance(args_payload, str):
+        return None
+
+    raw = args_payload.strip()
+    if not raw:
+        return None
+
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+
+    try:
+        parsed = ast.literal_eval(raw)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+
+    return None
+
+
+def _extract_spawned_subagents(result_text: Any) -> tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Return normalized spawn_subagents payload plus extracted subagent entries."""
+    result_data = _parse_spawn_subagents_result(result_text)
+    if not isinstance(result_data, dict):
+        return None, []
+
+    spawned_raw = result_data.get(
+        "results",
+        result_data.get("spawned_subagents", result_data.get("subagents", [])),
+    )
+    if not isinstance(spawned_raw, list):
+        return result_data, []
+
+    spawned = [entry for entry in spawned_raw if isinstance(entry, dict)]
+    return result_data, spawned
+
+
+def _subagent_card_dom_id(call_id: Any) -> str:
+    """Build a safe, deterministic DOM id for subagent cards."""
+    safe_call_id = re.sub(r"[^a-zA-Z0-9_-]", "_", str(call_id or "subagent"))
+    return f"subagent_{safe_call_id}"
+
+
+def _map_subagent_status(raw_status: Any, completion_percentage: Optional[int] = None) -> tuple[str, int]:
+    """Map raw subagent status values to display status/progress."""
+    status = str(raw_status or "").lower().strip()
+    if status == "completed":
+        return "completed", 100
+    if status in {"completed_but_timeout", "partial", "timeout"}:
+        progress = completion_percentage if completion_percentage is not None else 100
+        return "timeout", max(0, min(int(progress), 100))
+    if status in {"failed", "error"}:
+        return "failed", 0
+    if status in {"pending"}:
+        return "pending", 0
+    return "running", 0
+
+
+def _count_workspace_files(workspace_path: str) -> int:
+    if not workspace_path:
+        return 0
+    workspace = Path(workspace_path)
+    if not workspace.exists():
+        return 0
+    try:
+        return sum(1 for path in workspace.rglob("*") if path.is_file())
+    except Exception:
+        return 0
+
+
+def _build_subagent_display_data(
+    sa_data: Dict[str, Any],
+    existing: Optional[SubagentDisplayData] = None,
+) -> SubagentDisplayData:
+    """Build SubagentDisplayData from spawn result/status records."""
+    subagent_id = str(
+        sa_data.get("subagent_id") or sa_data.get("id") or (existing.id if existing else "unknown"),
+    )
+    completion_percentage = sa_data.get("completion_percentage")
+    if completion_percentage is not None:
+        try:
+            completion_percentage = int(completion_percentage)
+        except Exception:
+            completion_percentage = None
+    display_status, progress = _map_subagent_status(sa_data.get("status"), completion_percentage)
+
+    task = str(sa_data.get("task") or (existing.task if existing else ""))
+    workspace_path = str(sa_data.get("workspace") or (existing.workspace_path if existing else ""))
+    timeout_seconds = float(sa_data.get("timeout_seconds") or (existing.timeout_seconds if existing else 300))
+    elapsed_seconds = float(sa_data.get("execution_time_seconds") or (existing.elapsed_seconds if existing else 0.0))
+    error = sa_data.get("error") or (existing.error if existing else None)
+    answer = sa_data.get("answer")
+    answer_preview = ((answer or "")[:200] if answer else None) or (existing.answer_preview if existing else None)
+    log_path = sa_data.get("log_path") or (existing.log_path if existing else None)
+
+    workspace_file_count = _count_workspace_files(workspace_path)
+    if workspace_file_count == 0 and existing and existing.workspace_file_count > 0:
+        workspace_file_count = existing.workspace_file_count
+
+    return SubagentDisplayData(
+        id=subagent_id,
+        task=task,
+        status=display_status,
+        progress_percent=progress,
+        elapsed_seconds=elapsed_seconds,
+        timeout_seconds=timeout_seconds,
+        workspace_path=workspace_path,
+        workspace_file_count=workspace_file_count,
+        last_log_line=str(error or ""),
+        error=error,
+        answer_preview=answer_preview,
+        log_path=str(log_path) if log_path else None,
+    )
 
 
 class ProgressIndicator(Static):
@@ -255,7 +434,8 @@ class TextualTerminalDisplay(TerminalDisplay):
         # Agent models mapping (agent_id -> model name) for display
         self.agent_models: Dict[str, str] = kwargs.get("agent_models", {})
 
-        self.theme = kwargs.get("theme", "dark")
+        # Load theme from user settings if not explicitly provided
+        self.theme = kwargs.get("theme") or get_user_settings().theme
         self.refresh_rate = kwargs.get("refresh_rate")
         self.enable_syntax_highlighting = kwargs.get("enable_syntax_highlighting", True)
         self.show_timestamps = kwargs.get("show_timestamps", True)
@@ -263,6 +443,20 @@ class TextualTerminalDisplay(TerminalDisplay):
         self.max_web_search_lines = kwargs.get("max_web_search_lines", 4)
         self.truncate_web_on_status_change = kwargs.get("truncate_web_on_status_change", True)
         self.max_web_lines_on_status_change = kwargs.get("max_web_lines_on_status_change", 3)
+        self.default_coordination_mode = kwargs.get("default_coordination_mode", "parallel")
+        self.default_load_previous_session_skills = bool(
+            kwargs.get("default_load_previous_session_skills", False),
+        )
+        self.default_skill_lifecycle_mode = str(
+            kwargs.get("default_skill_lifecycle_mode", "create_or_update"),
+        )
+        default_cwd_context_mode = str(kwargs.get("default_cwd_context_mode", "off")).strip().lower()
+        if default_cwd_context_mode in {"rw", "write"}:
+            self.default_cwd_context_mode = "write"
+        elif default_cwd_context_mode in {"ro", "read"}:
+            self.default_cwd_context_mode = "read"
+        else:
+            self.default_cwd_context_mode = "off"
         # Runtime toggle to ignore hotkeys/key handling when enabled
         self.safe_keyboard_mode = kwargs.get("safe_keyboard_mode", False)
         self.max_buffer_batch = kwargs.get("max_buffer_batch", 50)
@@ -296,7 +490,10 @@ class TextualTerminalDisplay(TerminalDisplay):
         self._final_stream_active = False
         self._final_stream_buffer: str = ""
         self._final_presentation_agent: Optional[str] = None
+        self._final_presentation_card = None
         self._routing_to_post_eval_card = False  # Bug 2 fix: prevent timeline routing during post-eval
+        self._in_final_presentation = False  # Prevent duplicate timeline content during final presentation
+        self._pending_final_review_status: Optional[str] = None
 
         self._app_ready = threading.Event()
         self._input_handler: Optional[Callable[[str], None]] = None
@@ -362,8 +559,11 @@ class TextualTerminalDisplay(TerminalDisplay):
         self._final_answer_metadata.clear()
         self._final_stream_buffer = ""
         self._final_presentation_agent = None
+        self._final_presentation_card = None
         self._final_stream_active = False
         self._routing_to_post_eval_card = False
+        self._in_final_presentation = False
+        self._pending_final_review_status = None
 
         # Post-evaluation content - clear for new turn
         self._post_evaluation_lines.clear()
@@ -511,6 +711,17 @@ class TextualTerminalDisplay(TerminalDisplay):
             # App is no longer running (e.g., early cancellation)
             pass
 
+    def _emit(self, event_type: str, data: Dict[str, Any]) -> None:
+        """Emit web-style display events into Textual app handlers.
+
+        CoordinationUI uses this hook for preparation status events. Textual
+        consumes those to keep progress UI in sync with orchestrator setup.
+        """
+        if event_type == "preparation_status":
+            status = data.get("status", "") if isinstance(data, dict) else ""
+            detail = data.get("detail", "") if isinstance(data, dict) else ""
+            self._call_app_method("handle_preparation_status", status, detail)
+
     def set_input_handler(self, handler: Callable[[str], None]) -> None:
         """Set the callback for user-submitted input (questions or commands)"""
         self._input_handler = handler
@@ -593,6 +804,12 @@ class TextualTerminalDisplay(TerminalDisplay):
         # But allow tool content through - tools should be displayed during post-evaluation
         if hasattr(self, "_routing_to_post_eval_card") and self._routing_to_post_eval_card:
             if content_type != "tool":
+                return
+
+        # Skip timeline updates during final presentation - content goes to FinalPresentationCard
+        # Allow tools through since they should still be displayed
+        if hasattr(self, "_in_final_presentation") and self._in_final_presentation:
+            if content_type not in ("tool", "thinking"):
                 return
 
         if not content:
@@ -703,6 +920,56 @@ class TextualTerminalDisplay(TerminalDisplay):
         """
         if self._app:
             self._call_app_method("show_subagent_card_from_spawn", agent_id, args, call_id)
+
+    def notify_runtime_subagent_started(
+        self,
+        agent_id: str,
+        subagent_id: str,
+        task: str,
+        timeout_seconds: int = 300,
+        call_id: Optional[str] = None,
+        status_callback: Optional[Callable[[str], Optional[Any]]] = None,
+        log_path: Optional[str] = None,
+    ) -> None:
+        """Show a subagent card for orchestrator-owned runtime subagents.
+
+        Used for decomposition/persona generation style subagents that are
+        spawned directly by orchestrator code (not via tool cards).
+        """
+        if not self._app:
+            return
+        self._call_app_method(
+            "show_runtime_subagent_card",
+            agent_id,
+            subagent_id,
+            task,
+            timeout_seconds,
+            call_id or subagent_id,
+            status_callback,
+            log_path,
+        )
+
+    def notify_runtime_subagent_completed(
+        self,
+        agent_id: str,
+        subagent_id: str,
+        call_id: str,
+        status: str = "completed",
+        answer_preview: Optional[str] = None,
+        error: Optional[str] = None,
+    ) -> None:
+        """Update a runtime subagent card when orchestration completes."""
+        if not self._app:
+            return
+        self._call_app_method(
+            "update_runtime_subagent_card",
+            agent_id,
+            subagent_id,
+            call_id,
+            status,
+            answer_preview,
+            error,
+        )
 
     def update_hook_execution(
         self,
@@ -1080,6 +1347,8 @@ class TextualTerminalDisplay(TerminalDisplay):
             vote_counts: Optional dict of {agent_id: vote_count} for vote summary display
             answer_labels: Optional dict of {agent_id: label} for display (e.g., {"agent1": "A1.1"})
         """
+        # Skip direct content updates during final presentation - event pipeline handles it
+        self._in_final_presentation = True
         if self._app:
             self._call_app_method("show_final_presentation_start", agent_id, vote_counts, answer_labels)
 
@@ -1167,6 +1436,24 @@ class TextualTerminalDisplay(TerminalDisplay):
 
         self._write_to_system_file(f"\n=== TURN {turn} ===\nQuestion: {question}\n")
 
+    def set_agent_subtasks(self, subtasks: Dict[str, str]) -> None:
+        """Pass agent subtask assignments to the TUI for display in the tab bar.
+
+        Args:
+            subtasks: Mapping of agent_id to subtask description.
+        """
+        if self._app:
+            self._call_app_method("set_agent_subtasks", subtasks)
+
+    def set_agent_personas(self, personas: Dict[str, str]) -> None:
+        """Pass agent persona assignments to the TUI for display in the tab bar.
+
+        Args:
+            personas: Mapping of agent_id to persona summary/description.
+        """
+        if self._app:
+            self._call_app_method("set_agent_personas", personas)
+
     def begin_restart(
         self,
         attempt: int,
@@ -1217,10 +1504,6 @@ class TextualTerminalDisplay(TerminalDisplay):
         """End the current turn"""
         if self._app:
             self._call_app_method("set_input_enabled", True)
-            mode_state = self.get_mode_state()
-            if mode_state and mode_state.plan_mode == "execute":
-                # Auto-exit execute mode after plan execution completes.
-                self._call_app_method("_handle_plan_mode_change", "normal")
 
         if was_cancelled:
             self._write_to_system_file(f"Turn {turn} cancelled by user.")
@@ -1574,6 +1857,58 @@ class TextualTerminalDisplay(TerminalDisplay):
             return self._app._mode_state
         return None
 
+    def _persist_planning_revision_snapshot(
+        self,
+        plan_path: Path,
+        plan_data: Dict[str, Any],
+        mode_state: "TuiModeState",
+    ) -> None:
+        """Persist the latest planning revision immediately.
+
+        This creates/reuses a plan session at review time so iterative modal edits
+        and refinements survive even before final execution is triggered.
+        """
+        from massgen.logger_config import get_log_session_root
+        from massgen.plan_storage import PlanStorage
+
+        storage = PlanStorage()
+        session = mode_state.plan_session
+
+        if session is None:
+            log_dir = get_log_session_root()
+            planning_turn = mode_state.planning_started_turn
+            if planning_turn is None:
+                planning_turn = getattr(self, "_current_turn", 0) or 0
+                mode_state.planning_started_turn = planning_turn
+            session = storage.create_plan(
+                log_dir.name,
+                str(log_dir),
+                planning_prompt=mode_state.last_planning_question,
+                planning_turn=planning_turn,
+            )
+            mode_state.plan_session = session
+            mode_state.selected_plan_id = session.plan_id
+
+        try:
+            plan_path.write_text(json.dumps(plan_data, indent=2), encoding="utf-8")
+        except Exception as write_err:
+            logger.warning(f"[PlanApproval] Failed to persist plan file before snapshot: {write_err}")
+
+        storage.finalize_planning_phase(
+            session,
+            plan_path.parent,
+            context_paths=mode_state.planning_context_paths or [],
+        )
+
+        metadata = session.load_metadata()
+        metadata.plan_revision = mode_state.plan_revision or metadata.plan_revision
+        metadata.planning_iteration_count = mode_state.planning_iteration_count or metadata.planning_iteration_count
+        if mode_state.planning_feedback_history:
+            metadata.planning_feedback_history = list(mode_state.planning_feedback_history)
+        metadata.last_planning_mode = mode_state.last_planning_mode
+        metadata.execution_mode = metadata.execution_mode or "chunked_by_planner_v1"
+        session.save_metadata(metadata)
+
     def show_plan_approval_modal(
         self,
         tasks: List[Dict[str, Any]],
@@ -1596,6 +1931,11 @@ class TextualTerminalDisplay(TerminalDisplay):
             mode_state.reset_plan_state()
             return
 
+        try:
+            self._persist_planning_revision_snapshot(plan_path, plan_data, mode_state)
+        except Exception as e:
+            logger.warning(f"[PlanApproval] Failed to persist planning snapshot: {e}")
+
         from massgen.frontend.displays.textual_widgets.plan_approval_modal import (
             PlanApprovalModal,
             PlanApprovalResult,
@@ -1603,12 +1943,36 @@ class TextualTerminalDisplay(TerminalDisplay):
 
         def show_modal():
             try:
-                modal = PlanApprovalModal(tasks, plan_path, plan_data)
+                # If quick-edit temporarily forced single-agent visuals, restore
+                # the user's prior agent-mode selection before showing review.
+                if getattr(mode_state, "quick_edit_restore_pending", False):
+                    restore_mode = mode_state.quick_edit_prev_agent_mode or "multi"
+                    restore_selected = mode_state.quick_edit_prev_selected_agent
+                    mode_state.agent_mode = restore_mode
+                    mode_state.selected_single_agent = restore_selected
+                    mode_state.quick_edit_prev_agent_mode = None
+                    mode_state.quick_edit_prev_selected_agent = None
+                    mode_state.quick_edit_restore_pending = False
+
+                    if hasattr(self._app, "_set_agent_mode_visual_state"):
+                        self._app._set_agent_mode_visual_state(restore_mode, restore_selected)
+
+                revision = getattr(mode_state, "plan_revision", 0) or None
+                modal = PlanApprovalModal(tasks, plan_path, plan_data, revision=revision)
 
                 def handle_result(result: PlanApprovalResult) -> None:
                     try:
-                        if result and result.approved:
+                        action = getattr(result, "action", "cancel") if result else "cancel"
+                        if action == "finalize":
                             self._execute_approved_plan(result, mode_state)
+                        elif action == "finalize_manual":
+                            self._execute_approved_plan(
+                                result,
+                                mode_state,
+                                auto_submit=False,
+                            )
+                        elif action in {"continue", "quick_edit"}:
+                            self._continue_planning_refinement(result, mode_state)
                         else:
                             # Cancelled - reset to normal mode
                             mode_state.reset_plan_state()
@@ -1638,18 +2002,420 @@ class TextualTerminalDisplay(TerminalDisplay):
             # Can't notify via app if call_from_thread failed
             logger.error("[PlanApproval] Failed to dispatch modal to main thread")
 
+    def _continue_planning_refinement(
+        self,
+        result: "PlanApprovalResult",
+        mode_state: "TuiModeState",
+    ) -> None:
+        """Queue another planning turn from the plan review modal."""
+        if not self._app:
+            mode_state.reset_plan_state()
+            return
+
+        action = getattr(result, "action", "continue")
+        planning_mode = "single" if action == "quick_edit" else "multi"
+        feedback = (getattr(result, "feedback", None) or "").strip()
+        if not feedback:
+            self._app.notify(
+                "Cannot continue planning with an empty prompt. Enter feedback in the review modal.",
+                severity="warning",
+                timeout=4,
+            )
+            return
+
+        mode_state.pending_planning_mode = planning_mode
+        mode_state.last_planning_mode = planning_mode
+        mode_state.pending_planning_feedback = feedback
+        mode_state.planning_feedback_history.append(feedback)
+
+        # Keep planning mode active and submit refinement prompt.
+        mode_state.plan_mode = "plan"
+        if hasattr(self._app, "_mode_bar") and self._app._mode_bar:
+            self._app._mode_bar.set_plan_mode("plan")
+
+        if planning_mode == "single":
+            # Temporarily reflect quick-edit single-agent mode in the mode bar.
+            # We'll restore these visuals after the turn completes.
+            mode_state.quick_edit_prev_agent_mode = mode_state.agent_mode
+            mode_state.quick_edit_prev_selected_agent = mode_state.selected_single_agent
+            mode_state.quick_edit_restore_pending = True
+
+            selected = mode_state.selected_single_agent or getattr(self._app, "_active_agent_id", None)
+            if not selected and getattr(self.coordination_display, "agent_ids", None):
+                selected = self.coordination_display.agent_ids[0]
+            mode_state.agent_mode = "single"
+            mode_state.selected_single_agent = selected
+            if hasattr(self._app, "_set_agent_mode_visual_state"):
+                self._app._set_agent_mode_visual_state("single", selected)
+        else:
+            mode_state.quick_edit_prev_agent_mode = None
+            mode_state.quick_edit_prev_selected_agent = None
+            mode_state.quick_edit_restore_pending = False
+
+        refinement_prompt = "Refine `project_plan.json` using the latest plan review." " Keep chunk labels deterministic and update any affected dependencies."
+        refinement_prompt += f"\n\nPlan review feedback:\n{feedback}"
+
+        refinement_prompt = refinement_prompt.strip()
+        if not refinement_prompt:
+            self._app.notify(
+                "Cannot submit an empty planning refinement prompt.",
+                severity="warning",
+                timeout=3,
+            )
+            return
+
+        self._app.notify(
+            ("Quick Edit: running single-agent planning refinement..." if planning_mode == "single" else "Continuing planning refinement..."),
+            severity="information",
+            timeout=3,
+        )
+
+        question_input = getattr(self._app, "question_input", None)
+        if question_input:
+            question_input.disabled = True
+            question_input.value = refinement_prompt
+
+            def submit_and_reenable() -> None:
+                try:
+                    submit_value = refinement_prompt.strip()
+                    if not submit_value:
+                        self._app.notify(
+                            "Cannot submit an empty planning refinement prompt.",
+                            severity="warning",
+                            timeout=3,
+                        )
+                        return
+                    self._app._submit_question(submit_value)
+                finally:
+                    question_input.disabled = False
+
+            self._app.call_later(submit_and_reenable)
+        else:
+            self._app.call_later(lambda: self._app._submit_question(refinement_prompt.strip()))
+
+    async def show_change_review_modal(
+        self,
+        changes: List[Dict[str, Any]],
+    ) -> "ReviewResult":
+        """Show modal for reviewing changes before applying.
+
+        This method displays a modal that shows git diffs from isolated write
+        contexts and allows the user to approve or reject changes before they
+        are applied to the original context paths.
+
+        Args:
+            changes: List of context change dicts with keys:
+                - original_path: Original context path
+                - isolated_path: Isolated context path
+                - changes: List of file changes [{status, path}, ...]
+                - diff: Git diff output string
+
+        Returns:
+            ReviewResult with approval status and selected files
+        """
+        import asyncio
+
+        from massgen.filesystem_manager import ReviewResult
+
+        if not self._app:
+            logger.warning("[ChangeReview] Cannot show modal - no app instance")
+            return ReviewResult(approved=False, metadata={"error": "no_app"})
+
+        from .textual.widgets.modals.review_modal import GitDiffReviewModal
+
+        loop = asyncio.get_running_loop()
+        result_future: asyncio.Future[ReviewResult] = loop.create_future()
+
+        def show_modal():
+            try:
+                modal = GitDiffReviewModal(changes=changes)
+
+                def handle_result(result: ReviewResult) -> None:
+                    # Must use call_soon_threadsafe because this callback runs
+                    # on the Textual thread, not the asyncio event loop thread.
+                    if not result_future.done():
+                        loop.call_soon_threadsafe(result_future.set_result, result)
+
+                self._app.push_screen(modal, handle_result)
+            except Exception as e:
+                logger.exception(f"[ChangeReview] Error showing modal: {e}")
+                if not result_future.done():
+                    loop.call_soon_threadsafe(
+                        result_future.set_result,
+                        ReviewResult(approved=False, metadata={"error": str(e)}),
+                    )
+
+        try:
+            self._app.call_from_thread(show_modal)
+        except Exception as e:
+            logger.exception(f"[ChangeReview] call_from_thread failed: {e}")
+            return ReviewResult(approved=False, metadata={"error": str(e)})
+
+        try:
+            # Wait for user decision with 5 minute timeout
+            return await asyncio.wait_for(result_future, timeout=300)
+        except asyncio.TimeoutError:
+            logger.warning("[ChangeReview] Modal timed out after 5 minutes")
+            # Try to dismiss the modal on timeout
+            try:
+                self._app.call_from_thread(self._app.pop_screen)
+            except Exception:
+                pass
+            return ReviewResult(approved=False, metadata={"error": "timeout"})
+
+    async def show_final_answer_modal(
+        self,
+        changes: List[Dict[str, Any]],
+        answer_content: str,
+        vote_results: Dict[str, Any],
+        agent_id: str,
+        model_name: str = "",
+        post_eval_content: Optional[str] = None,
+        post_eval_status: str = "none",
+        context_paths: Optional[Dict] = None,
+        workspace_path: Optional[str] = None,
+    ) -> "ReviewResult":
+        """Show the tabbed Final Answer modal with optional Review Changes tab.
+
+        Combines the final answer presentation with diff review into a single
+        modal. The Answer tab shows vote info and the winning answer. The
+        Review Changes tab (shown only when changes exist) provides the full
+        diff review UI. When no changes exist but workspace_path is set,
+        a Workspace browser tab is shown instead.
+
+        Args:
+            changes: List of context change dicts (same format as show_change_review_modal)
+            answer_content: The final answer markdown text
+            vote_results: Vote results dict with winner, vote_counts, is_tie
+            agent_id: ID of the winning agent
+            model_name: Model name used by the agent
+            post_eval_content: Optional post-evaluation text
+            post_eval_status: "none" or "verified"
+            context_paths: Optional dict with "new" and "modified" path lists
+            workspace_path: Optional path to agent workspace dir (no-git mode)
+
+        Returns:
+            ReviewResult with approval status and selected files
+        """
+        import asyncio
+
+        from massgen.filesystem_manager import ReviewResult
+
+        if not self._app:
+            logger.warning("[FinalAnswer] Cannot show modal - no app instance")
+            return ReviewResult(approved=False, metadata={"error": "no_app"})
+
+        from .textual.widgets.modals.final_answer_modal import (
+            FinalAnswerModal,
+            FinalAnswerModalData,
+        )
+
+        data = FinalAnswerModalData(
+            answer_content=answer_content,
+            vote_results=vote_results,
+            agent_id=agent_id,
+            model_name=model_name,
+            post_eval_content=post_eval_content,
+            post_eval_status=post_eval_status,
+            changes=changes,
+            context_paths=context_paths,
+            workspace_path=workspace_path,
+        )
+        # Store for re-opening from the card's "View Full Answer" button
+        self._last_final_answer_modal_data = data
+
+        loop = asyncio.get_running_loop()
+        result_future: asyncio.Future[ReviewResult] = loop.create_future()
+
+        def show_modal():
+            try:
+                modal = FinalAnswerModal(data=data)
+
+                def handle_result(result: ReviewResult) -> None:
+                    # Only update review status when there were actual
+                    # reviewed changes. Workspace-only and answer-only modal
+                    # paths should not surface "changes approved/rejected".
+                    if data.changes:
+                        # This callback runs inside Textual's event loop, so
+                        # we can safely access widgets here.
+                        self._update_card_review_status(result)
+                    try:
+                        card = self._get_active_final_card()
+                        if card is not None:
+                            card.scroll_visible(animate=True, top=False)
+                    except Exception:
+                        logger.exception("[FinalAnswer] Failed to scroll final card into view")
+                    if not result_future.done():
+                        loop.call_soon_threadsafe(result_future.set_result, result)
+
+                self._app.push_screen(modal, handle_result)
+            except Exception as e:
+                logger.exception(f"[FinalAnswer] Error showing modal: {e}")
+                if not result_future.done():
+                    loop.call_soon_threadsafe(
+                        result_future.set_result,
+                        ReviewResult(approved=False, metadata={"error": str(e)}),
+                    )
+
+        try:
+            self._app.call_from_thread(show_modal)
+        except Exception as e:
+            logger.exception(f"[FinalAnswer] call_from_thread failed: {e}")
+            return ReviewResult(approved=False, metadata={"error": str(e)})
+
+        try:
+            result = await asyncio.wait_for(result_future, timeout=300)
+        except asyncio.TimeoutError:
+            logger.warning("[FinalAnswer] Modal timed out after 5 minutes")
+            try:
+                self._app.call_from_thread(self._app.pop_screen)
+            except Exception:
+                pass
+            result = ReviewResult(approved=False, metadata={"error": "timeout"})
+
+        # Store the result so re-opening from "View Full Answer" knows the action taken
+        self._last_final_answer_result = result
+
+        return result
+
+    def _get_active_final_card(self) -> Optional["FinalPresentationCard"]:
+        """Return the most relevant final card currently mounted."""
+        card = getattr(self, "_final_presentation_card", None)
+        if card is not None:
+            return card
+
+        if self._app is None:
+            return None
+
+        app_card = getattr(self._app, "_final_presentation_card", None)
+        if app_card is not None:
+            return app_card
+
+        from .textual_widgets.content_sections import FinalPresentationCard
+
+        try:
+            cards = list(self._app.query(FinalPresentationCard))
+            return cards[-1] if cards else None
+        except Exception:
+            return None
+
+    def _apply_pending_review_status(self, card: Optional["FinalPresentationCard"]) -> None:
+        """Apply a cached review status to the card and clear cache."""
+        pending_status = getattr(self, "_pending_final_review_status", None)
+        if card is None or not pending_status:
+            return
+        try:
+            card.set_review_status(pending_status)
+            self._pending_final_review_status = None
+        except Exception:
+            logger.exception("[FinalAnswer] Failed to apply pending review status")
+
+    def _update_card_review_status(self, result: Optional["ReviewResult"] = None) -> None:
+        """Update the FinalPresentationCard's review status indicator.
+
+        Must be called from within Textual's event loop (e.g. from a
+        push_screen callback or event handler).
+        """
+        if result is None:
+            return
+
+        status = "approved" if result.approved else "rejected"
+        if getattr(self, "_pending_final_review_status", None) != status:
+            self._pending_final_review_status = status
+
+        card = self._get_active_final_card()
+        if card is None:
+            tui_log("[FinalAnswer] No final card available yet; caching review status")
+            return
+
+        self._apply_pending_review_status(card)
+
+    def _dispatch_review_rework(self, rework_info: Dict[str, Any]) -> None:
+        """Dispatch a review rework by submitting feedback as a new question.
+
+        Called after the orchestrator signals that the user wants to rework
+        changes from the review modal instead of applying or rejecting them.
+        Mirrors the _continue_planning_refinement pattern.
+
+        Args:
+            rework_info: Dict with keys: action, feedback, agent_id
+        """
+        if not self._app:
+            return
+
+        action = rework_info.get("action", "rework")
+        feedback = (rework_info.get("feedback") or "").strip()
+
+        if not feedback:
+            try:
+                self._app.call_from_thread(
+                    lambda: self._app.notify(
+                        "Cannot rework without feedback.",
+                        severity="warning",
+                        timeout=4,
+                    ),
+                )
+            except Exception:
+                pass
+            return
+
+        # Build rework prompt
+        if action == "quick_fix":
+            rework_prompt = f"Quick fix requested for the presented changes. " f"Apply the following feedback and re-present:\n\n{feedback}"
+        else:
+            rework_prompt = f"Rework requested for the presented changes. " f"Apply the following feedback and re-present:\n\n{feedback}"
+
+        def submit_rework():
+            try:
+                mode_label = "Quick Fix" if action == "quick_fix" else "Rework"
+                self._app.notify(
+                    f"{mode_label}: re-running with feedback...",
+                    severity="information",
+                    timeout=3,
+                )
+
+                question_input = getattr(self._app, "question_input", None)
+                if question_input:
+                    question_input.disabled = True
+                    question_input.value = rework_prompt
+
+                    def do_submit():
+                        try:
+                            self._app._submit_question(rework_prompt)
+                        finally:
+                            if question_input:
+                                question_input.disabled = False
+
+                    self._app.call_later(do_submit)
+                else:
+                    self._app.call_later(lambda: self._app._submit_question(rework_prompt))
+            except Exception as e:
+                logger.exception(f"[ReviewRework] Error dispatching rework: {e}")
+
+        try:
+            self._app.call_from_thread(submit_rework)
+        except Exception as e:
+            logger.exception(f"[ReviewRework] call_from_thread failed: {e}")
+
     def _execute_approved_plan(
         self,
         approval: "PlanApprovalResult",
         mode_state: "TuiModeState",
+        auto_submit: bool = True,
     ) -> None:
-        """Execute an approved plan by setting up execution mode and submitting prompt.
+        """Finalize an approved plan and optionally auto-submit the first execute turn.
 
         Args:
             approval: PlanApprovalResult with plan data and path
             mode_state: TuiModeState instance to update
+            auto_submit: When True, immediately starts first chunk execution.
         """
         from massgen.logger_config import get_log_session_root
+        from massgen.plan_execution import (
+            PlanValidationError,
+            build_execution_prompt,
+            initialize_chunk_execution_state,
+        )
         from massgen.plan_storage import PlanStorage
 
         try:
@@ -1666,27 +2432,63 @@ class TextualTerminalDisplay(TerminalDisplay):
                     f"[PlanExecution] planning_started_turn was None, defaulting to {current_turn}",
                 )
 
-            # Get log directory for plan session
-            log_dir = get_log_session_root()
-
-            # Create and finalize plan session
             storage = PlanStorage()
-            session = storage.create_plan(
-                log_dir.name,
-                str(log_dir),
-                planning_prompt=mode_state.last_planning_question,
-                planning_turn=mode_state.planning_started_turn,
-            )
+            session = mode_state.plan_session
+            if session is None:
+                log_dir = get_log_session_root()
+                session = storage.create_plan(
+                    log_dir.name,
+                    str(log_dir),
+                    planning_prompt=mode_state.last_planning_question,
+                    planning_turn=mode_state.planning_started_turn,
+                )
+                mode_state.plan_session = session
 
             # Copy workspace to frozen - use the parent of plan_path as workspace source
             workspace_source = approval.plan_path.parent
+            if approval.plan_data and approval.plan_path:
+                try:
+                    approval.plan_path.write_text(
+                        json.dumps(approval.plan_data, indent=2),
+                        encoding="utf-8",
+                    )
+                except Exception as write_err:
+                    logger.warning(f"[PlanExecution] Failed to persist edited plan before finalize: {write_err}")
             # Use context paths captured during planning phase
             context_paths = mode_state.planning_context_paths or []
             storage.finalize_planning_phase(session, workspace_source, context_paths=context_paths)
 
+            # Persist planning review metadata from iterative modal workflow.
+            session_metadata = session.load_metadata()
+            session_metadata.plan_revision = mode_state.plan_revision or 1
+            session_metadata.planning_iteration_count = mode_state.planning_iteration_count or session_metadata.plan_revision
+            session_metadata.planning_feedback_history = list(
+                mode_state.planning_feedback_history or [],
+            )
+            session_metadata.last_planning_mode = mode_state.last_planning_mode
+            session_metadata.execution_mode = "chunked_by_planner_v1"
+            session.save_metadata(session_metadata)
+
             # Update mode state for execution
             mode_state.plan_mode = "execute"
             mode_state.plan_session = session
+            mode_state.selected_plan_id = session.plan_id
+            mode_state.pending_planning_feedback = None
+            mode_state.pending_planning_mode = None
+
+            # Validate chunk contract and initialize current chunk pointer.
+            try:
+                chunk_metadata = initialize_chunk_execution_state(session)
+            except PlanValidationError as e:
+                self._app.notify(
+                    f"Plan validation failed: {e}",
+                    severity="error",
+                    timeout=6,
+                )
+                mode_state.reset_plan_state()
+                if hasattr(self._app, "_mode_bar") and self._app._mode_bar:
+                    self._app._mode_bar.set_plan_mode("normal")
+                return
 
             # Update mode bar
             if hasattr(self._app, "_mode_bar") and self._app._mode_bar:
@@ -1694,10 +2496,22 @@ class TextualTerminalDisplay(TerminalDisplay):
 
             # Build execution prompt from original question
             original_question = mode_state.last_planning_question or "Execute the plan"
+            execution_prompt = build_execution_prompt(
+                original_question,
+                active_chunk=chunk_metadata.current_chunk,
+                chunk_order=chunk_metadata.chunk_order or [],
+            )
 
-            from massgen.plan_execution import build_execution_prompt
+            if hasattr(self, "question_input") and self.question_input:
+                self.question_input.placeholder = "Press Enter to execute selected plan • or type instructions"
 
-            execution_prompt = build_execution_prompt(original_question)
+            if not auto_submit:
+                self._app.notify(
+                    "Plan finalized. Adjust mode bar options, then press Enter to execute.",
+                    severity="information",
+                    timeout=4,
+                )
+                return
 
             self._app.notify("Executing plan...", severity="information", timeout=3)
 
@@ -1780,6 +2594,12 @@ if TEXTUAL_AVAILABLE:
     class StatusBarThemeClicked(Message):
         """Message emitted when the theme indicator in StatusBar is clicked."""
 
+    class StatusBarContextClicked(Message):
+        """Message emitted when the context paths indicator in StatusBar is clicked."""
+
+    class StatusBarToolsClicked(Message):
+        """Message emitted when the running/background tools indicator is clicked."""
+
     class StatusBar(Widget):
         """Persistent status bar showing orchestration state at the bottom of the TUI."""
 
@@ -1831,7 +2651,7 @@ if TEXTUAL_AVAILABLE:
             yield Static("⏳ Idle", id="status_phase")
             yield Static("", id="status_activity", classes="activity-indicator hidden")  # Pulsing activity indicator
             yield Static("", id="status_progress")  # Progress summary: "3 agents | 2 answers | 4/6 votes"
-            yield Static("", id="status_tools", classes="hidden")  # Running tools counter: "🔧 3 running"
+            yield Static("", id="status_tools", classes="hidden clickable")
             yield Static("", id="status_votes")
             # Spacer to push right-side elements to the edge
             yield Static("", id="status_spacer")
@@ -1843,6 +2663,8 @@ if TEXTUAL_AVAILABLE:
             cwd = Path.cwd()
             cwd_short = f"~/{cwd.name}" if len(str(cwd)) > 30 else str(cwd)
             yield Static(f"[dim]📁[/] {cwd_short}", id="status_cwd", classes="clickable")
+            # Context paths - clickable to open context paths modal
+            yield Static("[dim]CTX[/]", id="status_context", classes="clickable")
             yield Static("📋 0 events", id="status_events", classes="clickable")
             yield Static("[dim]?:help[/]", id="status_hints")  # Always visible, shows q:cancel during coordination
             yield Static("⏱️ 0:00", id="status_timer")
@@ -1857,10 +2679,14 @@ if TEXTUAL_AVAILABLE:
                     self.post_message(StatusBarEventsClicked())
                 elif widget.id == "status_cancel":
                     self.post_message(StatusBarCancelClicked())
+                elif widget.id == "status_tools":
+                    self.post_message(StatusBarToolsClicked())
                 elif widget.id == "status_cwd":
                     self.toggle_cwd_auto_include()
                 elif widget.id == "status_theme":
                     self.post_message(StatusBarThemeClicked())
+                elif widget.id == "status_context":
+                    self.post_message(StatusBarContextClicked())
 
         def toggle_cwd_auto_include(self) -> None:
             """Cycle CWD context mode and update display."""
@@ -1940,12 +2766,15 @@ if TEXTUAL_AVAILABLE:
             except Exception as e:
                 tui_log(f"[TextualDisplay] {e}")  # Widget not mounted yet
 
-        def update_running_tools(self, count: int) -> None:
-            """Update running tools counter in status bar."""
+        def update_running_tools(self, count: int, background_count: int = 0) -> None:
+            """Update running/background tools counter in status bar."""
             try:
                 tools_widget = self.query_one("#status_tools", Static)
                 if count > 0:
-                    tools_widget.update(f"🔧 {count} running")
+                    parts = [f"🔧 {count} running"]
+                    if background_count > 0:
+                        parts.append(f"⚙️ {background_count} bg")
+                    tools_widget.update(" | ".join(parts))
                     tools_widget.remove_class("hidden")
                 else:
                     tools_widget.update("")
@@ -2382,40 +3211,63 @@ if TEXTUAL_AVAILABLE:
             base_path = cls.THEMES_DIR / "base.tcss"
 
             # Create combined CSS in a cache directory
+            import hashlib
             import tempfile
 
             cache_dir = Path(tempfile.gettempdir()) / "massgen_themes"
             cache_dir.mkdir(exist_ok=True)
-            combined_path = cache_dir / f"{theme}_combined.tcss"
-
-            # Check if cache is valid (exists and newer than source files)
-            # Check both in-memory cache dict AND the on-disk file (from previous session)
-            cache_valid = False
-            if combined_path.exists():
-                # Check modification times - regenerate if sources are newer
-                cache_mtime = combined_path.stat().st_mtime
-                palette_mtime = palette_path.stat().st_mtime if palette_path.exists() else 0
-                base_mtime = base_path.stat().st_mtime if base_path.exists() else 0
-                source_mtime = max(palette_mtime, base_mtime)
-                cache_valid = cache_mtime >= source_mtime
-
-            if cache_valid:
-                # Ensure in-memory cache is up to date
-                cls._combined_css_cache[theme] = combined_path
-                return combined_path
 
             # Read and concatenate files
             palette_css = palette_path.read_text() if palette_path.exists() else ""
             base_css = base_path.read_text() if base_path.exists() else ""
 
+            # Import modal base CSS (shared styles for all modal dialogs)
+            from .textual.widgets.modal_base import MODAL_BASE_CSS
+
+            # Split palette into variables and component overrides
+            # Variables must come first, but component overrides should come last
+            palette_lines = palette_css.split("\n")
+            palette_vars = []
+            palette_overrides = []
+            in_overrides = False
+            for line in palette_lines:
+                if "Component Overrides" in line:
+                    in_overrides = True
+                if in_overrides:
+                    palette_overrides.append(line)
+                else:
+                    palette_vars.append(line)
+
+            # Order: palette vars → modal base CSS → base.tcss → palette overrides
             combined_css = f"/* Combined theme: {theme} */\n"
-            combined_css += f"/* Palette from: {palette_file} */\n\n"
-            combined_css += palette_css
+            combined_css += f"/* Palette variables from: {palette_file} */\n\n"
+            combined_css += "\n".join(palette_vars)
+            combined_css += "\n\n/* Modal base styles */\n\n"
+            combined_css += MODAL_BASE_CSS
             combined_css += "\n\n/* Base component styles */\n\n"
             combined_css += base_css
+            if palette_overrides:
+                combined_css += "\n\n/* Theme-specific component overrides */\n\n"
+                combined_css += "\n".join(palette_overrides)
 
-            combined_path.write_text(combined_css)
+            # Use a content hash in the filename so stale cached files are never reused.
+            # This avoids mismatches when the CSS assembly logic changes across runs.
+            css_hash = hashlib.sha256(combined_css.encode("utf-8")).hexdigest()[:12]
+            combined_path = cache_dir / f"{theme}_combined_{css_hash}.tcss"
+
+            if not combined_path.exists():
+                combined_path.write_text(combined_css)
+
             cls._combined_css_cache[theme] = combined_path
+
+            # Best-effort cleanup of stale combined CSS files for this theme.
+            for stale_path in cache_dir.glob(f"{theme}_combined*.tcss"):
+                if stale_path != combined_path:
+                    try:
+                        stale_path.unlink()
+                    except OSError:
+                        pass
+
             return combined_path
 
         # Minimal bindings - most features accessed via /slash commands
@@ -2434,10 +3286,11 @@ if TEXTUAL_AVAILABLE:
             Binding("ctrl+p", "toggle_cwd", "Toggle CWD", priority=True, show=False),
             # Subagent quick access
             Binding("ctrl+u", "show_subagents", "Subagents", priority=True, show=False),
+            Binding("b", "open_background_tools", "Background Jobs", show=False),
             # Help - Ctrl+G for guide/help
             Binding("ctrl+g", "show_help", "Help", priority=True, show=False),
             # Mode toggles
-            Binding("shift+tab", "toggle_plan_mode", "Plan Mode", priority=True),
+            Binding("shift+tab", "toggle_plan_mode", "Mode Cycle", priority=True),
             Binding("ctrl+o", "trigger_override", "Override", priority=True, show=False),
             # Task plan toggle
             Binding("ctrl+t", "toggle_task_plan", "Toggle Tasks", priority=True, show=False),
@@ -2456,7 +3309,11 @@ if TEXTUAL_AVAILABLE:
             # Build combined CSS from palette + base
             # Textual CSS variables must be defined before use, so we concatenate
             # the palette (variables) with the base (component styles)
-            theme = display.theme if display.theme in self.PALETTE_MAP else "dark"
+            # Load user settings for theme preference
+            user_settings = get_user_settings()
+            theme = user_settings.theme
+            if theme not in self.PALETTE_MAP:
+                theme = "dark"
             combined_css_path = self._get_combined_css_path(theme)
             super().__init__(css_path=str(combined_css_path))
             self.coordination_display = display
@@ -2465,6 +3322,21 @@ if TEXTUAL_AVAILABLE:
             self._buffer_lock = buffer_lock
             self.buffer_flush_interval = buffer_flush_interval
             self._keyboard_interactive_mode = display._keyboard_interactive_mode
+            self._timing_debug = tui_debug_enabled() and os.environ.get("MASSGEN_TUI_TIMING_DEBUG", "").lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            )
+            self._heartbeat_timer = None
+            self._last_heartbeat_at: Optional[float] = None
+            self._stall_watchdog_thread: Optional[threading.Thread] = None
+            self._stall_watchdog_stop = threading.Event()
+            self._last_stall_dump_at: float = 0.0
+            try:
+                self._stall_watchdog_threshold_s = float(os.environ.get("MASSGEN_TUI_STALL_THRESHOLD_S", "0.8"))
+            except ValueError:
+                self._stall_watchdog_threshold_s = 0.8
 
             self.agent_widgets = {}
             self.header_widget = None
@@ -2483,6 +3355,7 @@ if TEXTUAL_AVAILABLE:
             # Final presentation state (streams into winner's AgentPanel)
             self._final_presentation_agent: Optional[str] = None
             self._final_presentation_card: Optional[FinalPresentationCard] = None
+            self._pending_final_review_status: Optional[str] = None
             self._welcome_screen: Optional["WelcomeScreen"] = None
             self._status_bar: Optional["StatusBar"] = None
             # Show welcome if no real question (detect placeholder strings)
@@ -2518,7 +3391,9 @@ if TEXTUAL_AVAILABLE:
             self._context_per_agent: Dict[str, List[str]] = {}  # Which answers each agent has seen
 
             # CWD context mode: "off", "read", or "write"
-            self._cwd_context_mode: str = "off"
+            self._cwd_context_mode: str = self._normalize_cwd_context_mode(
+                getattr(self.coordination_display, "default_cwd_context_mode", "off"),
+            )
 
             # Timer for updating execution status bar with spinner animation
             self._execution_status_timer = None
@@ -2535,7 +3410,39 @@ if TEXTUAL_AVAILABLE:
 
             # TUI Mode State (plan mode, agent mode, refinement mode, override)
             self._mode_state = TuiModeState()
+            self._mode_state.analysis_config.include_previous_session_skills = bool(
+                self.coordination_display.default_load_previous_session_skills,
+            )
+            lifecycle_mode = str(self.coordination_display.default_skill_lifecycle_mode).strip().lower()
+            if lifecycle_mode not in {"create_new", "create_or_update"}:
+                lifecycle_mode = "create_or_update"
+            self._mode_state.analysis_config.skill_lifecycle_mode = lifecycle_mode
+            if self.coordination_display.default_coordination_mode == "decomposition":
+                self._mode_state.coordination_mode = "decomposition"
             self._mode_bar: Optional[ModeBar] = None
+
+            # Runtime decomposition generation UI state
+            self._decomposition_generation_modal: Optional[DecompositionGenerationModal] = None
+            self._runtime_decomposition_subtasks: Dict[str, str] = {}
+            self._runtime_parallel_personas: Dict[str, str] = {}
+            self._decomposition_completion_source: str = "subagent"
+            self._decomposition_runtime_subagent_call_id: Optional[str] = None
+            self._decomposition_runtime_subagent_agent_id: Optional[str] = None
+            self._decomposition_runtime_subagent_data: Optional[Any] = None
+            self._decomposition_runtime_status_callback: Optional[Callable[[str], Optional[Any]]] = None
+            self._decomposition_runtime_auto_opened: bool = False
+            # Workspace browser open-guard to prevent duplicate modal pushes from
+            # repeated click/key events while the UI is busy.
+            self._workspace_browser_open_pending: bool = False
+            self._workspace_browser_last_request_at: float = 0.0
+            # Performance guard: suppress expensive hover style updates while the
+            # timeline is answer-locked (buttons remain clickable).
+            self._hover_updates_suppressed: bool = False
+            self._persona_runtime_subagent_call_id: Optional[str] = None
+            self._persona_runtime_subagent_agent_id: Optional[str] = None
+            self._persona_runtime_subagent_data: Optional[Any] = None
+            self._persona_runtime_status_callback: Optional[Callable[[str], Optional[Any]]] = None
+            self._persona_runtime_auto_opened: bool = False
 
             if not self._keyboard_interactive_mode:
                 self.BINDINGS = []
@@ -2593,20 +3500,187 @@ if TEXTUAL_AVAILABLE:
             # Final presentation state - clear winner's presentation
             self._final_presentation_agent = None
             self._final_presentation_card = None
+            self._pending_final_review_status = None
+
+            # Decomposition generation modal/runtime state
+            self._runtime_decomposition_subtasks = {}
+            self._runtime_parallel_personas = {}
+            self._dismiss_decomposition_generation_modal()
+            self._decomposition_runtime_subagent_call_id = None
+            self._decomposition_runtime_subagent_agent_id = None
+            self._decomposition_runtime_subagent_data = None
+            self._decomposition_runtime_status_callback = None
+            self._decomposition_runtime_auto_opened = False
+            self._persona_runtime_subagent_call_id = None
+            self._persona_runtime_subagent_agent_id = None
+            self._persona_runtime_subagent_data = None
+            self._persona_runtime_status_callback = None
+            self._persona_runtime_auto_opened = False
+
+            if self._tab_bar and self._mode_state.coordination_mode == "parallel":
+                if self._mode_state.parallel_personas_enabled:
+                    self._tab_bar.set_agent_personas({})
+                else:
+                    self._tab_bar.set_agent_subtasks({})
+
+            # Ensure status-bar tool indicators reset between turns.
+            self._update_running_tools_count()
+
+        _BACKEND_PROVIDER_SLUGS: Dict[str, str] = {
+            "openai": "openai",
+            "codex": "openai",
+            "claude": "anthropic",
+            "claude_code": "anthropic",
+            "gemini": "google",
+            "grok": "xai",
+            "chatcompletion": "openai",
+            "azure_openai": "azure",
+            "openrouter": "openrouter",
+            "groq": "groq",
+            "together": "together",
+            "fireworks": "fireworks",
+            "cerebras": "cerebras",
+            "moonshot": "moonshot",
+            "qwen": "alibaba",
+            "nebius": "nebius",
+            "poe": "poe",
+            "lmstudio": "lmstudio",
+            "zai": "zai",
+            "vllm": "vllm",
+            "sglang": "sglang",
+            "inference": "inference",
+            "ag2": "ag2",
+            "uitars": "bytedance",
+        }
+
+        _PROVIDER_NAME_SLUGS: Dict[str, str] = {
+            "openai": "openai",
+            "azure openai": "azure",
+            "claude": "anthropic",
+            "claude code": "anthropic",
+            "anthropic": "anthropic",
+            "gemini": "google",
+            "google": "google",
+            "grok": "xai",
+            "xai": "xai",
+            "openrouter": "openrouter",
+            "chat completions (generic)": "openai",
+            "groq": "groq",
+            "together ai": "together",
+            "fireworks ai": "fireworks",
+            "cerebras ai": "cerebras",
+            "kimi (moonshot ai)": "moonshot",
+            "nebius ai studio": "nebius",
+            "qwen (alibaba cloud)": "alibaba",
+        }
+
+        _MODEL_PREFIX_PROVIDER_SLUGS: tuple[tuple[str, str], ...] = (
+            ("gpt-", "openai"),
+            ("o1-", "openai"),
+            ("o3-", "openai"),
+            ("o4-", "openai"),
+            ("claude-", "anthropic"),
+            ("gemini-", "google"),
+            ("grok-", "xai"),
+            ("qwen-", "alibaba"),
+            ("llama-", "meta"),
+            ("mistral-", "mistral"),
+            ("deepseek-", "deepseek"),
+        )
+
+        def _normalize_provider_slug(self, provider_hint: Optional[str]) -> Optional[str]:
+            """Normalize a backend/provider hint into a canonical slug."""
+            if not provider_hint:
+                return None
+            value = str(provider_hint).strip().lower()
+            if not value:
+                return None
+            if "/" in value:
+                value = value.split("/", 1)[0]
+
+            backend_key = value.replace(" ", "_").replace("-", "_")
+            if backend_key in self._BACKEND_PROVIDER_SLUGS:
+                return self._BACKEND_PROVIDER_SLUGS[backend_key]
+
+            name_key = value.replace("_", " ")
+            if name_key in self._PROVIDER_NAME_SLUGS:
+                return self._PROVIDER_NAME_SLUGS[name_key]
+
+            if value in self._PROVIDER_NAME_SLUGS:
+                return self._PROVIDER_NAME_SLUGS[value]
+
+            return None
+
+        def _infer_provider_slug_from_model(self, model_name: str) -> Optional[str]:
+            """Infer provider slug from common model naming prefixes."""
+            lowered_model = model_name.strip().lower()
+            if not lowered_model:
+                return None
+            for prefix, provider_slug in self._MODEL_PREFIX_PROVIDER_SLUGS:
+                if lowered_model.startswith(prefix):
+                    return provider_slug
+            return None
+
+        def _to_provider_model(self, model_name: str, provider_hint: Optional[str]) -> str:
+            """Format model names as provider/model for startup display."""
+            model = (model_name or "").strip()
+            if not model:
+                return ""
+
+            if "/" in model:
+                raw_provider, raw_model = model.split("/", 1)
+                provider_slug = self._normalize_provider_slug(raw_provider) or raw_provider.strip().lower()
+                normalized_model = raw_model.strip()
+                return f"{provider_slug}/{normalized_model}" if normalized_model else provider_slug
+
+            provider_slug = self._normalize_provider_slug(provider_hint) or self._infer_provider_slug_from_model(model)
+            if not provider_slug:
+                return model
+            return f"{provider_slug}/{model}"
+
+        def _build_welcome_agents_info(self) -> List[Dict[str, str]]:
+            """Build welcome-screen agent metadata with provider/model display names."""
+            agent_models = getattr(self.coordination_display, "agent_models", {}) or {}
+            provider_hints: Dict[str, str] = {}
+
+            orchestrator = getattr(self.coordination_display, "orchestrator", None)
+            orchestrator_agents = getattr(orchestrator, "agents", {}) if orchestrator else {}
+            for agent_id, agent in orchestrator_agents.items():
+                backend = getattr(agent, "backend", None)
+                if backend is None:
+                    continue
+
+                backend_type = getattr(backend, "backend_type", None)
+                if isinstance(backend_type, str) and backend_type.strip():
+                    provider_hints[agent_id] = backend_type
+                    continue
+
+                provider_name = None
+                get_provider_name = getattr(backend, "get_provider_name", None)
+                if callable(get_provider_name):
+                    try:
+                        provider_name = get_provider_name()
+                    except Exception:
+                        provider_name = None
+                if provider_name:
+                    provider_hints[agent_id] = str(provider_name)
+
+            agents_info_list: List[Dict[str, str]] = []
+            for agent_id in self.coordination_display.agent_ids:
+                raw_model = str(agent_models.get(agent_id, "") or "").strip()
+                provider_model = self._to_provider_model(raw_model, provider_hints.get(agent_id))
+                agents_info_list.append(
+                    {
+                        "id": agent_id,
+                        "model": provider_model,
+                    },
+                )
+            return agents_info_list
 
         def compose(self) -> ComposeResult:
             """Compose the UI layout with adaptive agent arrangement."""
             len(self.coordination_display.agent_ids)
-            agents_info_list = []
-            # Use agent_models dict passed at display creation time
-            agent_models = getattr(self.coordination_display, "agent_models", {})
-            for agent_id in self.coordination_display.agent_ids:
-                agent_info = agent_id
-                # Get model from agent_models dict (populated at display creation)
-                if agent_id in agent_models and agent_models[agent_id]:
-                    model = agent_models[agent_id]
-                    agent_info = f"{agent_id} ({model})"
-                agents_info_list.append(agent_info)
+            agents_info_list = self._build_welcome_agents_info()
 
             turn = getattr(self.coordination_display, "current_turn", 1)
             agent_ids = self.coordination_display.agent_ids
@@ -2616,17 +3690,19 @@ if TEXTUAL_AVAILABLE:
             # === BOTTOM DOCKED WIDGETS (yield order: last yielded = very bottom) ===
             # Input area container - dock: bottom
             with Container(id="input_area"):
-                # Input header with modes (left), plan status (right), vim indicator
-                with Horizontal(id="input_header"):
-                    # Mode bar - toggles for plan/agent/refinement modes (left side)
-                    self._mode_bar = ModeBar(id="mode_bar")
-                    yield self._mode_bar
-                    # Input hint - hidden by default, used only for vim mode hints
-                    self._input_hint = Static("", id="input_hint", classes="hidden")
-                    yield self._input_hint
-                    # Vim mode indicator (hidden by default)
-                    self._vim_indicator = Static("", id="vim_indicator")
-                    yield self._vim_indicator
+                # Input header with mode controls and compact vim/help hints.
+                with Vertical(id="input_header"):
+                    with Horizontal(id="input_modes_row"):
+                        # Mode bar - toggles for plan/agent/refinement modes
+                        self._mode_bar = ModeBar(id="mode_bar")
+                        yield self._mode_bar
+
+                        # Right-side status panel: Vim status + CWD/context line.
+                        with Vertical(id="input_meta_panel"):
+                            self._vim_indicator = Static("", id="vim_indicator")
+                            yield self._vim_indicator
+                            self._input_hint = Static("", id="input_hint")
+                            yield self._input_hint
 
                 # Execution bar - shown ONLY during coordination, replaces input
                 # Contains status text (left) and cancel button (right)
@@ -2637,7 +3713,7 @@ if TEXTUAL_AVAILABLE:
                     # Spacer to push cancel button to right
                     yield Static("", id="execution_spacer")
                     # Cancel button - on right
-                    self._cancel_button = Button("Cancel [q]", id="cancel_button", variant="error")
+                    self._cancel_button = Button("Cancel [q]", id="turn_cancel_button", variant="error")
                     yield self._cancel_button
 
                 # Queued input banner - mounted dynamically when needed (not in compose)
@@ -2758,11 +3834,28 @@ if TEXTUAL_AVAILABLE:
             initial_theme = self.coordination_display.theme
             if initial_theme in self.THEME_NAME_MAP:
                 self.theme = self.THEME_NAME_MAP[initial_theme]
+            # Set initial theme class for CSS-based theme switching
+            if initial_theme == "light":
+                self.add_class("theme-light")
+            else:
+                self.add_class("theme-dark")
+            # Apply saved vim mode preference
+            try:
+                user_settings = get_user_settings()
+                if self.question_input:
+                    self.question_input.vim_mode = user_settings.vim_mode
+                    self._update_vim_indicator(None if not user_settings.vim_mode else False)
+            except Exception:
+                pass
 
             self._thread_id = threading.get_ident()
             self.coordination_display._app_ready.set()
             self._register_event_listener()
             self.set_interval(self.buffer_flush_interval, self._flush_buffers)
+            if self._timing_debug:
+                self._last_heartbeat_at = time.monotonic()
+                self._heartbeat_timer = self.set_interval(0.05, self._heartbeat_tick)
+                self._start_stall_watchdog()
             if self.coordination_display.restart_reason and self.header_widget:
                 self.header_widget.show_restart_context(
                     self.coordination_display.restart_reason,
@@ -2770,82 +3863,191 @@ if TEXTUAL_AVAILABLE:
                 )
             self._update_safe_indicator()
             self._update_theme_indicator()
+            self._set_cwd_context_mode(self._cwd_context_mode, notify=False)
+            self._refresh_welcome_context_hint()
+            if self._mode_bar:
+                self._mode_bar.set_coordination_mode(self._mode_state.coordination_mode)
+                self._mode_bar.set_coordination_enabled(self._mode_state.agent_mode != "single")
+                self._mode_bar.set_parallel_personas_enabled(self._mode_state.parallel_personas_enabled, self._mode_state.persona_diversity_mode)
+            self._refresh_skills_button_state()
+            self._refresh_input_modes_row_layout()
+            self._update_running_tools_count()
+            # Re-run once after the first layout pass so width-dependent hint
+            # truncation can use settled regions.
+            self.call_after_refresh(lambda: (self._refresh_welcome_context_hint(), self._refresh_input_modes_row_layout()))
             # Auto-focus input field on startup
             if self.question_input:
                 self.question_input.focus()
 
-            # DEBUG: Log widget state to file
-            import json
+            # DEBUG: Log widget state to file (opt-in)
+            if os.environ.get("MASSGEN_TUI_LAYOUT_DEBUG", "").lower() in ("1", "true", "yes", "on"):
+                import json
 
-            debug_info = {
-                "header_widget": {
-                    "exists": self.header_widget is not None,
-                    "id": getattr(self.header_widget, "id", None) if self.header_widget else None,
-                    "display": str(self.header_widget.display) if self.header_widget else None,
-                    "visible": self.header_widget.visible if self.header_widget else None,
-                    "classes": list(self.header_widget.classes) if self.header_widget else None,
-                    "styles_dock": str(self.header_widget.styles.dock) if self.header_widget else None,
-                    "styles_height": str(self.header_widget.styles.height) if self.header_widget else None,
-                    "styles_display": str(self.header_widget.styles.display) if self.header_widget else None,
-                },
-                "status_bar": {
-                    "exists": self._status_bar is not None,
-                    "id": getattr(self._status_bar, "id", None) if self._status_bar else None,
-                    "display": str(self._status_bar.display) if self._status_bar else None,
-                    "visible": self._status_bar.visible if self._status_bar else None,
-                    "classes": list(self._status_bar.classes) if self._status_bar else None,
-                    "styles_dock": str(self._status_bar.styles.dock) if self._status_bar else None,
-                    "styles_height": str(self._status_bar.styles.height) if self._status_bar else None,
-                    "styles_display": str(self._status_bar.styles.display) if self._status_bar else None,
-                },
-                "tab_bar": {
-                    "exists": self._tab_bar is not None,
-                    "id": getattr(self._tab_bar, "id", None) if self._tab_bar else None,
-                    "classes": list(self._tab_bar.classes) if self._tab_bar else None,
-                    "styles_dock": str(self._tab_bar.styles.dock) if self._tab_bar else None,
-                },
-            }
-            # Add execution_bar and cancel_button info
-            try:
-                execution_bar = self.query_one("#execution_bar")
-                debug_info["execution_bar"] = {
-                    "exists": True,
-                    "id": execution_bar.id,
-                    "classes": list(execution_bar.classes),
-                    "display": str(execution_bar.styles.display),
-                    "visible": execution_bar.visible,
+                debug_info = {
+                    "header_widget": {
+                        "exists": self.header_widget is not None,
+                        "id": getattr(self.header_widget, "id", None) if self.header_widget else None,
+                        "display": str(self.header_widget.display) if self.header_widget else None,
+                        "visible": self.header_widget.visible if self.header_widget else None,
+                        "classes": list(self.header_widget.classes) if self.header_widget else None,
+                        "styles_dock": str(self.header_widget.styles.dock) if self.header_widget else None,
+                        "styles_height": str(self.header_widget.styles.height) if self.header_widget else None,
+                        "styles_display": str(self.header_widget.styles.display) if self.header_widget else None,
+                    },
+                    "status_bar": {
+                        "exists": self._status_bar is not None,
+                        "id": getattr(self._status_bar, "id", None) if self._status_bar else None,
+                        "display": str(self._status_bar.display) if self._status_bar else None,
+                        "visible": self._status_bar.visible if self._status_bar else None,
+                        "classes": list(self._status_bar.classes) if self._status_bar else None,
+                        "styles_dock": str(self._status_bar.styles.dock) if self._status_bar else None,
+                        "styles_height": str(self._status_bar.styles.height) if self._status_bar else None,
+                        "styles_display": str(self._status_bar.styles.display) if self._status_bar else None,
+                    },
+                    "tab_bar": {
+                        "exists": self._tab_bar is not None,
+                        "id": getattr(self._tab_bar, "id", None) if self._tab_bar else None,
+                        "classes": list(self._tab_bar.classes) if self._tab_bar else None,
+                        "styles_dock": str(self._tab_bar.styles.dock) if self._tab_bar else None,
+                    },
                 }
-            except Exception as e:
-                debug_info["execution_bar"] = {"exists": False, "error": str(e)}
+                # Add execution_bar and cancel_button info
+                try:
+                    execution_bar = self.query_one("#execution_bar")
+                    debug_info["execution_bar"] = {
+                        "exists": True,
+                        "id": execution_bar.id,
+                        "classes": list(execution_bar.classes),
+                        "display": str(execution_bar.styles.display),
+                        "visible": execution_bar.visible,
+                    }
+                except Exception as e:
+                    debug_info["execution_bar"] = {"exists": False, "error": str(e)}
 
+                try:
+                    cancel_btn = self.query_one("#turn_cancel_button")
+                    debug_info["cancel_button"] = {
+                        "exists": True,
+                        "id": cancel_btn.id,
+                        "classes": list(cancel_btn.classes),
+                        "display": str(cancel_btn.styles.display),
+                        "visible": cancel_btn.visible,
+                    }
+                except Exception as e:
+                    debug_info["cancel_button"] = {"exists": False, "error": str(e)}
+
+                try:
+                    input_area = self.query_one("#input_area")
+                    debug_info["input_area"] = {
+                        "exists": True,
+                        "id": input_area.id,
+                        "classes": list(input_area.classes),
+                        "display": str(input_area.styles.display),
+                    }
+                except Exception as e:
+                    debug_info["input_area"] = {"exists": False, "error": str(e)}
+
+                _debug_path = os.path.join(tempfile.gettempdir(), "textual_debug.json")
+                with open(_debug_path, "w") as f:
+                    json.dump(debug_info, f, indent=2, default=str)
+                self.log(f"DEBUG: Widget info written to {_debug_path}")
+                tui_log(f"TUI mounted - debug info written to {_debug_path}")
+
+        def on_unmount(self) -> None:
+            """Clean up debug timers/threads when app exits."""
             try:
-                cancel_btn = self.query_one("#cancel_button")
-                debug_info["cancel_button"] = {
-                    "exists": True,
-                    "id": cancel_btn.id,
-                    "classes": list(cancel_btn.classes),
-                    "display": str(cancel_btn.styles.display),
-                    "visible": cancel_btn.visible,
-                }
-            except Exception as e:
-                debug_info["cancel_button"] = {"exists": False, "error": str(e)}
+                if self._heartbeat_timer is not None:
+                    self._heartbeat_timer.stop()
+            except Exception:
+                pass
+            self._heartbeat_timer = None
+            self._stop_stall_watchdog()
 
-            try:
-                input_area = self.query_one("#input_area")
-                debug_info["input_area"] = {
-                    "exists": True,
-                    "id": input_area.id,
-                    "classes": list(input_area.classes),
-                    "display": str(input_area.styles.display),
-                }
-            except Exception as e:
-                debug_info["input_area"] = {"exists": False, "error": str(e)}
+        def set_hover_updates_suppressed(self, suppressed: bool, reason: str = "") -> None:
+            """Enable/disable hover-style recalculation for responsiveness."""
+            if self._hover_updates_suppressed == suppressed:
+                return
+            self._hover_updates_suppressed = suppressed
+            if self._timing_debug:
+                reason_suffix = f" reason={reason}" if reason else ""
+                tui_log(f"[TIMING] TextualApp.hover_updates_suppressed {suppressed}{reason_suffix}")
 
-            _debug_path = os.path.join(tempfile.gettempdir(), "textual_debug.json")
-            with open(_debug_path, "w") as f:
-                json.dump(debug_info, f, indent=2, default=str)
-            self.log(f"DEBUG: Widget info written to {_debug_path}")
-            tui_log(f"TUI mounted - debug info written to {_debug_path}")
+        def _set_mouse_over(self, widget: Optional[Widget], hover_widget: Optional[Widget]) -> None:
+            """Skip hover style churn when suppression is enabled."""
+            if self._hover_updates_suppressed:
+                return
+            super()._set_mouse_over(widget, hover_widget)
+
+        def _start_stall_watchdog(self) -> None:
+            """Start a background watchdog to capture main-thread stack on stalls."""
+            if not self._timing_debug:
+                return
+            if self._stall_watchdog_thread and self._stall_watchdog_thread.is_alive():
+                return
+
+            self._stall_watchdog_stop.clear()
+            self._stall_watchdog_thread = threading.Thread(
+                target=self._stall_watchdog_loop,
+                name="massgen-tui-stall-watchdog",
+                daemon=True,
+            )
+            self._stall_watchdog_thread.start()
+
+        def _stop_stall_watchdog(self) -> None:
+            """Stop stall watchdog thread."""
+            self._stall_watchdog_stop.set()
+            thread = self._stall_watchdog_thread
+            if thread and thread.is_alive():
+                try:
+                    thread.join(timeout=0.2)
+                except Exception:
+                    pass
+            self._stall_watchdog_thread = None
+
+        def _stall_watchdog_loop(self) -> None:
+            """Capture Python stack traces when main loop appears blocked."""
+            while not self._stall_watchdog_stop.wait(0.1):
+                last = self._last_heartbeat_at
+                if not self._timing_debug or last is None:
+                    continue
+                now = time.monotonic()
+                delta = now - last
+                if delta < self._stall_watchdog_threshold_s:
+                    continue
+                # Avoid spamming stack dumps while blocked.
+                if now - self._last_stall_dump_at < 1.5:
+                    continue
+                self._last_stall_dump_at = now
+
+                thread_id = self._thread_id
+                if thread_id is None:
+                    continue
+                frame = sys._current_frames().get(thread_id)
+                if frame is None:
+                    continue
+                stack = "".join(traceback.format_stack(frame, limit=40))
+                tui_log(
+                    "[TIMING] TextualApp.main_loop_stall_stack " f"{delta * 1000.0:.1f}ms thread_id={thread_id}\n{stack}",
+                )
+
+        def _heartbeat_tick(self) -> None:
+            """Log event-loop stalls when timing debug is enabled."""
+            now = time.monotonic()
+            last = self._last_heartbeat_at
+            self._last_heartbeat_at = now
+            if not self._timing_debug or last is None:
+                return
+
+            delta = now - last
+            # 250ms+ main-loop gaps are typically perceived as input lag.
+            if delta >= 0.25:
+                try:
+                    batch_len = len(self._event_batch)
+                except Exception:
+                    batch_len = -1
+                tui_log(
+                    "[TIMING] TextualApp.main_loop_stall " f"{delta * 1000.0:.1f}ms event_batch={batch_len} pending_flush={self._pending_flush}",
+                )
 
         def _dump_widget_sizes(self) -> None:
             """Dump full widget tree with sizes for debugging layout issues."""
@@ -3000,6 +4202,13 @@ if TEXTUAL_AVAILABLE:
                 main_container.remove_class("hidden")
             except Exception as e:
                 tui_log(f"[TextualDisplay] {e}")
+
+            # Refresh right-side hint now that welcome-only context is gone.
+            if hasattr(self, "question_input") and self.question_input:
+                vim_normal = None
+                if self.question_input.vim_mode:
+                    vim_normal = bool(getattr(self.question_input, "_vim_normal", False))
+                self._update_vim_indicator(vim_normal)
 
         def on_key(self, event: events.Key) -> None:
             """Handle key events for agent shortcuts and @ autocomplete.
@@ -3294,6 +4503,23 @@ if TEXTUAL_AVAILABLE:
                 else:
                     self.notify(f"🗳️ {voter} voted for {target}", timeout=3)
 
+            elif event.event_type == "agent_stopped":
+                # Decomposition mode: agent signaled stop (subtask complete)
+                agent_id = event.agent_id or ""
+                summary = event.data.get("summary", "")
+                stop_status = event.data.get("status", "complete")
+
+                model_name = self.coordination_display.agent_models.get(agent_id, "")
+                agent_display = f"{agent_id}" + (f" ({model_name})" if model_name else "")
+
+                status_emoji = "✅" if stop_status == "complete" else "⚠️"
+                self.notify(
+                    f"{status_emoji} [bold]{agent_display}[/] stopped ({stop_status})",
+                    timeout=4,
+                )
+                # Tool card is created by content_processor (unified pipeline),
+                # matching how vote tool cards work. No duplicate card here.
+
             elif event.event_type == "winner_selected":
                 winner_id = event.agent_id or ""
                 # Switch to winner tab and mark with trophy
@@ -3319,6 +4545,14 @@ if TEXTUAL_AVAILABLE:
                 agent_id = event.agent_id or ""
                 self._winner_agent_id = agent_id
                 self._update_winner_hints(agent_id)
+                # Pause background UI timers to keep final answer responsive
+                if hasattr(self, "_execution_status_timer") and self._execution_status_timer:
+                    self._execution_status_timer.stop()
+                    self._execution_status_timer = None
+                self._stop_all_pulses()
+                # Skip direct content updates during final presentation - event pipeline handles it
+                if hasattr(self.coordination_display, "_in_final_presentation"):
+                    self.coordination_display._in_final_presentation = True
                 # Switch to winner tab if not already
                 if self._tab_bar:
                     self._tab_bar.set_active(agent_id)
@@ -3329,6 +4563,9 @@ if TEXTUAL_AVAILABLE:
 
             elif event.event_type == "answer_locked":
                 agent_id = event.agent_id or ""
+                # Clear final presentation flag - content can now flow normally
+                if hasattr(self.coordination_display, "_in_final_presentation"):
+                    self.coordination_display._in_final_presentation = False
                 # Update input placeholder
                 if hasattr(self, "question_input"):
                     self.question_input.placeholder = "Type your follow-up question..."
@@ -3439,7 +4676,12 @@ if TEXTUAL_AVAILABLE:
                 hook.set_inject_callback(lambda content: self.call_from_thread(self._on_human_input_injected, content))
             tui_log(f"[HumanInput] Set human input hook: {hook}")
 
-        def _submit_question(self, submitted_text: str | None = None) -> None:
+        def _submit_question(
+            self,
+            submitted_text: str | None = None,
+            *,
+            bypass_execution_queue: bool = False,
+        ) -> None:
             """Submit the current question text.
 
             During execution, input is queued for injection into the next tool result.
@@ -3448,14 +4690,19 @@ if TEXTUAL_AVAILABLE:
             Args:
                 submitted_text: Pre-processed text from Submitted event (with paste
                     placeholders expanded). If None, reads from widget directly.
+                bypass_execution_queue: Internal-only flag. When True, submit as a
+                    new turn even if execution-phase status still reports in-progress.
             """
             text = submitted_text.strip() if submitted_text else self.question_input.text.strip()
             tui_log(f"_submit_question called with text: '{text[:50]}...' (len={len(text)})")
 
-            # In execute mode, allow empty submission (just press Enter to run the plan)
+            # In execute/analysis mode, allow empty submission.
+            # - Execute: Enter runs selected plan.
+            # - Analysis: Enter runs default analysis request for selected log target.
             is_execute_mode = self._mode_state.plan_mode == "execute"
-            if not text and not is_execute_mode:
-                tui_log("  Empty text and not execute mode, returning")
+            is_analysis_mode = self._mode_state.plan_mode == "analysis"
+            if not text and not (is_execute_mode or is_analysis_mode):
+                tui_log("  Empty text and not execute/analysis mode, returning")
                 return
 
             # Hide plan options popover on submission (especially for execute mode)
@@ -3467,13 +4714,12 @@ if TEXTUAL_AVAILABLE:
 
             # CRITICAL: Check execution status FIRST before execute mode
             # During active execution, queue input (don't trigger new plan execution)
-            # Execute mode is auto-cleared by end_turn() after execution completes
             is_executing = self._is_execution_in_progress()
             has_hook = self._human_input_hook is not None
             phase = self._status_bar._current_phase if self._status_bar else "unknown"
             tui_log(f"  is_executing={is_executing}, has_hook={has_hook}, phase={phase}")
 
-            if not text.startswith("/") and is_executing and has_hook:
+            if not text.startswith("/") and is_executing and has_hook and not bypass_execution_queue:
                 tui_log("  -> Queueing input for injection")
                 self._queue_human_input(text)
                 return
@@ -3484,6 +4730,8 @@ if TEXTUAL_AVAILABLE:
                 if text is None:
                     # Setup failed, error already shown
                     return
+            elif is_analysis_mode:
+                text = self._setup_analysis_submission(text)
 
             # Clear input after determining routing (queued input was already cleared)
             self.question_input.clear()
@@ -3592,10 +4840,10 @@ if TEXTUAL_AVAILABLE:
                 self._toggle_vim_mode()
                 return True
 
-            # TODO: Re-enable /theme command when additional themes are ready
-            # if cmd == "/theme":
-            #     self.action_toggle_theme()
-            #     return True
+            # /theme command enabled with user settings
+            if cmd == "/theme":
+                self.action_toggle_theme()
+                return True
 
             return False
 
@@ -3655,6 +4903,8 @@ if TEXTUAL_AVAILABLE:
                     self.action_open_workspace_browser()
                 elif result.ui_action == "show_browser":
                     self.action_open_unified_browser()
+                elif result.ui_action == "show_skills":
+                    self._show_skills_modal()
                 elif result.ui_action == "toggle_vim":
                     self._toggle_vim_mode()
                 elif result.ui_action == "toggle_theme":
@@ -3699,6 +4949,8 @@ if TEXTUAL_AVAILABLE:
                     self._show_history_modal()
                 elif cmd in ("/timeline", "/t"):
                     self.action_open_timeline()
+                elif cmd in ("/skills", "/k"):
+                    self._show_skills_modal()
                 else:
                     self.notify(f"Unknown command: {command}", severity="warning")
 
@@ -3719,6 +4971,12 @@ if TEXTUAL_AVAILABLE:
                 self.question_input._vim_normal = False
                 self.question_input.remove_class("vim-normal")
                 self._update_vim_indicator(None)  # None = vim mode off
+            # Save vim mode preference
+            try:
+                user_settings = get_user_settings()
+                user_settings.vim_mode = self.question_input.vim_mode
+            except Exception:
+                pass
 
         def _update_vim_indicator(self, vim_normal: bool | None) -> None:
             """Update the vim mode indicator.
@@ -3729,35 +4987,109 @@ if TEXTUAL_AVAILABLE:
             if not hasattr(self, "_vim_indicator"):
                 return
 
+            path_context = self._build_welcome_context_hint_text()
+            if hasattr(self, "_input_hint"):
+                self._input_hint.update(path_context)
+                self._input_hint.remove_class("hidden")
+
+            indicator_text = self._build_vim_indicator_text(vim_normal)
             if vim_normal is None:
-                # Vim mode off - hide indicator and input hint (hint is now in placeholder)
-                self._vim_indicator.update("")
+                # Vim mode off - keep explicit mode affordance.
+                self._vim_indicator.update(indicator_text)
                 self._vim_indicator.remove_class("vim-normal-indicator")
                 self._vim_indicator.remove_class("vim-insert-indicator")
-                if hasattr(self, "_input_hint"):
-                    self._input_hint.update("")
-                    self._input_hint.add_class("hidden")
             elif vim_normal:
-                # Normal mode - show vim hints in input_hint
-                self._vim_indicator.update(" NORMAL ")
+                # Normal mode line (top row in right panel).
+                self._vim_indicator.update(indicator_text)
                 self._vim_indicator.remove_class("vim-insert-indicator")
                 self._vim_indicator.add_class("vim-normal-indicator")
-                if hasattr(self, "_input_hint"):
-                    self._input_hint.update("VIM: i/a insert • hjkl move • /vim off")
-                    self._input_hint.remove_class("hidden")
             else:
-                # Insert mode - show vim hints in input_hint
-                self._vim_indicator.update(" INSERT ")
+                # Insert mode line (top row in right panel).
+                self._vim_indicator.update(indicator_text)
                 self._vim_indicator.remove_class("vim-normal-indicator")
                 self._vim_indicator.add_class("vim-insert-indicator")
-                if hasattr(self, "_input_hint"):
-                    self._input_hint.update("VIM: Esc normal • Enter submit • /vim off")
-                    self._input_hint.remove_class("hidden")
+
+            self._refresh_input_modes_row_layout()
 
             # Force refresh to ensure visual update
             self._vim_indicator.refresh(layout=True)
             if hasattr(self, "_input_hint"):
                 self._input_hint.refresh()
+
+        def _refresh_input_modes_row_layout(self) -> None:
+            """Stack meta hints below mode controls when horizontal space is tight."""
+            try:
+                input_modes_row = self.query_one("#input_modes_row", Horizontal)
+            except Exception:
+                return
+
+            width = self.size.width or (self.app.size.width if self.app else 120)
+            plan_mode = getattr(getattr(self, "_mode_state", None), "plan_mode", "normal")
+            if self._mode_bar:
+                try:
+                    plan_mode = self._mode_bar.get_plan_mode()
+                except Exception:
+                    pass
+            # Plan/execute/analysis modes expose longer run-control labels and
+            # an extra settings affordance in the left bar; stack the right meta
+            # panel earlier to keep run controls readable in standard terminals.
+            if plan_mode in {"plan", "execute", "analysis"}:
+                stack_meta = width <= 150
+            else:
+                # In normal mode, keep one-row layout whenever the compacted
+                # left controls and right meta panel actually fit.
+                if self._mode_bar:
+                    self._mode_bar._refresh_responsive_labels()
+
+                mode_required = 72
+                if self._mode_bar:
+                    try:
+                        mode_required = max(0, int(self._mode_bar._measure_control_width()))
+                    except Exception:
+                        mode_required = self._mode_bar.region.width or mode_required
+
+                vim_required = 0
+                hint_required = 0
+                if hasattr(self, "_vim_indicator"):
+                    vim_required = len(str(self._vim_indicator.render()).strip())
+                if hasattr(self, "_input_hint"):
+                    hint_required = len(str(self._input_hint.render()).strip())
+
+                # Right panel width is driven by the wider of its two lines.
+                meta_required = max(vim_required, hint_required, 24)
+                one_row_required = mode_required + meta_required + 6
+
+                if width >= 150 and "meta-stacked" not in input_modes_row.classes:
+                    # Keep a small tolerance on the tested wide threshold so
+                    # minor width deltas do not force a stacked layout.
+                    stack_meta = one_row_required > width + 2
+                elif "meta-stacked" in input_modes_row.classes:
+                    # Small hysteresis prevents stack/unstack oscillation.
+                    stack_meta = one_row_required > max(0, width - 2)
+                else:
+                    stack_meta = one_row_required > width
+
+            if stack_meta:
+                input_modes_row.add_class("meta-stacked")
+            else:
+                input_modes_row.remove_class("meta-stacked")
+
+        def _build_vim_indicator_text(self, vim_normal: bool | None) -> str:
+            """Build a width-aware vim status line for the input meta panel."""
+            width = self.size.width or (self.app.size.width if self.app else 120)
+            if vim_normal is None:
+                return "Vim off • /vim on"
+
+            if vim_normal:
+                if width < 92:
+                    return "Normal • i/a • hjkl"
+                if width < 120:
+                    return "Normal • i/a insert • /vim off"
+                return "Normal • i/a insert • hjkl • /vim off"
+
+            if width < 92:
+                return "Insert • Esc normal"
+            return "Insert • Esc normal • /vim off"
 
         def _show_help_modal(self) -> None:
             """Show help information in a modal."""
@@ -3791,6 +5123,18 @@ MODAL SHORTCUTS (when not typing):
   i               - Agent selector
   c               - Coordination table
   v               - Vote results
+
+MODE BAR:
+  Plan            - Normal → Planning → Execute → Analysis
+  Agents          - Multi-agent or single-agent runs
+  Coordination    - Parallel (vote) or decomposition (independent subtasks)
+  Personas        - Toggle parallel persona generation + convergence prep view
+  Subtasks        - Define per-agent subtasks (decomposition mode)
+  Skills          - Open skills manager (source groups, custom/evolving toggles)
+  Refine          - Keep iterative refinement/voting on or off
+  ⋮               - Plan/analysis settings (depth, selector, profile, target)
+  ?               - Open mode bar help
+  Override        - Manually pick final presenter (when available)
 
 TOOL CARDS:
   Click           - Expand/collapse tool card
@@ -3885,6 +5229,113 @@ Type your question and press Enter to ask the agents.
                 await self.push_screen(modal)
 
             self.call_later(lambda: self.run_worker(_show()))
+
+        def _show_decomposition_generation_modal(self, status: str, detail: str = "") -> None:
+            """Open (or update) runtime decomposition progress modal."""
+            if self._decomposition_generation_modal:
+                self._decomposition_generation_modal.update_progress(status, detail)
+                return
+
+            modal = DecompositionGenerationModal(status=status, detail=detail)
+            self._decomposition_generation_modal = modal
+            self._runtime_decomposition_subtasks = {}
+            self._decomposition_completion_source = "subagent"
+
+            def _on_dismiss(_result: Any = None) -> None:
+                self._decomposition_generation_modal = None
+
+            self.push_screen(modal, _on_dismiss)
+
+        def _show_chunk_advance_modal(
+            self,
+            completed_chunk: str,
+            next_chunk: str,
+            auto_continue: bool = True,
+        ) -> None:
+            """Show chunk transition modal and optionally auto-continue execution."""
+            if self._mode_state.plan_mode != "execute":
+                return
+
+            modal = ChunkAdvanceModal(
+                completed_chunk=completed_chunk,
+                next_chunk=next_chunk,
+                auto_continue=auto_continue,
+                countdown_seconds=2,
+            )
+
+            def _on_dismiss(should_continue: Any = None) -> None:
+                if self._mode_state.plan_mode != "execute":
+                    return
+                if should_continue:
+                    self.notify(
+                        f"Continuing with next chunk: {next_chunk}",
+                        severity="information",
+                        timeout=2,
+                    )
+                    if hasattr(self, "question_input") and self.question_input:
+                        self.question_input.value = next_chunk
+
+                    def _submit_next() -> None:
+                        if self._mode_state.plan_mode != "execute":
+                            return
+                        self._submit_question(
+                            next_chunk,
+                            bypass_execution_queue=True,
+                        )
+
+                    self.call_later(_submit_next)
+                else:
+                    self.notify(
+                        f"Paused after chunk {completed_chunk}. Next ready: {next_chunk}",
+                        severity="warning",
+                        timeout=3,
+                    )
+
+            self.push_screen(modal, _on_dismiss)
+
+        def _dismiss_decomposition_generation_modal(self) -> None:
+            """Dismiss decomposition progress modal if present."""
+            if not self._decomposition_generation_modal:
+                return
+            try:
+                self._decomposition_generation_modal.dismiss()
+            except Exception:
+                pass
+
+        def handle_preparation_status(self, status: str, detail: str = "") -> None:
+            """Handle orchestrator preparation status updates in Textual mode."""
+            message = status if not detail else f"{status} — {detail}"
+            self._update_all_loading_text(message)
+
+            lower_status = (status or "").lower()
+            lower_detail = (detail or "").lower()
+            is_decomposition = "decompos" in lower_status or "decompos" in lower_detail or "subtask" in lower_status or "subtask" in lower_detail
+            if not is_decomposition:
+                return
+
+            if "decomposing task" in lower_status:
+                # Decomposition now uses the dedicated subagent screen path.
+                # Keep loading text in panels, but avoid showing the legacy modal.
+                self._dismiss_decomposition_generation_modal()
+                return
+
+            if lower_status in ("decomposition ready", "decomposition fallback"):
+                if self._decomposition_runtime_subagent_call_id:
+                    self._dismiss_decomposition_generation_modal()
+                    return
+                self._decomposition_completion_source = "subagent" if "ready" in lower_status else "fallback"
+                if self._decomposition_generation_modal:
+                    self._decomposition_generation_modal.update_progress(status, detail)
+                    # If subtasks already arrived, render and auto-dismiss.
+                    if self._runtime_decomposition_subtasks:
+                        self._decomposition_generation_modal.show_subtasks(
+                            self._runtime_decomposition_subtasks,
+                            source=self._decomposition_completion_source,
+                        )
+                        self.set_timer(2.5, self._dismiss_decomposition_generation_modal)
+                    else:
+                        # Guard against stale modals if no explicit subtasks are emitted.
+                        self.set_timer(3.0, self._dismiss_decomposition_generation_modal)
 
         async def update_agent_widget(
             self,
@@ -3984,6 +5435,7 @@ Type your question and press Enter to ask the agents.
                     "custom_tool_response": "working",
                     "voting": "working",
                     "voted": "voted",  # Green checkmark - agent voted
+                    "stopped": "stopped",  # Green checkmark - agent stopped (decomposition)
                     "waiting": "voted",  # Waiting for others after voting
                     "complete": "voted",  # Finished, waiting for consensus
                     "completed": "voted",
@@ -4074,6 +5526,689 @@ Type your question and press Enter to ask the agents.
                         level="debug",
                     )
 
+        def _get_decomposition_runtime_subagent(
+            self,
+            subagent_id: str = "task_decomposition",
+        ) -> Optional[Any]:
+            """Return latest decomposition runtime subagent data."""
+            current = self._decomposition_runtime_subagent_data
+            callback = self._decomposition_runtime_status_callback
+
+            if callback:
+                try:
+                    refreshed = callback(subagent_id)
+                    if refreshed is not None:
+                        self._decomposition_runtime_subagent_data = refreshed
+                        current = refreshed
+                except Exception:
+                    pass
+
+            if current is not None and getattr(current, "id", None) == subagent_id:
+                return current
+            return None
+
+        def _open_decomposition_runtime_subagent_screen(
+            self,
+            auto_return_on_completion: bool = False,
+        ) -> bool:
+            """Open the decomposition runtime subagent screen.
+
+            Returns:
+                True if a screen was opened, False otherwise.
+            """
+            subagent = self._get_decomposition_runtime_subagent()
+            if not subagent:
+                return False
+
+            screen = SubagentScreen(
+                subagent=subagent,
+                all_subagents=[subagent],
+                status_callback=self._get_decomposition_runtime_subagent,
+                auto_return_on_completion=auto_return_on_completion,
+            )
+            self.push_screen(screen)
+            return True
+
+        def _decomposition_subagent_events_ready(self) -> bool:
+            """Return True when decomposition subagent has enough data for full subagent view.
+
+            Readiness requires:
+            - a readable events stream, and
+            - detectable inner-agent identity data (metadata or event agent IDs/sources).
+            """
+            subagent = self._get_decomposition_runtime_subagent()
+            if not subagent:
+                return False
+
+            log_path_raw = getattr(subagent, "log_path", None)
+            if not log_path_raw:
+                return False
+
+            try:
+                from massgen.subagent.models import SubagentResult
+
+                log_path = Path(log_path_raw)
+                if not log_path.is_absolute():
+                    log_path = (Path.cwd() / log_path).resolve()
+
+                events_path: Optional[Path] = None
+                if log_path.is_file():
+                    events_path = log_path
+                elif log_path.is_dir():
+                    resolved = SubagentResult.resolve_events_path(log_path)
+                    if resolved:
+                        events_path = Path(resolved)
+
+                if not events_path or not events_path.exists():
+                    return False
+                if events_path.stat().st_size <= 0:
+                    return False
+
+                # Prefer explicit metadata signal (same source SubagentScreen uses).
+                metadata_candidates = [events_path.parent / "execution_metadata.yaml"]
+                if log_path.is_dir():
+                    metadata_candidates.extend(
+                        [
+                            log_path / "full_logs" / "execution_metadata.yaml",
+                            log_path / "execution_metadata.yaml",
+                        ],
+                    )
+                else:
+                    metadata_candidates.append(log_path.parent / "execution_metadata.yaml")
+
+                for candidate in metadata_candidates:
+                    if not candidate.exists():
+                        continue
+                    try:
+                        import yaml
+
+                        with open(candidate, encoding="utf-8") as f:
+                            metadata = yaml.safe_load(f) or {}
+                        agents_cfg = (metadata.get("config") or {}).get("agents") or []
+                        if isinstance(agents_cfg, list):
+                            agent_ids = [a.get("id") for a in agents_cfg if isinstance(a, dict) and isinstance(a.get("id"), str) and a.get("id")]
+                            if agent_ids:
+                                return True
+                    except Exception:
+                        continue
+
+                # Fallback: scan recent event lines for inner-agent sources.
+                def _is_agent_source(source: Optional[str]) -> bool:
+                    if not source:
+                        return False
+                    lowered = source.lower()
+                    if lowered.startswith("mcp_") or lowered.startswith("mcp__") or "mcp__" in lowered:
+                        return False
+                    if lowered in ("mcp_setup", "mcp_session", "orchestrator", "system", "task_decomposition"):
+                        return False
+                    return True
+
+                try:
+                    import json
+
+                    tail_lines = events_path.read_text(encoding="utf-8", errors="ignore").splitlines()[-400:]
+                    seen_agents: set[str] = set()
+                    for raw in tail_lines:
+                        if not raw.strip():
+                            continue
+                        try:
+                            event = json.loads(raw)
+                        except Exception:
+                            continue
+
+                        agent_id = event.get("agent_id")
+                        if isinstance(agent_id, str) and _is_agent_source(agent_id):
+                            seen_agents.add(agent_id)
+
+                        data = event.get("data") if isinstance(event.get("data"), dict) else {}
+                        source = data.get("source") if isinstance(data, dict) else None
+                        if not source and isinstance(data, dict):
+                            chunk = data.get("chunk")
+                            if isinstance(chunk, dict):
+                                source = chunk.get("source")
+                        if isinstance(source, str) and _is_agent_source(source):
+                            seen_agents.add(source)
+
+                    if seen_agents:
+                        return True
+                except Exception:
+                    return False
+
+                return False
+            except Exception:
+                return False
+
+        def _auto_open_decomposition_runtime_subagent_screen(self, attempt: int = 0) -> None:
+            """Auto-open decomposition subagent screen once event data is available."""
+            if self._decomposition_subagent_events_ready():
+                self._open_decomposition_runtime_subagent_screen(auto_return_on_completion=True)
+                return
+
+            # Retry for a short window; avoid forcing an early empty screen.
+            if attempt >= 120:
+                return
+
+            self.set_timer(
+                0.1,
+                lambda: self._auto_open_decomposition_runtime_subagent_screen(attempt + 1),
+            )
+
+        def _get_persona_runtime_subagent(
+            self,
+            subagent_id: str = "persona_generation",
+        ) -> Optional[Any]:
+            """Return latest runtime persona-generation subagent data."""
+            current = self._persona_runtime_subagent_data
+            callback = self._persona_runtime_status_callback
+
+            if callback:
+                try:
+                    refreshed = callback(subagent_id)
+                    if refreshed is not None:
+                        self._persona_runtime_subagent_data = refreshed
+                        current = refreshed
+                except Exception:
+                    pass
+
+            if current is not None and getattr(current, "id", None) == subagent_id:
+                return current
+            return None
+
+        def _open_persona_runtime_subagent_screen(
+            self,
+            auto_return_on_completion: bool = False,
+        ) -> bool:
+            """Open the runtime persona-generation subagent screen."""
+            subagent = self._get_persona_runtime_subagent()
+            if not subagent:
+                return False
+
+            screen = SubagentScreen(
+                subagent=subagent,
+                all_subagents=[subagent],
+                status_callback=self._get_persona_runtime_subagent,
+                auto_return_on_completion=auto_return_on_completion,
+            )
+            self.push_screen(screen)
+            return True
+
+        def _persona_subagent_events_ready(self) -> bool:
+            """Return True when persona-generation subagent has enough event data."""
+            subagent = self._get_persona_runtime_subagent()
+            if not subagent:
+                return False
+
+            log_path_raw = getattr(subagent, "log_path", None)
+            if not log_path_raw:
+                return False
+
+            try:
+                from massgen.subagent.models import SubagentResult
+
+                log_path = Path(log_path_raw)
+                if not log_path.is_absolute():
+                    log_path = (Path.cwd() / log_path).resolve()
+
+                events_path: Optional[Path] = None
+                if log_path.is_file():
+                    events_path = log_path
+                elif log_path.is_dir():
+                    resolved = SubagentResult.resolve_events_path(log_path)
+                    if resolved:
+                        events_path = Path(resolved)
+
+                if not events_path or not events_path.exists():
+                    return False
+                if events_path.stat().st_size <= 0:
+                    return False
+
+                metadata_candidates = [events_path.parent / "execution_metadata.yaml"]
+                if log_path.is_dir():
+                    metadata_candidates.extend(
+                        [
+                            log_path / "full_logs" / "execution_metadata.yaml",
+                            log_path / "execution_metadata.yaml",
+                        ],
+                    )
+                else:
+                    metadata_candidates.append(log_path.parent / "execution_metadata.yaml")
+
+                for candidate in metadata_candidates:
+                    if not candidate.exists():
+                        continue
+                    try:
+                        import yaml
+
+                        with open(candidate, encoding="utf-8") as f:
+                            metadata = yaml.safe_load(f) or {}
+                        agents_cfg = (metadata.get("config") or {}).get("agents") or []
+                        if isinstance(agents_cfg, list):
+                            agent_ids = [a.get("id") for a in agents_cfg if isinstance(a, dict) and isinstance(a.get("id"), str) and a.get("id")]
+                            if agent_ids:
+                                return True
+                    except Exception:
+                        continue
+
+                # Fallback: scan recent event lines for inner-agent sources.
+                def _is_agent_source(source: Optional[str]) -> bool:
+                    if not source:
+                        return False
+                    lowered = source.lower()
+                    if lowered.startswith("mcp_") or lowered.startswith("mcp__") or "mcp__" in lowered:
+                        return False
+                    if lowered in ("mcp_setup", "mcp_session", "orchestrator", "system", "persona_generation"):
+                        return False
+                    return True
+
+                try:
+                    import json
+
+                    tail_lines = events_path.read_text(encoding="utf-8", errors="ignore").splitlines()[-400:]
+                    seen_agents: set[str] = set()
+                    for raw in tail_lines:
+                        if not raw.strip():
+                            continue
+                        try:
+                            event = json.loads(raw)
+                        except Exception:
+                            continue
+
+                        agent_id = event.get("agent_id")
+                        if isinstance(agent_id, str) and _is_agent_source(agent_id):
+                            seen_agents.add(agent_id)
+
+                        data = event.get("data") if isinstance(event.get("data"), dict) else {}
+                        source = data.get("source") if isinstance(data, dict) else None
+                        if not source and isinstance(data, dict):
+                            chunk = data.get("chunk")
+                            if isinstance(chunk, dict):
+                                source = chunk.get("source")
+                        if isinstance(source, str) and _is_agent_source(source):
+                            seen_agents.add(source)
+
+                    if seen_agents:
+                        return True
+                except Exception:
+                    return False
+
+                return False
+            except Exception:
+                return False
+
+        def _auto_open_persona_runtime_subagent_screen(self, attempt: int = 0) -> None:
+            """Auto-open persona-generation subagent screen once event data is available."""
+            if self._persona_subagent_events_ready():
+                self._open_persona_runtime_subagent_screen(auto_return_on_completion=True)
+                return
+
+            if attempt >= 120:
+                return
+
+            self.set_timer(
+                0.1,
+                lambda: self._auto_open_persona_runtime_subagent_screen(attempt + 1),
+            )
+
+        def show_runtime_subagent_card(
+            self,
+            agent_id: str,
+            subagent_id: str,
+            task: str,
+            timeout_seconds: int,
+            call_id: str,
+            status_callback: Optional[Callable[[str], Optional[Any]]] = None,
+            log_path: Optional[str] = None,
+            _retry_count: int = 0,
+        ) -> None:
+            """Render a subagent card for orchestrator-owned runtime subagents."""
+            from massgen.subagent.models import SubagentDisplayData
+
+            # Decomposition pre-run generation should not appear in the main timeline,
+            # but should be visible immediately in the dedicated subagent screen.
+            if subagent_id == "task_decomposition":
+                trimmed_task = (task or "").strip()
+                if len(trimmed_task) > 300:
+                    trimmed_task = trimmed_task[:297] + "..."
+
+                resolved_log_path = log_path
+                if not resolved_log_path:
+                    try:
+                        log_dir = get_log_session_dir()
+                        if log_dir:
+                            resolved_log_path = str(log_dir / "subagents" / subagent_id)
+                    except Exception:
+                        resolved_log_path = None
+
+                self._decomposition_runtime_subagent_call_id = call_id
+                self._decomposition_runtime_subagent_agent_id = agent_id
+                self._decomposition_runtime_status_callback = status_callback
+                self._decomposition_runtime_subagent_data = SubagentDisplayData(
+                    id=subagent_id,
+                    task=trimmed_task,
+                    status="running",
+                    progress_percent=0,
+                    elapsed_seconds=0.0,
+                    timeout_seconds=float(timeout_seconds or 300),
+                    workspace_path="",
+                    workspace_file_count=0,
+                    last_log_line="Starting...",
+                    error=None,
+                    answer_preview=None,
+                    log_path=resolved_log_path,
+                )
+
+                self._dismiss_decomposition_generation_modal()
+                if not self._decomposition_runtime_auto_opened:
+                    self._decomposition_runtime_auto_opened = True
+                    self.set_timer(0.05, self._auto_open_decomposition_runtime_subagent_screen)
+                return
+
+            # Persona generation prep should also stay out of the main timeline and
+            # open directly in the dedicated subagent screen.
+            if subagent_id == "persona_generation":
+                trimmed_task = (task or "").strip()
+                if len(trimmed_task) > 300:
+                    trimmed_task = trimmed_task[:297] + "..."
+
+                resolved_log_path = log_path
+                if not resolved_log_path:
+                    try:
+                        log_dir = get_log_session_dir()
+                        if log_dir:
+                            resolved_log_path = str(log_dir / "subagents" / subagent_id)
+                    except Exception:
+                        resolved_log_path = None
+
+                self._persona_runtime_subagent_call_id = call_id
+                self._persona_runtime_subagent_agent_id = agent_id
+                self._persona_runtime_status_callback = status_callback
+                self._persona_runtime_subagent_data = SubagentDisplayData(
+                    id=subagent_id,
+                    task=trimmed_task,
+                    status="running",
+                    progress_percent=0,
+                    elapsed_seconds=0.0,
+                    timeout_seconds=float(timeout_seconds or 300),
+                    workspace_path="",
+                    workspace_file_count=0,
+                    last_log_line="Starting...",
+                    error=None,
+                    answer_preview=None,
+                    log_path=resolved_log_path,
+                )
+
+                if not self._persona_runtime_auto_opened:
+                    self._persona_runtime_auto_opened = True
+                    self.set_timer(0.05, self._auto_open_persona_runtime_subagent_screen)
+                return
+
+            target_agent = agent_id if agent_id in self.agent_widgets else None
+            if not target_agent:
+                if self._active_agent_id in self.agent_widgets:
+                    target_agent = self._active_agent_id
+                elif self.coordination_display.agent_ids:
+                    candidate = self.coordination_display.agent_ids[0]
+                    if candidate in self.agent_widgets:
+                        target_agent = candidate
+
+            if not target_agent:
+                if _retry_count < 8:
+                    self.set_timer(
+                        0.1,
+                        lambda: self.show_runtime_subagent_card(
+                            agent_id=agent_id,
+                            subagent_id=subagent_id,
+                            task=task,
+                            timeout_seconds=timeout_seconds,
+                            call_id=call_id,
+                            status_callback=status_callback,
+                            log_path=log_path,
+                            _retry_count=_retry_count + 1,
+                        ),
+                    )
+                return
+
+            trimmed_task = (task or "").strip()
+            if len(trimmed_task) > 300:
+                trimmed_task = trimmed_task[:297] + "..."
+
+            resolved_log_path = log_path
+            if not resolved_log_path:
+                try:
+                    log_dir = get_log_session_dir()
+                    if log_dir:
+                        resolved_log_path = str(log_dir / "subagents" / subagent_id)
+                except Exception:
+                    resolved_log_path = None
+
+            subagent = SubagentDisplayData(
+                id=subagent_id,
+                task=trimmed_task,
+                status="running",
+                progress_percent=0,
+                elapsed_seconds=0.0,
+                timeout_seconds=float(timeout_seconds or 300),
+                workspace_path="",
+                workspace_file_count=0,
+                last_log_line="Starting...",
+                error=None,
+                answer_preview=None,
+                log_path=resolved_log_path,
+            )
+
+            panel = self.agent_widgets.get(target_agent)
+            if not panel:
+                if _retry_count < 8:
+                    self.set_timer(
+                        0.1,
+                        lambda: self.show_runtime_subagent_card(
+                            agent_id=agent_id,
+                            subagent_id=subagent_id,
+                            task=task,
+                            timeout_seconds=timeout_seconds,
+                            call_id=call_id,
+                            status_callback=status_callback,
+                            log_path=log_path,
+                            _retry_count=_retry_count + 1,
+                        ),
+                    )
+                return
+
+            # Ensure timeline cards are visible during prep (not masked by loading panel).
+            try:
+                panel._hide_loading()
+            except Exception:
+                pass
+
+            try:
+                timeline = panel.query_one(f"#{panel._timeline_section_id}", TimelineSection)
+            except Exception:
+                if _retry_count < 8:
+                    self.set_timer(
+                        0.1,
+                        lambda: self.show_runtime_subagent_card(
+                            agent_id=agent_id,
+                            subagent_id=subagent_id,
+                            task=task,
+                            timeout_seconds=timeout_seconds,
+                            call_id=call_id,
+                            status_callback=status_callback,
+                            log_path=log_path,
+                            _retry_count=_retry_count + 1,
+                        ),
+                    )
+                return
+
+            card_id = _subagent_card_dom_id(call_id)
+            card: Optional[SubagentCard] = None
+            try:
+                card = timeline.query_one(f"#{card_id}", SubagentCard)
+            except Exception:
+                card = None
+
+            if card:
+                card.update_subagents([subagent])
+                if status_callback:
+                    card.set_status_callback(status_callback)
+            else:
+                card = SubagentCard(
+                    subagents=[subagent],
+                    tool_call_id=call_id,
+                    status_callback=status_callback,
+                    id=card_id,
+                )
+                round_number = max(
+                    1,
+                    int(getattr(panel, "_current_round", getattr(timeline, "_viewed_round", 1)) or 1),
+                )
+                timeline.add_widget(card, round_number=round_number)
+
+        def update_runtime_subagent_card(
+            self,
+            agent_id: str,
+            subagent_id: str,
+            call_id: str,
+            status: str,
+            answer_preview: Optional[str] = None,
+            error: Optional[str] = None,
+        ) -> None:
+            """Update status/result info for an orchestrator-owned runtime subagent."""
+            from massgen.subagent.models import SubagentDisplayData
+
+            # Decomposition pre-run generation is intentionally not rendered in timeline.
+            # Keep status in memory so Ctrl+U and the dedicated subagent screen still work.
+            if subagent_id == "task_decomposition":
+                existing = self._get_decomposition_runtime_subagent(subagent_id) or self._decomposition_runtime_subagent_data
+
+                status_map = {
+                    "running": "running",
+                    "pending": "pending",
+                    "completed": "completed",
+                    "timeout": "timeout",
+                    "failed": "failed",
+                    "error": "error",
+                }
+                normalized_status = status_map.get((status or "").lower(), "failed")
+
+                if existing is not None:
+                    self._decomposition_runtime_subagent_data = SubagentDisplayData(
+                        id=existing.id,
+                        task=existing.task,
+                        status=normalized_status,
+                        progress_percent=100 if normalized_status in ("completed", "timeout", "failed", "error") else existing.progress_percent,
+                        elapsed_seconds=existing.elapsed_seconds,
+                        timeout_seconds=existing.timeout_seconds,
+                        workspace_path=existing.workspace_path,
+                        workspace_file_count=existing.workspace_file_count,
+                        last_log_line=existing.last_log_line,
+                        error=error or existing.error,
+                        answer_preview=answer_preview or existing.answer_preview,
+                        log_path=existing.log_path,
+                    )
+
+                if call_id == self._decomposition_runtime_subagent_call_id and normalized_status in ("completed", "timeout", "failed", "error"):
+                    self._decomposition_runtime_subagent_call_id = None
+                    self._decomposition_runtime_subagent_agent_id = None
+                return
+
+            if subagent_id == "persona_generation":
+                existing = self._get_persona_runtime_subagent(subagent_id) or self._persona_runtime_subagent_data
+
+                status_map = {
+                    "running": "running",
+                    "pending": "pending",
+                    "completed": "completed",
+                    "timeout": "timeout",
+                    "failed": "failed",
+                    "error": "error",
+                }
+                normalized_status = status_map.get((status or "").lower(), "failed")
+
+                if existing is not None:
+                    self._persona_runtime_subagent_data = SubagentDisplayData(
+                        id=existing.id,
+                        task=existing.task,
+                        status=normalized_status,
+                        progress_percent=100 if normalized_status in ("completed", "timeout", "failed", "error") else existing.progress_percent,
+                        elapsed_seconds=existing.elapsed_seconds,
+                        timeout_seconds=existing.timeout_seconds,
+                        workspace_path=existing.workspace_path,
+                        workspace_file_count=existing.workspace_file_count,
+                        last_log_line=existing.last_log_line,
+                        error=error or existing.error,
+                        answer_preview=answer_preview or existing.answer_preview,
+                        log_path=existing.log_path,
+                    )
+
+                if call_id == self._persona_runtime_subagent_call_id and normalized_status in ("completed", "timeout", "failed", "error"):
+                    self._persona_runtime_subagent_call_id = None
+                    self._persona_runtime_subagent_agent_id = None
+                return
+
+            status_map = {
+                "running": "running",
+                "pending": "pending",
+                "completed": "completed",
+                "timeout": "timeout",
+                "failed": "failed",
+                "error": "error",
+            }
+            normalized_status = status_map.get((status or "").lower(), "failed")
+
+            target_agent = agent_id
+            if call_id == self._decomposition_runtime_subagent_call_id and self._decomposition_runtime_subagent_agent_id:
+                target_agent = self._decomposition_runtime_subagent_agent_id
+            elif call_id == self._persona_runtime_subagent_call_id and self._persona_runtime_subagent_agent_id:
+                target_agent = self._persona_runtime_subagent_agent_id
+
+            panel = self.agent_widgets.get(target_agent)
+            if not panel:
+                return
+
+            try:
+                timeline = panel.query_one(f"#{panel._timeline_section_id}", TimelineSection)
+            except Exception:
+                return
+
+            card_id = _subagent_card_dom_id(call_id)
+            try:
+                card = timeline.query_one(f"#{card_id}", SubagentCard)
+            except Exception:
+                return
+
+            existing = None
+            for sa in card.subagents:
+                if sa.id == subagent_id:
+                    existing = sa
+                    break
+
+            if existing is None:
+                return
+
+            final_progress = 100 if normalized_status in ("completed", "timeout", "failed", "error") else existing.progress_percent
+            updated = SubagentDisplayData(
+                id=existing.id,
+                task=existing.task,
+                status=normalized_status,
+                progress_percent=final_progress,
+                elapsed_seconds=existing.elapsed_seconds,
+                timeout_seconds=existing.timeout_seconds,
+                workspace_path=existing.workspace_path,
+                workspace_file_count=existing.workspace_file_count,
+                last_log_line=existing.last_log_line,
+                error=error or existing.error,
+                answer_preview=answer_preview or existing.answer_preview,
+                log_path=existing.log_path,
+            )
+            card.update_subagent(subagent_id, updated)
+
+            if call_id == self._decomposition_runtime_subagent_call_id and normalized_status in ("completed", "timeout", "failed", "error"):
+                self._decomposition_runtime_subagent_call_id = None
+                self._decomposition_runtime_subagent_agent_id = None
+            elif call_id == self._persona_runtime_subagent_call_id and normalized_status in ("completed", "timeout", "failed", "error"):
+                self._persona_runtime_subagent_call_id = None
+                self._persona_runtime_subagent_agent_id = None
+
         def show_subagent_card_from_spawn(
             self,
             agent_id: str,
@@ -4146,6 +6281,10 @@ Type your question and press Enter to ask the agents.
             if agent_id in self.agent_widgets:
                 panel = self.agent_widgets[agent_id]
                 try:
+                    try:
+                        panel._hide_loading()
+                    except Exception:
+                        pass
                     timeline = panel.query_one(f"#{panel._timeline_section_id}", TimelineSection)
 
                     # Flush any pending tool batch so the card appears
@@ -4154,20 +6293,35 @@ Type your question and press Enter to ask the agents.
                         panel._batch_tracker.mark_content_arrived()
                         panel._batch_tracker.finalize_current_batch()
 
-                    # Remove stale SubagentCards from failed spawn attempts
+                    # Remove stale duplicate card for the same tool call only.
+                    card_dom_id = _subagent_card_dom_id(call_id)
                     try:
                         for old_card in list(timeline.query(SubagentCard)):
-                            old_card.remove()
+                            old_id = getattr(old_card, "id", "")
+                            old_tool_call_id = getattr(old_card, "tool_call_id", None) or getattr(old_card, "_tool_call_id", None)
+                            if old_id == card_dom_id or str(old_tool_call_id) == str(call_id):
+                                old_card.remove()
                     except Exception as e:
                         tui_log(f"[TextualDisplay] {e}")
+
+                    status_callback = self._build_spawn_status_callback(
+                        agent_id=agent_id,
+                        seed_subagents=subagents,
+                    )
+
+                    round_number = max(
+                        1,
+                        int(getattr(panel, "_current_round", getattr(timeline, "_viewed_round", 1)) or 1),
+                    )
 
                     # Create and add SubagentCard to timeline
                     card = SubagentCard(
                         subagents=subagents,
                         tool_call_id=call_id,
-                        id=f"subagent_{call_id}",
+                        status_callback=status_callback,
+                        id=card_dom_id,
                     )
-                    timeline.add_widget(card)
+                    timeline.add_widget(card, round_number=round_number)
                     tui_log(
                         f"show_subagent_card_from_spawn: added SubagentCard with {len(subagents)} pending subagents",
                     )
@@ -4313,12 +6467,10 @@ Type your question and press Enter to ask the agents.
                     tui_log("[TextualDisplay] Final card already exists, reusing it")
                     card = existing_cards[0]
                     self._final_presentation_card = card
-                    # Still need to do the lock and complete
+                    self.coordination_display._apply_pending_review_status(card)
                     if answer and not getattr(card, "_final_content", []):
                         card.append_chunk(answer)
                     card.complete()
-                    timeline.lock_to_final_answer("final_presentation_card")
-                    card.set_locked_mode(True)
                     return
 
                 tui_log("[TextualDisplay] Creating new final presentation card")
@@ -4338,6 +6490,7 @@ Type your question and press Enter to ask the agents.
                 # (add_widget uses round-based insertion which can place card before later content)
                 timeline.mount(card)
                 self._final_presentation_card = card
+                self.coordination_display._apply_pending_review_status(card)
 
                 # Stop the round timer - final presentation is the end state
                 if self._status_ribbon:
@@ -4358,13 +6511,10 @@ Type your question and press Enter to ask the agents.
                     card.complete()
                     try:
                         logger.info(
-                            "[FinalAnswer] Card completed and locked to timeline",
+                            "[FinalAnswer] Card completed in timeline",
                         )
                     except Exception as e:
                         tui_log(f"[TextualDisplay] {e}")
-                    # Auto-lock timeline to show only final answer
-                    timeline.lock_to_final_answer("final_presentation_card")
-                    card.set_locked_mode(True)
                     # Auto-collapse task plan when final presentation shows
                     if hasattr(panel, "_task_plan_host"):
                         panel._task_plan_host.collapse()
@@ -4470,24 +6620,19 @@ Type your question and press Enter to ask the agents.
                 if self._final_presentation_card._post_eval_status in ("none", "evaluating"):
                     self._final_presentation_card.set_post_eval_status("verified")
 
-                # Mark the card as complete (shows footer with buttons)
-                self._final_presentation_card.complete()
-
-                # Auto-lock timeline to show only final answer
+                # Auto-collapse task plan and update input when final answer shows
                 if agent_id in self.agent_widgets:
                     panel = self.agent_widgets[agent_id]
                     try:
-                        timeline = panel.query_one(f"#{panel._timeline_section_id}", TimelineSection)
-                        timeline.lock_to_final_answer("final_presentation_card")
-                        self._final_presentation_card.set_locked_mode(True)
-                        # Auto-collapse task plan when final answer shows
                         if hasattr(panel, "_task_plan_host"):
                             panel._task_plan_host.collapse()
-                        # Update input placeholder to encourage follow-up
                         if hasattr(self, "question_input"):
                             self.question_input.placeholder = "Type your follow-up question..."
                     except Exception as e:
                         tui_log(f"[TextualDisplay] {e}")
+
+                # Mark the card as complete (shows footer with buttons)
+                self._final_presentation_card.complete()
 
                 # Phase 12.4: Store final answer for view-based navigation
                 if agent_id in self.agent_widgets:
@@ -4586,6 +6731,7 @@ Type your question and press Enter to ask the agents.
                     if existing_cards:
                         tui_log("[TextualDisplay] begin_final_stream: card already exists, reusing")
                         self._final_presentation_card = existing_cards[0]
+                        self.coordination_display._apply_pending_review_status(existing_cards[0])
                         timeline.scroll_to_widget("final_presentation_card")
                         return
 
@@ -4632,6 +6778,7 @@ Type your question and press Enter to ask the agents.
                     # Use mount() directly to ensure card is always at the END of timeline
                     timeline.mount(card)
                     self._final_presentation_card = card
+                    self.coordination_display._apply_pending_review_status(card)
 
                     # Scroll to show the card
                     timeline.scroll_to_widget("final_presentation_card")
@@ -4776,22 +6923,19 @@ Type your question and press Enter to ask the agents.
                     # Use mount() directly to ensure card is always at the END of timeline
                     timeline.mount(card)
                     self._final_presentation_card = card
+                    self.coordination_display._apply_pending_review_status(card)
 
-                    # Auto-lock timeline to show only final answer
-                    def auto_lock_after_add():
+                    # Auto-collapse task plan and update input after card is added
+                    def after_card_add():
                         try:
-                            timeline.lock_to_final_answer("winner_selected_card")
-                            card.set_locked_mode(True)
-                            # Auto-collapse task plan when final answer shows
                             if hasattr(panel, "_task_plan_host"):
                                 panel._task_plan_host.collapse()
-                            # Update input placeholder to encourage follow-up
                             if hasattr(self, "question_input"):
                                 self.question_input.placeholder = "Type your follow-up question..."
                         except Exception as e:
                             tui_log(f"[TextualDisplay] {e}")
 
-                    self.set_timer(0.1, auto_lock_after_add)
+                    self.set_timer(0.1, after_card_add)
 
                     # Scroll to show the card
                     timeline.scroll_to_widget("winner_selected_card")
@@ -4842,6 +6986,14 @@ Type your question and press Enter to ask the agents.
             self.clear_winner_state()
             logger.info("[TUI-App] Winner state cleared")
 
+            # Reset status indicators so they animate for the new turn
+            if self._status_bar:
+                for agent_id in self._status_bar._agent_order:
+                    self._status_bar.set_agent_activity(agent_id, "thinking")
+            if self._execution_status_line:
+                for agent_id in self._execution_status_line._agent_ids:
+                    self._execution_status_line.set_agent_state(agent_id, "working")
+
             # Clear timeline content from all agent panels
             logger.info(f"[TUI-App] Clearing timelines for {len(self.agent_widgets)} agent panels")
             for agent_id, panel in self.agent_widgets.items():
@@ -4855,51 +7007,94 @@ Type your question and press Enter to ask the agents.
 
                     # Add a turn separator banner if this is turn 2+
                     if turn > 1:
-                        logger.info(f"[TUI-App] Adding turn {turn} banner for {agent_id}")
-                        from massgen.frontend.displays.textual_widgets.content_sections import (
-                            RestartBanner,
-                        )
-
-                        # CRITICAL: Suppress auto Round 1 insertion before adding turn banner.
-                        # add_widget() calls _ensure_round_banner() which would add Round 1
-                        # ABOVE the turn banner. We add Round 1 explicitly BELOW it instead.
-                        timeline._round_1_shown = True
-
-                        # Create a turn separator that shows context from previous turn
-                        separator_label = f"══════ Turn {turn} ══════"
-                        turn_banner = RestartBanner(
-                            label=separator_label,
-                            id=f"turn_{turn}_separator",
-                        )
-                        timeline.add_widget(turn_banner)
-                        logger.info(f"[TUI-App] Turn banner added to timeline for {agent_id}")
-
-                        # If we have a previous answer summary, show it collapsed
-                        if previous_answer:
-                            logger.info(f"[TUI-App] Adding previous answer context for {agent_id}")
-                            from textual.widgets import Static
-
-                            summary = previous_answer[:200] + "..." if len(previous_answer) > 200 else previous_answer
-                            context_widget = Static(
-                                f"[dim]Previous: {summary}[/]",
-                                id=f"turn_{turn}_context",
-                                markup=True,
+                        # Defer banner insertion until after clear() is fully processed.
+                        # Textual removes children asynchronously, so immediate mounts can collide on IDs.
+                        def _add_turn_banner(
+                            agent_id: str = agent_id,
+                            timeline: TimelineSection = timeline,
+                            previous_answer: Optional[str] = previous_answer,
+                            turn: int = turn,
+                        ) -> None:
+                            logger.info(f"[TUI-App] Adding turn {turn} banner for {agent_id}")
+                            from massgen.frontend.displays.textual_widgets.content_sections import (
+                                RestartBanner,
                             )
-                            timeline.add_widget(context_widget)
 
-                        # CRITICAL: Add Round 1 separator BELOW the turn banner (and optional context)
-                        # This ensures proper order: Turn X → [Context] → Round 1 → Content
-                        logger.info(f"[TUI-App] Adding Round 1 separator for {agent_id}")
-                        timeline.add_separator("Round 1", round_number=1)
-                        timeline._round_1_shown = True  # Prevent _ensure_round_banner() from adding it again
-                        logger.info("[TUI-App] Round 1 separator added, _round_1_shown set to True")
+                            # Create a turn separator that shows context from previous turn
+                            separator_label = f"══════ Turn {turn} ══════"
+                            turn_banner = RestartBanner(
+                                label=separator_label,
+                                id=f"turn_{turn}_separator",
+                            )
+                            turn_banner.add_class("turn-banner")
+                            indicator = None
+                            try:
+                                from textual.widgets import Static
 
-                        # Scroll to the turn banner to show the new turn at the top
-                        try:
-                            turn_banner.scroll_visible()
-                            logger.info(f"[TUI-App] Scrolled to turn banner for {agent_id}")
-                        except Exception as e:
-                            logger.warning(f"[TUI-App] Failed to scroll to turn banner for {agent_id}: {e}")
+                                indicator = timeline.query_one("#scroll_mode_indicator", Static)
+                            except Exception:
+                                indicator = None
+                            timeline.mount(turn_banner, after=indicator)
+                            logger.info(f"[TUI-App] Turn banner added to timeline for {agent_id}")
+
+                            # If we have a previous answer summary, show it collapsed
+                            insert_after = turn_banner
+                            if previous_answer:
+                                logger.info(f"[TUI-App] Adding previous answer context for {agent_id}")
+                                from textual.widgets import Static
+
+                                summary = previous_answer[:200] + "..." if len(previous_answer) > 200 else previous_answer
+                                context_widget = Static(
+                                    f"[dim]Previous: {summary}[/]",
+                                    id=f"turn_{turn}_context",
+                                    markup=True,
+                                )
+                                context_widget.add_class("turn-context")
+                                timeline.mount(context_widget, after=insert_after)
+                                insert_after = context_widget
+
+                            # CRITICAL: Add Round 1 separator BELOW the turn banner (and optional context)
+                            # This ensures proper order: Turn X → [Context] → Round 1 → Content
+                            logger.info(f"[TUI-App] Adding Round 1 separator for {agent_id}")
+                            try:
+                                if hasattr(timeline, "_pending_round_separators"):
+                                    timeline._pending_round_separators.discard(1)
+                                if hasattr(timeline, "_shown_round_banners"):
+                                    timeline._shown_round_banners.discard(1)
+                                if hasattr(timeline, "_round_1_shown"):
+                                    timeline._round_1_shown = False
+                            except Exception:
+                                pass
+                            try:
+                                timeline.add_separator("Round 1", round_number=1, after=insert_after)
+                                logger.info("[TUI-App] Round 1 separator added after turn banner/context")
+                            except Exception as e:
+                                logger.warning(f"[TUI-App] Failed to add Round 1 separator: {e}")
+                                try:
+                                    round_banner = RestartBanner(
+                                        label="Round 1",
+                                        id=f"turn_{turn}_round_1_separator",
+                                    )
+                                    round_banner.add_class("round-1")
+                                    timeline.mount(round_banner, after=insert_after)
+                                    if hasattr(timeline, "_shown_round_banners"):
+                                        timeline._shown_round_banners.add(1)
+                                    if hasattr(timeline, "_last_round_shown"):
+                                        timeline._last_round_shown = max(timeline._last_round_shown, 1)
+                                    if hasattr(timeline, "_round_1_shown"):
+                                        timeline._round_1_shown = True
+                                    logger.info("[TUI-App] Forced Round 1 separator mount (fallback)")
+                                except Exception as e2:
+                                    logger.warning(f"[TUI-App] Failed to force-mount Round 1 separator: {e2}")
+
+                            # Scroll to the turn banner to show the new turn at the top
+                            try:
+                                turn_banner.scroll_visible()
+                                logger.info(f"[TUI-App] Scrolled to turn banner for {agent_id}")
+                            except Exception as e:
+                                logger.warning(f"[TUI-App] Failed to scroll to turn banner for {agent_id}: {e}")
+
+                        timeline.call_after_refresh(_add_turn_banner)
 
                 except Exception as e:
                     logger.error(f"[TUI-App] Failed to prepare timeline for {agent_id}: {e}", exc_info=True)
@@ -5009,6 +7204,16 @@ Type your question and press Enter to ask the agents.
                         widget.reset_round_state()
                         logger.info(f"[TUI] After reset: panel._current_round={widget._current_round}, panel._viewed_round={widget._viewed_round}")
 
+                # CRITICAL: Reset per-agent event adapters so new turn starts at Round 1
+                if hasattr(self, "_event_adapters") and self._event_adapters:
+                    logger.info(f"[TUI] Resetting {len(self._event_adapters)} TimelineEventAdapters for new turn")
+                    for agent_id, adapter in self._event_adapters.items():
+                        try:
+                            adapter.reset()
+                            adapter.set_round_number(1)
+                        except Exception as e:
+                            logger.warning(f"[TUI] Failed to reset adapter for {agent_id}: {e}")
+
                 # CRITICAL: Reset status ribbon for all agents
                 # The ribbon is at app level, not inside panels, so reset it directly
                 if self._status_ribbon:
@@ -5019,6 +7224,29 @@ Type your question and press Enter to ask the agents.
                 # CRITICAL: Reset turn-level state (answers, votes, buffers, etc.)
                 # This ensures clean state for each new turn
                 self.coordination_display.reset_turn_state()
+
+        def set_agent_subtasks(self, subtasks: Dict[str, str]) -> None:
+            """Pass agent subtask assignments to the tab bar for display.
+
+            Args:
+                subtasks: Mapping of agent_id to subtask description.
+            """
+            self._runtime_decomposition_subtasks = dict(subtasks or {})
+            if self._tab_bar:
+                self._tab_bar.set_agent_subtasks(subtasks)
+
+            if self._decomposition_generation_modal:
+                self._decomposition_generation_modal.show_subtasks(
+                    self._runtime_decomposition_subtasks,
+                    source=self._decomposition_completion_source,
+                )
+                self.set_timer(2.5, self._dismiss_decomposition_generation_modal)
+
+        def set_agent_personas(self, personas: Dict[str, str]) -> None:
+            """Pass agent persona assignments to the tab bar for display."""
+            self._runtime_parallel_personas = dict(personas or {})
+            if self._tab_bar and self._mode_state.coordination_mode == "parallel" and self._mode_state.parallel_personas_enabled:
+                self._tab_bar.set_agent_personas(self._runtime_parallel_personas)
 
         def set_input_enabled(self, enabled: bool):
             """Enable or disable mode controls during execution.
@@ -5128,8 +7356,7 @@ Type your question and press Enter to ask the agents.
             if panel:
                 # Use start_new_round which handles timeline visibility and ribbon update
                 panel.start_new_round(round_num, is_context_reset=False)
-                with open(os.path.join(tempfile.gettempdir(), "tui_debug.log"), "a") as f:
-                    f.write("DEBUG: MassGenApp.show_agent_restart called panel.start_new_round\n")
+                tui_log("DEBUG: MassGenApp.show_agent_restart called panel.start_new_round")
                 adapter = self._event_adapters.get(agent_id)
                 if adapter:
                     try:
@@ -5219,6 +7446,7 @@ Type your question and press Enter to ask the agents.
                                 screen = SubagentScreen(
                                     subagent=running[0],
                                     all_subagents=card.subagents,
+                                    status_callback=self._build_subagent_status_callback(card),
                                 )
                                 self.push_screen(screen)
                                 return
@@ -5226,11 +7454,18 @@ Type your question and press Enter to ask the agents.
                             screen = SubagentScreen(
                                 subagent=card.subagents[0],
                                 all_subagents=card.subagents,
+                                status_callback=self._build_subagent_status_callback(card),
                             )
                             self.push_screen(screen)
                             return
                 except Exception:
                     continue
+
+            # Fallback: runtime preparation subagents (hidden from timeline by design)
+            if self._open_decomposition_runtime_subagent_screen():
+                return
+            if self._open_persona_runtime_subagent_screen():
+                return
 
             self.notify("No active subagents", severity="information", timeout=2)
 
@@ -5358,14 +7593,42 @@ Type your question and press Enter to ask the agents.
         def on_session_info_clicked(self, event: SessionInfoClicked) -> None:
             """Handle click on session info to show full prompt."""
             tui_log(f"on_session_info_clicked: turn={event.turn}")
+            # Build content with optional per-agent assignment (subtask/persona)
+            content = ""
+            if event.subtask:
+                label = getattr(event, "assignment_kind", "Subtask")
+                content += f"{label}: {event.subtask}\n\n"
+            content += event.question or "(No prompt)"
             # Show the full prompt in a text modal
             self.push_screen(
                 TextContentModal(
                     title=f"Turn {event.turn} • Prompt",
-                    content=event.question or "(No prompt)",
+                    content=content,
                 ),
             )
             event.stop()
+
+        def _sync_coordination_mode_toggle(self, mode: str) -> None:
+            """Sync coordination toggle UI state from external config/runtime.
+
+            This is used by the CLI driver to align the mode bar with config defaults
+            before the user explicitly changes the coordination toggle.
+            """
+            if self._mode_state.agent_mode == "single" and mode == "decomposition":
+                mode = "parallel"
+            self._mode_state.coordination_mode = mode
+            if self._mode_bar:
+                self._mode_bar.set_coordination_mode(mode)
+                self._mode_bar.set_coordination_enabled(self._mode_state.agent_mode != "single")
+                self._mode_bar.set_parallel_personas_enabled(self._mode_state.parallel_personas_enabled, self._mode_state.persona_diversity_mode)
+            if self._tab_bar:
+                if mode == "decomposition":
+                    self._tab_bar.set_agent_subtasks(self._mode_state.decomposition_subtasks)
+                else:
+                    if self._mode_state.parallel_personas_enabled:
+                        self._tab_bar.set_agent_personas(self._runtime_parallel_personas)
+                    else:
+                        self._tab_bar.set_agent_subtasks({})
 
         # ============================================================
         # Mode Change Handlers
@@ -5388,8 +7651,15 @@ Type your question and press Enter to ask the agents.
                     self._mode_bar.set_plan_mode(self._mode_state.plan_mode)
                 elif event.mode_type == "agent" and self._mode_bar:
                     self._mode_bar.set_agent_mode(self._mode_state.agent_mode)
+                elif event.mode_type == "coordination" and self._mode_bar:
+                    self._mode_bar.set_coordination_mode(self._mode_state.coordination_mode)
                 elif event.mode_type == "refinement" and self._mode_bar:
                     self._mode_bar.set_refinement_mode(self._mode_state.refinement_enabled)
+                elif event.mode_type == "personas" and self._mode_bar:
+                    self._mode_bar.set_parallel_personas_enabled(
+                        self._mode_state.parallel_personas_enabled,
+                        self._mode_state.persona_diversity_mode,
+                    )
                 event.stop()
                 return
 
@@ -5397,9 +7667,16 @@ Type your question and press Enter to ask the agents.
                 self._handle_plan_mode_change(event.value)
             elif event.mode_type == "agent":
                 self._handle_agent_mode_change(event.value)
+            elif event.mode_type == "coordination":
+                self._handle_coordination_mode_change(event.value)
             elif event.mode_type == "refinement":
                 self._handle_refinement_mode_change(event.value == "on")
+            elif event.mode_type == "personas":
+                enabled = event.value != "off"
+                diversity_mode = event.value if enabled else "perspective"
+                self._handle_parallel_persona_mode_change(enabled, diversity_mode)
 
+            self._refresh_input_modes_row_layout()
             event.stop()
 
         def on_override_requested(self, event: OverrideRequested) -> None:
@@ -5448,9 +7725,70 @@ Type your question and press Enter to ask the agents.
             tui_log("on_plan_settings_clicked - END")
             event.stop()
 
+        def on_mode_help_clicked(self, event: ModeHelpClicked) -> None:
+            """Handle mode bar help button click."""
+            self.action_show_shortcuts()
+            event.stop()
+
+        def on_subtasks_clicked(self, event: SubtasksClicked) -> None:
+            """Handle subtasks editor button click."""
+            if self._mode_state.is_locked():
+                self.notify("Cannot edit subtasks during execution.", severity="warning", timeout=2)
+                event.stop()
+                return
+            self._show_subtasks_editor_modal()
+            event.stop()
+
+        def on_skills_clicked(self, event: SkillsClicked) -> None:
+            """Handle global skills manager button click."""
+            if self._mode_state.is_locked():
+                self.notify("Cannot change skill settings during execution.", severity="warning", timeout=2)
+                event.stop()
+                return
+            self._show_skills_modal()
+            event.stop()
+
+        def _show_subtasks_editor_modal(self) -> None:
+            """Open decomposition subtasks editor modal."""
+            modal = DecompositionSubtasksModal(
+                agent_ids=self.coordination_display.agent_ids,
+                current_subtasks=self._mode_state.decomposition_subtasks,
+            )
+
+            def _on_subtasks_dismiss(result: Optional[Dict[str, str]]) -> None:
+                # None means cancelled/closed
+                if result is None:
+                    return
+                self._mode_state.decomposition_subtasks = result
+                if self._tab_bar:
+                    self._tab_bar.set_agent_subtasks(result if self._mode_state.coordination_mode == "decomposition" else {})
+                if result:
+                    self.notify(
+                        f"Saved {len(result)} decomposition subtask assignment(s).",
+                        severity="information",
+                        timeout=3,
+                    )
+                else:
+                    self.notify(
+                        "Cleared explicit subtasks. A decomposition subagent will auto-generate them at runtime.",
+                        severity="warning",
+                        timeout=3,
+                    )
+
+            self.push_screen(modal, _on_subtasks_dismiss)
+
         def on_plan_selected(self, event: PlanSelected) -> None:
             """Handle plan selection from popover."""
             tui_log(f"on_plan_selected: plan_id={event.plan_id}, is_new={event.is_new}")
+
+            requested_plan_id = None if event.plan_id in (None, "", "latest") else event.plan_id
+            current_plan_id = None if self._mode_state.selected_plan_id in (None, "", "latest") else self._mode_state.selected_plan_id
+
+            # Ignore no-op selections emitted during recompose/initialization.
+            if not event.is_new and requested_plan_id == current_plan_id:
+                tui_log("  -> no-op plan selection, ignoring")
+                event.stop()
+                return
 
             # Block during execution
             if self._mode_state.is_locked():
@@ -5463,10 +7801,10 @@ Type your question and press Enter to ask the agents.
                 # User wants to create a new plan
                 self._mode_state.selected_plan_id = None
                 self.notify("Will create new plan on next query", severity="information", timeout=2)
-            elif event.plan_id:
+            elif requested_plan_id:
                 # Specific plan selected
-                self._mode_state.selected_plan_id = event.plan_id
-                self.notify(f"Selected plan: {event.plan_id[:15]}...", severity="information", timeout=2)
+                self._mode_state.selected_plan_id = requested_plan_id
+                self.notify(f"Selected plan: {requested_plan_id[:15]}...", severity="information", timeout=2)
             else:
                 # Latest plan (auto) - don't notify on initial load
                 self._mode_state.selected_plan_id = None
@@ -5489,7 +7827,42 @@ Type your question and press Enter to ask the agents.
                 return
 
             self._mode_state.plan_config.depth = event.depth
-            self.notify(f"Plan depth: {event.depth}", severity="information", timeout=2)
+            if event.depth == "dynamic":
+                self.notify("Plan depth: dynamic (scope-adaptive)", severity="information", timeout=2)
+            else:
+                self.notify(f"Plan depth: {event.depth}", severity="information", timeout=2)
+            event.stop()
+
+        def on_plan_step_target_changed(self, event: PlanStepTargetChanged) -> None:
+            """Handle explicit planning task-count target change from popover."""
+            tui_log(f"on_plan_step_target_changed: target_steps={event.target_steps}")
+
+            if self._mode_state.is_locked():
+                self.notify("Cannot change plan step target during execution.", severity="warning", timeout=2)
+                event.stop()
+                return
+
+            self._mode_state.plan_config.target_steps = event.target_steps
+            if event.target_steps is None:
+                self.notify("Task count target: dynamic", severity="information", timeout=2)
+            else:
+                self.notify(f"Task count target: {event.target_steps}", severity="information", timeout=2)
+            event.stop()
+
+        def on_plan_chunk_target_changed(self, event: PlanChunkTargetChanged) -> None:
+            """Handle explicit planning chunk-count target change from popover."""
+            tui_log(f"on_plan_chunk_target_changed: target_chunks={event.target_chunks}")
+
+            if self._mode_state.is_locked():
+                self.notify("Cannot change chunk target during execution.", severity="warning", timeout=2)
+                event.stop()
+                return
+
+            self._mode_state.plan_config.target_chunks = event.target_chunks
+            if event.target_chunks is None:
+                self.notify("Chunk target: dynamic", severity="information", timeout=2)
+            else:
+                self.notify(f"Chunk target: {event.target_chunks}", severity="information", timeout=2)
             event.stop()
 
         def on_broadcast_mode_changed(self, event: BroadcastModeChanged) -> None:
@@ -5527,6 +7900,194 @@ Type your question and press Enter to ask the agents.
             self.push_screen(modal)
             event.stop()
 
+        def on_execute_prefill_requested(self, event: ExecutePrefillRequested) -> None:
+            """Handle execute popover prefill requests from chunk controls."""
+            prefill_value = (event.value or "").strip()
+            if not prefill_value:
+                event.stop()
+                return
+            if hasattr(self, "question_input") and self.question_input:
+                self.question_input.value = prefill_value
+                self.question_input.focus()
+                self.notify(
+                    f"Prefilled execute input: {prefill_value}",
+                    severity="information",
+                    timeout=2,
+                )
+            event.stop()
+
+        def on_analysis_target_type_changed(self, event: AnalysisTargetTypeChanged) -> None:
+            """Handle analysis target type changes (log vs skills) from the popover."""
+            tui_log(f"on_analysis_target_type_changed: target={event.target}")
+
+            if self._mode_state.is_locked():
+                self.notify("Cannot change analysis target during execution.", severity="warning", timeout=2)
+                event.stop()
+                return
+
+            target = "skills" if event.target == "skills" else "log"
+            self._mode_state.analysis_config.target = target
+
+            # Update input placeholder to match the new target
+            if hasattr(self, "question_input"):
+                from massgen.frontend.displays.tui_modes import (
+                    get_analysis_placeholder_text,
+                )
+
+                self.question_input.placeholder = get_analysis_placeholder_text(target)
+
+            popover_visible = hasattr(self, "_plan_options_popover") and "visible" in self._plan_options_popover.classes
+            if not popover_visible:
+                label = "Organize Skills" if target == "skills" else "Log Session"
+                self.notify(
+                    f"Analysis target: {label}",
+                    severity="information",
+                    timeout=2,
+                )
+            event.stop()
+
+        def on_execute_auto_continue_changed(self, event: ExecuteAutoContinueChanged) -> None:
+            """Handle execute auto-continue setting change from popover."""
+            if self._mode_state.is_locked():
+                self.notify("Cannot change execute flow during execution.", severity="warning", timeout=2)
+                event.stop()
+                return
+            self._mode_state.plan_config.execute_auto_continue_chunks = bool(event.enabled)
+            if event.enabled:
+                self.notify("Execute flow: auto-continue enabled", severity="information", timeout=2)
+            else:
+                self.notify("Execute flow: pause after each chunk", severity="information", timeout=2)
+            event.stop()
+
+        def on_execute_refinement_mode_changed(self, event: ExecuteRefinementModeChanged) -> None:
+            """Handle execute refinement override mode change from popover."""
+            if self._mode_state.is_locked():
+                self.notify("Cannot change execute refinement during execution.", severity="warning", timeout=2)
+                event.stop()
+                return
+            mode = event.mode if event.mode in {"inherit", "on", "off"} else "inherit"
+            self._mode_state.plan_config.execute_refinement_mode = mode
+            labels = {
+                "inherit": "Execute refinement: inherit mode bar setting",
+                "on": "Execute refinement: forced ON",
+                "off": "Execute refinement: forced OFF",
+            }
+            self.notify(labels[mode], severity="information", timeout=2)
+            event.stop()
+
+        def on_analysis_profile_changed(self, event: AnalysisProfileChanged) -> None:
+            """Handle analysis profile changes from the popover."""
+            tui_log(f"on_analysis_profile_changed: profile={event.profile}")
+
+            if self._mode_state.is_locked():
+                self.notify("Cannot change analysis profile during execution.", severity="warning", timeout=2)
+                event.stop()
+                return
+
+            profile = "user" if event.profile == "user" else "dev"
+            self._mode_state.analysis_config.profile = profile
+
+            popover_visible = hasattr(self, "_plan_options_popover") and "visible" in self._plan_options_popover.classes
+            if not popover_visible:
+                self.notify(
+                    f"Analysis profile: {'User (skills)' if profile == 'user' else 'Dev (internals)'}",
+                    severity="information",
+                    timeout=2,
+                )
+            event.stop()
+
+        def on_analysis_skill_lifecycle_changed(self, event: AnalysisSkillLifecycleChanged) -> None:
+            """Handle analysis skill lifecycle mode changes from the popover."""
+            tui_log(f"on_analysis_skill_lifecycle_changed: mode={event.mode}")
+
+            if self._mode_state.is_locked():
+                self.notify("Cannot change analysis skill lifecycle during execution.", severity="warning", timeout=2)
+                event.stop()
+                return
+
+            mode = str(event.mode or "").strip().lower()
+            if mode not in {"create_new", "create_or_update"}:
+                mode = "create_or_update"
+
+            self._mode_state.analysis_config.skill_lifecycle_mode = mode
+
+            popover_visible = hasattr(self, "_plan_options_popover") and "visible" in self._plan_options_popover.classes
+            if not popover_visible:
+                labels = {
+                    "create_new": "Create New",
+                    "create_or_update": "Create or Update",
+                }
+                self.notify(
+                    f"Analysis skill lifecycle: {labels.get(mode, mode)}",
+                    severity="information",
+                    timeout=2,
+                )
+            event.stop()
+
+        def on_analysis_target_changed(self, event: AnalysisTargetChanged) -> None:
+            """Handle analysis target changes from the popover."""
+            tui_log(f"on_analysis_target_changed: log_dir={event.log_dir}, turn={event.turn}")
+
+            if self._mode_state.is_locked():
+                self.notify("Cannot change analysis target during execution.", severity="warning", timeout=2)
+                event.stop()
+                return
+
+            cfg = self._mode_state.analysis_config
+            prev_log_dir = cfg.selected_log_dir
+            prev_turn = cfg.selected_turn
+            cfg.selected_log_dir = event.log_dir
+
+            if event.log_dir:
+                turns = self._get_turn_numbers(Path(event.log_dir))
+                if event.turn in turns:
+                    cfg.selected_turn = event.turn
+                elif turns:
+                    cfg.selected_turn = turns[-1]
+                else:
+                    cfg.selected_turn = None
+            else:
+                cfg.selected_turn = None
+
+            if cfg.selected_log_dir == prev_log_dir and cfg.selected_turn == prev_turn:
+                event.stop()
+                return
+
+            self._refresh_analysis_popover_if_visible()
+
+            popover_visible = hasattr(self, "_plan_options_popover") and "visible" in self._plan_options_popover.classes
+            if not popover_visible:
+                if cfg.selected_log_dir and cfg.selected_turn is not None:
+                    self.notify(
+                        f"Analysis target: {Path(cfg.selected_log_dir).name} / turn_{cfg.selected_turn}",
+                        severity="information",
+                        timeout=2,
+                    )
+                elif cfg.selected_log_dir:
+                    self.notify(
+                        f"Analysis target: {Path(cfg.selected_log_dir).name} (no turns found)",
+                        severity="warning",
+                        timeout=2,
+                    )
+                else:
+                    self.notify("Analysis target cleared", severity="warning", timeout=2)
+            event.stop()
+
+        def on_view_analysis_requested(self, event: ViewAnalysisRequested) -> None:
+            """Handle request to open the selected analysis report."""
+            report_path = self._get_analysis_report_path(event.log_dir, event.turn)
+            if not report_path.exists():
+                self.notify(
+                    f"Analysis report not found at {report_path}. Run analysis first.",
+                    severity="warning",
+                    timeout=3,
+                )
+                event.stop()
+                return
+
+            self._show_text_modal(report_path, f"Analysis Report • {Path(event.log_dir).name} • turn_{event.turn}")
+            event.stop()
+
         def _update_plan_options_popover_state(self) -> None:
             """Update the plan options popover internal state (without recompose)."""
             if not hasattr(self, "_plan_options_popover"):
@@ -5537,6 +8098,9 @@ Type your question and press Enter to ask the agents.
 
                 storage = PlanStorage()
                 plans = storage.get_all_plans(limit=5)
+                self._ensure_analysis_defaults()
+                analysis_log_options = self._build_analysis_log_options()
+                analysis_turn_options = self._build_analysis_turn_options()
 
                 # Update popover internal state
                 popover = self._plan_options_popover
@@ -5544,16 +8108,365 @@ Type your question and press Enter to ask the agents.
                 popover._available_plans = plans
                 popover._current_plan_id = self._mode_state.selected_plan_id
                 popover._current_depth = self._mode_state.plan_config.depth
+                popover._current_step_target = self._mode_state.plan_config.target_steps
+                popover._current_chunk_target = self._mode_state.plan_config.target_chunks
+                popover._current_execute_auto_continue = self._mode_state.plan_config.execute_auto_continue_chunks
+                popover._current_execute_refinement_mode = self._mode_state.plan_config.execute_refinement_mode
                 popover._current_broadcast = self._mode_state.plan_config.broadcast
+                popover._analysis_target_type = getattr(self._mode_state.analysis_config, "target", "log")
+                popover._analysis_profile = self._mode_state.analysis_config.profile
+                popover._analysis_log_options = analysis_log_options
+                popover._analysis_selected_log_dir = self._mode_state.analysis_config.selected_log_dir
+                popover._analysis_turn_options = analysis_turn_options
+                popover._analysis_selected_turn = self._mode_state.analysis_config.selected_turn
+                popover._analysis_preview_text = self._build_analysis_preview_text(
+                    self._mode_state.analysis_config.selected_log_dir,
+                    self._mode_state.analysis_config.selected_turn,
+                )
+                popover._analysis_skill_lifecycle_mode = self._mode_state.analysis_config.skill_lifecycle_mode
                 # Don't recompose - let the popover show with updated state
             except Exception as e:
                 tui_log(f"_update_plan_options_popover_state error: {e}")
+
+        def _get_available_log_sessions(self) -> List[Path]:
+            """Return available log session directories, excluding the current session.
+
+            The current running session's log dir is excluded because it's
+            actively being written to and not useful as an analysis target.
+            """
+            log_dirs: List[Path] = []
+            try:
+                from massgen.logger_config import get_log_session_root
+                from massgen.logs_analyzer import get_logs_dir
+
+                logs_base = get_logs_dir()
+                if logs_base.exists():
+                    log_dirs.extend([p.resolve() for p in logs_base.glob("log_*") if p.is_dir()])
+                    # Timestamp-based directory names sort correctly lexicographically.
+                    log_dirs.sort(key=lambda p: p.name, reverse=True)
+
+                # Exclude the current running session — it's still being
+                # written to and isn't a meaningful analysis target.
+                current_root = get_log_session_root().resolve()
+                if current_root.exists() and current_root.is_dir():
+                    log_dirs = [p for p in log_dirs if p != current_root]
+
+                # Exclude sessions that never completed an attempt (no status.json).
+                log_dirs = [p for p in log_dirs if any(p.glob("turn_*/attempt_*/status.json"))]
+            except Exception as e:
+                tui_log(f"_get_available_log_sessions error: {e}")
+            return log_dirs
+
+        @staticmethod
+        def _get_turn_numbers(log_dir: Path) -> List[int]:
+            """Extract sorted turn numbers from a log session directory."""
+            turns: List[int] = []
+            if not log_dir.exists():
+                return turns
+            for turn_dir in log_dir.glob("turn_*"):
+                if not turn_dir.is_dir():
+                    continue
+                try:
+                    turns.append(int(turn_dir.name.split("_", 1)[1]))
+                except (IndexError, ValueError):
+                    continue
+            return sorted(set(turns))
+
+        def _ensure_analysis_defaults(self) -> None:
+            """Ensure analysis target defaults are set to valid log/turn values."""
+            logs = self._get_available_log_sessions()
+            cfg = self._mode_state.analysis_config
+
+            if not logs:
+                cfg.selected_log_dir = None
+                cfg.selected_turn = None
+                return
+
+            log_paths = {str(p): p for p in logs}
+            selected_log = cfg.selected_log_dir
+            if not selected_log or selected_log not in log_paths:
+                selected_log = str(logs[0])
+
+            turns = self._get_turn_numbers(log_paths[selected_log])
+            selected_turn = cfg.selected_turn
+            if not turns:
+                selected_turn = None
+            elif selected_turn not in turns:
+                selected_turn = turns[-1]
+
+            cfg.selected_log_dir = selected_log
+            cfg.selected_turn = selected_turn
+
+        def _build_analysis_log_options(self) -> List[Tuple[str, str]]:
+            """Build `(label, value)` options for analysis log selection."""
+            options: List[Tuple[str, str]] = []
+            logs = self._get_available_log_sessions()
+            selected = self._mode_state.analysis_config.selected_log_dir
+            for path in logs:
+                query = self._get_log_session_query(path)
+                # Extract timestamp portion from dir name (e.g. "20260207_143026")
+                ts = path.name.removeprefix("log_").rsplit("_", 1)[0]
+                if query:
+                    label = f"{ts} — {query[:50]}"
+                else:
+                    label = path.name
+                if str(path) == selected:
+                    label += " (selected)"
+                options.append((label, str(path)))
+            return options
+
+        @staticmethod
+        def _get_log_session_query(log_dir: Path) -> Optional[str]:
+            """Extract the user query from the first status.json in a log session."""
+            import json
+
+            for status_path in sorted(log_dir.glob("turn_*/attempt_*/status.json")):
+                try:
+                    data = json.loads(status_path.read_text())
+                    question = data.get("meta", {}).get("question", "")
+                    if question:
+                        return question.strip()
+                except Exception:
+                    continue
+            return None
+
+        def _build_analysis_turn_options(self) -> List[Tuple[str, str]]:
+            """Build `(label, value)` options for analysis turn selection."""
+            options: List[Tuple[str, str]] = []
+            selected_log = self._mode_state.analysis_config.selected_log_dir
+            if not selected_log:
+                return options
+            turns = self._get_turn_numbers(Path(selected_log))
+            for turn in turns:
+                options.append((f"turn_{turn}", str(turn)))
+            return options
+
+        def _refresh_analysis_popover_if_visible(self) -> None:
+            """Recompose the analysis popover when it is currently visible."""
+            if not hasattr(self, "_plan_options_popover"):
+                return
+            popover = self._plan_options_popover
+            if "visible" not in popover.classes:
+                return
+            self._update_plan_options_popover_state()
+            popover._initialized = False
+            popover.refresh(recompose=True)
+            self.call_later(popover.show)
+
+        @staticmethod
+        def _get_analysis_report_path(log_dir: str, turn: int) -> Path:
+            """Return the expected ANALYSIS_REPORT.md path for a log session turn."""
+            return Path(log_dir) / f"turn_{turn}" / "ANALYSIS_REPORT.md"
+
+        @staticmethod
+        def _extract_user_query_fragment(question: str) -> str:
+            """Extract the user-facing part of a structured analysis prompt."""
+            if not question:
+                return ""
+
+            text = question.strip()
+            # Analysis prompts often wrap user input as "USER'S ANALYSIS REQUEST: ..."
+            patterns = [
+                r"USER'?S\s+ANALYSIS\s+REQUEST:\s*(.+)",
+                r"USER'?S\s+REQUEST:\s*(.+)",
+            ]
+            for pattern in patterns:
+                match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+                if match:
+                    candidate = match.group(1).strip()
+                    if candidate:
+                        return candidate
+            return text
+
+        @staticmethod
+        def _condense_preview(text: str, max_chars: int = 260) -> str:
+            """Condense multiline text into a short single-line preview."""
+            if not text:
+                return ""
+            single_line = re.sub(r"\s+", " ", text).strip()
+            if len(single_line) <= max_chars:
+                return single_line
+            return single_line[: max_chars - 3].rstrip() + "..."
+
+        @staticmethod
+        def _read_yaml_file(path: Path) -> Dict[str, Any]:
+            """Read a YAML file into a dictionary, returning {} on errors."""
+            if not path.exists():
+                return {}
+            try:
+                import yaml
+
+                data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+                return data if isinstance(data, dict) else {}
+            except Exception:
+                return {}
+
+        @staticmethod
+        def _get_latest_attempt_dir(turn_dir: Path) -> Optional[Path]:
+            """Return latest attempt dir under a turn, or the turn dir for legacy layouts."""
+            if not turn_dir.exists() or not turn_dir.is_dir():
+                return None
+
+            attempts = [p for p in turn_dir.glob("attempt_*") if p.is_dir()]
+            if not attempts:
+                return turn_dir
+
+            def attempt_key(path: Path) -> int:
+                match = re.match(r"attempt_(\d+)$", path.name)
+                return int(match.group(1)) if match else -1
+
+            attempts.sort(key=attempt_key)
+            return attempts[-1]
+
+        def _extract_query_preview_from_attempt(self, attempt_dir: Path) -> Optional[str]:
+            """Extract query preview from status/metadata/system logs."""
+            if not attempt_dir.exists():
+                return None
+
+            status_candidates = [attempt_dir / "status.json"]
+            metadata_candidates = [attempt_dir / "execution_metadata.yaml"]
+            system_status_candidates = [attempt_dir / "agent_outputs" / "system_status.txt"]
+
+            if attempt_dir.name.startswith("attempt_"):
+                status_candidates.append(attempt_dir.parent / "status.json")
+                metadata_candidates.append(attempt_dir.parent / "execution_metadata.yaml")
+                system_status_candidates.append(attempt_dir.parent / "agent_outputs" / "system_status.txt")
+
+            # 1) status.json -> meta.question (preferred during active/attempt-based runs)
+            for status_path in status_candidates:
+                if not status_path.exists():
+                    continue
+                try:
+                    status_data = json.loads(status_path.read_text(encoding="utf-8"))
+                    question = status_data.get("meta", {}).get("question")
+                    if isinstance(question, str) and question.strip():
+                        question = self._extract_user_query_fragment(question)
+                        return self._condense_preview(question)
+                except Exception:
+                    continue
+
+            # 2) execution_metadata.yaml -> query
+            for metadata_path in metadata_candidates:
+                metadata = self._read_yaml_file(metadata_path)
+                query = metadata.get("query")
+                if isinstance(query, str) and query.strip():
+                    query = self._extract_user_query_fragment(query)
+                    return self._condense_preview(query)
+
+            # 3) system_status.txt fallback (legacy logs may only have this)
+            for system_status_path in system_status_candidates:
+                if not system_status_path.exists():
+                    continue
+                try:
+                    content = system_status_path.read_text(encoding="utf-8", errors="ignore")
+                except Exception:
+                    continue
+                match = re.search(r"^\s*(?:Question|Query)\s*:\s*(.+)$", content, re.IGNORECASE | re.MULTILINE)
+                if match:
+                    query = self._extract_user_query_fragment(match.group(1))
+                    if query:
+                        return self._condense_preview(query)
+
+            return None
+
+        @staticmethod
+        def _extract_winner_from_status(status_data: Dict[str, Any]) -> Optional[str]:
+            """Extract winner agent id from status payload."""
+            if not status_data:
+                return None
+
+            results = status_data.get("results", {})
+            winner = results.get("winner")
+            if isinstance(winner, str) and winner.strip():
+                return winner.strip()
+
+            details = status_data.get("finish_reason_details")
+            if isinstance(details, str):
+                match = re.search(r"Winner:\s*([A-Za-z0-9_.-]+)", details)
+                if match:
+                    return match.group(1)
+            return None
+
+        def _extract_final_answer_preview_from_attempt(self, attempt_dir: Path) -> Optional[str]:
+            """Extract final answer preview if final/ exists for the selected target."""
+            if not attempt_dir.exists():
+                return None
+
+            final_dir_candidates = [attempt_dir / "final"]
+            status_candidates = [attempt_dir / "status.json"]
+
+            if attempt_dir.name.startswith("attempt_"):
+                final_dir_candidates.append(attempt_dir.parent / "final")
+                status_candidates.append(attempt_dir.parent / "status.json")
+
+            final_dir: Optional[Path] = None
+            for candidate in final_dir_candidates:
+                if candidate.exists() and candidate.is_dir():
+                    final_dir = candidate
+                    break
+
+            # User requested: skip final preview when there is no final/
+            if not final_dir:
+                return None
+
+            status_data: Dict[str, Any] = {}
+            for status_path in status_candidates:
+                if not status_path.exists():
+                    continue
+                try:
+                    status_data = json.loads(status_path.read_text(encoding="utf-8"))
+                    break
+                except Exception:
+                    continue
+
+            candidates: List[Path] = []
+            winner = self._extract_winner_from_status(status_data)
+            if winner:
+                candidates.append(final_dir / winner / "answer.txt")
+            candidates.extend(sorted(final_dir.glob("*/answer.txt")))
+
+            seen: Set[Path] = set()
+            for answer_path in candidates:
+                if answer_path in seen:
+                    continue
+                seen.add(answer_path)
+                if not answer_path.exists():
+                    continue
+                try:
+                    answer = answer_path.read_text(encoding="utf-8", errors="ignore").strip()
+                except Exception:
+                    continue
+                if answer:
+                    return self._condense_preview(answer)
+
+            return "unavailable"
+
+        def _build_analysis_preview_text(self, log_dir: Optional[str], turn: Optional[int]) -> str:
+            """Build query/final preview text for analysis popover."""
+            if not log_dir or turn is None:
+                return ""
+
+            turn_dir = Path(log_dir) / f"turn_{turn}"
+            attempt_dir = self._get_latest_attempt_dir(turn_dir)
+            if not attempt_dir:
+                return ""
+
+            parts: List[str] = []
+            query_preview = self._extract_query_preview_from_attempt(attempt_dir)
+            if query_preview:
+                parts.append(f"Query: {query_preview}")
+
+            final_preview = self._extract_final_answer_preview_from_attempt(attempt_dir)
+            if final_preview:
+                parts.append(f"Final: {final_preview}")
+
+            return "\n".join(parts)
 
         def _enter_execute_mode(self) -> None:
             """Enter execute mode and show plan selector if plans exist.
 
             Called from action_toggle_plan_mode when transitioning from plan → execute.
-            If no plans exist, stays in plan mode and shows a warning.
+            If no plans exist, skips to analysis mode so the user isn't stuck.
             """
             tui_log("_enter_execute_mode - START")
 
@@ -5565,17 +8478,16 @@ Type your question and press Enter to ask the agents.
                 tui_log(f"  -> found {len(plans)} plans")
 
                 if not plans:
-                    # No plans available - stay in plan mode
-                    # Revert mode bar if it was already set to "execute"
-                    if self._mode_bar:
-                        self._mode_bar.set_plan_mode("plan")
-                    self.notify(
-                        "No plans available. Create one first by submitting a query in Plan mode.",
-                        severity="warning",
-                        timeout=3,
-                    )
-                    tui_log("  -> no plans, staying in plan mode")
+                    # No plans available - skip execute and go straight to analysis
+                    tui_log("  -> no plans, skipping to analysis mode")
+                    self._enter_analysis_mode()
                     return
+
+                # Default selection prefers resumable plan sessions.
+                if not self._mode_state.selected_plan_id:
+                    resumable_plan = storage.get_latest_resumable_plan()
+                    if resumable_plan:
+                        self._mode_state.selected_plan_id = resumable_plan.plan_id
 
                 # Set execute mode
                 self._mode_state.plan_mode = "execute"
@@ -5614,6 +8526,8 @@ Type your question and press Enter to ask the agents.
             popover._plan_mode = "execute"
             popover._available_plans = plans
             popover._current_plan_id = self._mode_state.selected_plan_id
+            popover._current_execute_auto_continue = self._mode_state.plan_config.execute_auto_continue_chunks
+            popover._current_execute_refinement_mode = self._mode_state.plan_config.execute_refinement_mode
 
             # Reset initialized flag before recompose to ignore spurious events
             popover._initialized = False
@@ -5640,7 +8554,11 @@ Type your question and press Enter to ask the agents.
             tui_log(f"_setup_plan_execution: user_text='{user_text[:50] if user_text else '(empty)'}'")
 
             try:
-                from massgen.plan_execution import build_execution_prompt
+                from massgen.plan_execution import (
+                    PlanValidationError,
+                    build_execution_prompt,
+                    resolve_active_chunk,
+                )
                 from massgen.plan_storage import PlanStorage
 
                 # Get the selected plan
@@ -5666,13 +8584,14 @@ Type your question and press Enter to ask the agents.
                         tui_log(f"  -> plan not found: {plan_id}")
                         return None
                 else:
-                    # Use latest plan
-                    plan = plans[0]
+                    # Default resume target to latest resumable, otherwise latest plan.
+                    plan = storage.get_latest_resumable_plan() or plans[0]
 
                 tui_log(f"  -> using plan: {plan.plan_id}")
 
                 # Set the plan session on mode state (needed for workspace setup)
                 self._mode_state.plan_session = plan
+                self._mode_state.selected_plan_id = plan.plan_id
 
                 # Load metadata to get the original planning prompt
                 try:
@@ -5681,11 +8600,83 @@ Type your question and press Enter to ask the agents.
                 except Exception:
                     original_question = user_text or "Execute the plan"
 
-                # If user provided additional instructions, append them
-                if user_text:
-                    execution_prompt = build_execution_prompt(f"{original_question}\n\nAdditional instructions: {user_text}")
-                else:
-                    execution_prompt = build_execution_prompt(original_question)
+                cleaned_input = (user_text or "").strip()
+                requested_chunk: Optional[str] = None
+                range_selection: Optional[Tuple[str, str]] = None
+                additional_instructions: Optional[str] = None
+
+                try:
+                    chunk_metadata, chunk_order = resolve_active_chunk(
+                        plan,
+                        requested_chunk=None,
+                    )
+                except PlanValidationError as e:
+                    self.notify(f"Plan validation failed: {e}", severity="error", timeout=6)
+                    tui_log(f"  -> chunk validation error: {e}")
+                    return None
+
+                # Parse optional chunk/range selection from execute input.
+                if cleaned_input:
+                    if cleaned_input in set(chunk_order):
+                        requested_chunk = cleaned_input
+                    else:
+                        range_match = re.match(
+                            r"^\s*([^\s-]+)\s*-\s*([^\s-]+)\s*$",
+                            cleaned_input,
+                        )
+                        if range_match:
+                            start_chunk = range_match.group(1).strip()
+                            end_chunk = range_match.group(2).strip()
+                            if start_chunk in set(chunk_order) and end_chunk in set(chunk_order):
+                                range_selection = (start_chunk, end_chunk)
+                                requested_chunk = start_chunk
+                            else:
+                                additional_instructions = cleaned_input
+                        else:
+                            additional_instructions = cleaned_input
+
+                if requested_chunk:
+                    try:
+                        chunk_metadata, chunk_order = resolve_active_chunk(
+                            plan,
+                            requested_chunk=requested_chunk,
+                        )
+                    except PlanValidationError as e:
+                        self.notify(f"Plan validation failed: {e}", severity="error", timeout=6)
+                        tui_log(f"  -> chunk selection validation error: {e}")
+                        return None
+
+                if not chunk_metadata.current_chunk:
+                    # No pending chunk selected. Fall back to first chunk only if explicit range was requested.
+                    if chunk_order and requested_chunk and requested_chunk in set(chunk_order):
+                        chunk_metadata.current_chunk = requested_chunk
+                    else:
+                        self.notify("Selected plan has no pending chunks to execute", severity="warning", timeout=3)
+                        tui_log("  -> no pending chunks")
+                        return None
+
+                if cleaned_input and not requested_chunk and not additional_instructions:
+                    additional_instructions = cleaned_input
+                elif cleaned_input and requested_chunk and cleaned_input != requested_chunk and not range_selection and not additional_instructions:
+                    # Input was not a plain chunk selection (e.g., text containing chunk names).
+                    additional_instructions = cleaned_input
+
+                prompt_question = original_question
+                if additional_instructions:
+                    prompt_question = f"{original_question}\n\nAdditional instructions: {additional_instructions}"
+
+                execution_prompt = build_execution_prompt(
+                    prompt_question,
+                    active_chunk=chunk_metadata.current_chunk,
+                    chunk_order=chunk_order,
+                )
+
+                if range_selection:
+                    execution_prompt += (
+                        f"\n\nOperator range request: {range_selection[0]}-{range_selection[1]}."
+                        " Start at the first chunk now, then continue sequentially toward the range end"
+                        " as chunks are completed in subsequent runs."
+                    )
 
                 tui_log(f"  -> execution_prompt: {execution_prompt[:100]}...")
 
@@ -5693,7 +8684,11 @@ Type your question and press Enter to ask the agents.
                 if hasattr(self, "question_input"):
                     self.question_input.placeholder = "Enter to submit • Shift+Enter for newline • @ for files • Ctrl+G help"
 
-                self.notify("Executing plan...", severity="information", timeout=3)
+                self.notify(
+                    f"Executing chunk: {chunk_metadata.current_chunk}",
+                    severity="information",
+                    timeout=3,
+                )
                 return execution_prompt
 
             except Exception as e:
@@ -5701,11 +8696,52 @@ Type your question and press Enter to ask the agents.
                 self.notify(f"Failed to set up plan execution: {e}", severity="error", timeout=3)
                 return None
 
+        def _setup_analysis_submission(self, user_text: str) -> str:
+            """Prepare analysis request text for submission.
+
+            Empty analysis submissions use a default request so users can press Enter
+            (matching execute mode ergonomics).
+
+            Args:
+                user_text: User-provided analysis request text (may be empty).
+
+            Returns:
+                Analysis request text to submit.
+            """
+            cleaned = (user_text or "").strip()
+            target = self._mode_state.analysis_config.target
+
+            # Snapshot skill directories before analysis for new-skill detection (log target only).
+            if target == "log" and self._mode_state.analysis_config.profile == "user":
+                self._mode_state.analysis_config._pre_analysis_skill_dirs = self._snapshot_skill_dirs()
+
+            if cleaned:
+                return cleaned
+
+            # Keep defaults in sync before submission.
+            if target == "log":
+                self._ensure_analysis_defaults()
+
+            if target == "skills":
+                default_request = "Organize all installed skills: merge overlapping ones and generate a SKILL_REGISTRY.md routing guide."
+            elif self._mode_state.analysis_config.profile == "user":
+                default_request = "Read the logs from this run, understand the workflow that was executed, and create a single reusable skill capturing that workflow."
+            else:
+                default_request = "Analyze this run in depth. Explain what happened, identify likely " "root causes, and recommend concrete MassGen internal improvements."
+
+            label = "Skill Organization" if target == "skills" else "Analysis Mode"
+            self.notify(
+                f"{label}: running default request",
+                severity="information",
+                timeout=3,
+            )
+            return default_request
+
         def _handle_plan_mode_change(self, mode: str) -> None:
             """Handle plan mode toggle.
 
             Args:
-                mode: "normal", "plan", or "execute".
+                mode: "normal", "plan", "execute", or "analysis".
             """
             tui_log(f"_handle_plan_mode_change: {mode}")
 
@@ -5719,6 +8755,8 @@ Type your question and press Enter to ask the agents.
                 # Note: The mode bar already shows "execute", but _enter_execute_mode
                 # may revert to "plan" if no plans exist
                 self._enter_execute_mode()
+            elif mode == "analysis":
+                self._enter_analysis_mode()
             elif mode == "normal":
                 self._mode_state.reset_plan_state()
                 if self._mode_bar:
@@ -5731,6 +8769,33 @@ Type your question and press Enter to ask the agents.
                     self.question_input.placeholder = "Enter to submit • Shift+Enter for newline • @ for files • Ctrl+G help"
                 self.notify("Plan Mode: OFF", severity="information", timeout=2)
 
+        def _enter_analysis_mode(self) -> None:
+            """Enter log analysis mode."""
+            from massgen.frontend.displays.tui_modes import (
+                get_analysis_placeholder_text,
+            )
+
+            self._mode_state.plan_mode = "analysis"
+            if self._mode_bar:
+                self._mode_bar.set_plan_mode("analysis")
+            if hasattr(self, "question_input"):
+                target = self._mode_state.analysis_config.target
+                self.question_input.placeholder = get_analysis_placeholder_text(target)
+            # Ensure default analysis target/profile are populated.
+            self._ensure_analysis_defaults()
+            # Always show the analysis options popover so the user can
+            # pick profile/log/turn immediately.
+            if hasattr(self, "_plan_options_popover"):
+                self._update_plan_options_popover_state()
+                self._plan_options_popover._initialized = False
+                self._plan_options_popover.refresh(recompose=True)
+                self.call_later(self._plan_options_popover.show)
+            self.notify(
+                "Analysis Mode: ON - Dev/User profile and log target in settings menu",
+                severity="information",
+                timeout=3,
+            )
+
         def _handle_agent_mode_change(self, mode: str) -> None:
             """Handle agent mode toggle.
 
@@ -5741,22 +8806,143 @@ Type your question and press Enter to ask the agents.
             self._mode_state.agent_mode = mode
 
             if mode == "single":
+                switched_from_decomposition = self._mode_state.coordination_mode == "decomposition"
+                if switched_from_decomposition:
+                    self._mode_state.coordination_mode = "parallel"
+                    self._mode_state.coordination_mode_user_set = False
                 # Select the currently active agent as the single agent
                 selected = self._active_agent_id or (self.coordination_display.agent_ids[0] if self.coordination_display.agent_ids else None)
                 self._mode_state.selected_single_agent = selected
+                if self._mode_bar:
+                    self._mode_bar.set_coordination_mode("parallel")
+                    self._mode_bar.set_coordination_enabled(False)
                 if self._tab_bar and selected:
                     self._tab_bar.set_single_agent_mode(True, selected)
+                    if self._mode_state.parallel_personas_enabled:
+                        self._tab_bar.set_agent_personas(self._runtime_parallel_personas)
+                    else:
+                        self._tab_bar.set_agent_subtasks({})
                 # Update agent panels with "in use" state
                 self._update_agent_panels_in_use_state(selected)
-                self.notify(f"Single-Agent Mode: {selected}", severity="information", timeout=3)
+                if switched_from_decomposition:
+                    self.notify(
+                        f"Single-Agent Mode: {selected} (decomposition disabled; using parallel)",
+                        severity="warning",
+                        timeout=3,
+                    )
+                else:
+                    self.notify(f"Single-Agent Mode: {selected}", severity="information", timeout=3)
             else:
                 # Multi-agent mode
                 self._mode_state.selected_single_agent = None
+                if self._mode_bar:
+                    self._mode_bar.set_coordination_enabled(True)
                 if self._tab_bar:
                     self._tab_bar.set_single_agent_mode(False)
                 # All panels are in use in multi-agent mode
                 self._update_agent_panels_in_use_state(None)
                 self.notify("Multi-Agent Mode", severity="information", timeout=2)
+
+        def _set_agent_mode_visual_state(self, mode: str, selected_agent: Optional[str] = None) -> None:
+            """Update agent-mode UI state without changing orchestration logic."""
+            if self._mode_bar:
+                self._mode_bar.set_agent_mode(mode)
+
+            if mode == "single":
+                selected = selected_agent or self._active_agent_id
+                if not selected and self.coordination_display.agent_ids:
+                    selected = self.coordination_display.agent_ids[0]
+                if self._tab_bar and selected:
+                    self._tab_bar.set_single_agent_mode(True, selected)
+                self._update_agent_panels_in_use_state(selected)
+            else:
+                if self._tab_bar:
+                    self._tab_bar.set_single_agent_mode(False)
+                self._update_agent_panels_in_use_state(None)
+
+        def _handle_coordination_mode_change(self, mode: str) -> None:
+            """Handle coordination mode toggle.
+
+            Args:
+                mode: "parallel" or "decomposition".
+            """
+            tui_log(f"_handle_coordination_mode_change: {mode}")
+            if mode == "decomposition" and self._mode_state.agent_mode == "single":
+                self._mode_state.coordination_mode = "parallel"
+                self._mode_state.coordination_mode_user_set = False
+                if self._mode_bar:
+                    self._mode_bar.set_coordination_mode("parallel")
+                    self._mode_bar.set_coordination_enabled(False)
+                if self._tab_bar:
+                    if self._mode_state.parallel_personas_enabled:
+                        self._tab_bar.set_agent_personas(self._runtime_parallel_personas)
+                    else:
+                        self._tab_bar.set_agent_subtasks({})
+                self.notify(
+                    "Decomposition requires Multi-Agent mode.",
+                    severity="warning",
+                    timeout=3,
+                )
+                return
+
+            self._mode_state.coordination_mode = mode
+            self._mode_state.coordination_mode_user_set = True
+            if self._mode_bar:
+                self._mode_bar.set_coordination_mode(mode)
+                self._mode_bar.set_coordination_enabled(self._mode_state.agent_mode != "single")
+
+            if mode == "decomposition":
+                if self._tab_bar:
+                    self._tab_bar.set_agent_subtasks(self._mode_state.decomposition_subtasks)
+                self.notify(
+                    "Coordination: Decomposition (independent subtasks). Use 'Subtasks' to assign manually.",
+                    severity="warning",
+                    timeout=3,
+                )
+            else:
+                if self._tab_bar:
+                    if self._mode_state.parallel_personas_enabled:
+                        self._tab_bar.set_agent_personas(self._runtime_parallel_personas)
+                    else:
+                        self._tab_bar.set_agent_subtasks({})
+                self.notify(
+                    "Coordination: Parallel (agents solve the same task and vote)",
+                    severity="information",
+                    timeout=3,
+                )
+
+        def _handle_parallel_persona_mode_change(self, enabled: bool, diversity_mode: str = "perspective") -> None:
+            """Handle parallel persona generation toggle."""
+            tui_log(f"_handle_parallel_persona_mode_change: enabled={enabled}, mode={diversity_mode}")
+            self._mode_state.parallel_personas_enabled = enabled
+            self._mode_state.persona_diversity_mode = diversity_mode
+
+            if self._tab_bar and self._mode_state.coordination_mode == "parallel":
+                if enabled:
+                    self._tab_bar.set_agent_personas(self._runtime_parallel_personas)
+                else:
+                    self._tab_bar.set_agent_subtasks({})
+
+            if enabled:
+                mode_label = diversity_mode.title()
+                if self._mode_state.coordination_mode == "parallel":
+                    self.notify(
+                        f"Personas: {mode_label} (agents get different {diversity_mode}s)",
+                        severity="information",
+                        timeout=3,
+                    )
+                else:
+                    self.notify(
+                        f"Personas: {mode_label} (will apply when coordination mode is Parallel)",
+                        severity="information",
+                        timeout=3,
+                    )
+            else:
+                self.notify(
+                    "Personas: OFF",
+                    severity="warning",
+                    timeout=2,
+                )
 
         def _update_agent_panels_in_use_state(self, selected_agent: Optional[str]) -> None:
             """Update the 'in use' state for all agent panels.
@@ -5795,7 +8981,7 @@ Type your question and press Enter to ask the agents.
 
         @keyboard_action
         def action_toggle_plan_mode(self) -> None:
-            """Toggle plan mode: normal → plan → execute → normal (Shift+Tab shortcut)."""
+            """Toggle mode: normal -> plan -> execute -> analysis -> normal (Shift+Tab)."""
             tui_log("action_toggle_plan_mode")
 
             # Block during execution (keyboard_action decorator handles this,
@@ -5818,7 +9004,10 @@ Type your question and press Enter to ask the agents.
                 # plan → execute (show plan selector if plans exist)
                 self._enter_execute_mode()
             elif self._mode_state.plan_mode == "execute":
-                # execute → normal
+                # execute -> analysis
+                self._enter_analysis_mode()
+            elif self._mode_state.plan_mode == "analysis":
+                # analysis -> normal
                 self._mode_state.reset_plan_state()
                 if self._mode_bar:
                     self._mode_bar.set_plan_mode("normal")
@@ -5889,6 +9078,125 @@ Type your question and press Enter to ask the agents.
             self.push_screen(modal)
             event.stop()
 
+        def _build_subagent_status_callback(
+            self,
+            card: Optional[Any] = None,
+            fallback_subagents: Optional[List[Any]] = None,
+        ) -> Callable[[str], Optional[Any]]:
+            """Return a callback that always pulls the latest subagent data."""
+
+            def _status_callback(subagent_id: str) -> Optional[Any]:
+                # Fast path: known source card from the click target.
+                try:
+                    if card is not None:
+                        for subagent in card.subagents:
+                            if getattr(subagent, "id", None) == subagent_id:
+                                return subagent
+                except Exception:
+                    pass
+
+                # Fallback: scan all currently rendered subagent cards.
+                try:
+                    for panel in self.agent_widgets.values():
+                        try:
+                            subagent_cards = panel.query(SubagentCard)
+                        except Exception:
+                            continue
+                        for candidate_card in subagent_cards:
+                            for subagent in getattr(candidate_card, "subagents", []):
+                                if getattr(subagent, "id", None) == subagent_id:
+                                    return subagent
+                except Exception:
+                    pass
+
+                # Final fallback: use snapshot payload carried by event.
+                if fallback_subagents:
+                    for subagent in fallback_subagents:
+                        if getattr(subagent, "id", None) == subagent_id:
+                            return subagent
+                return None
+
+            return _status_callback
+
+        def _build_spawn_status_callback(
+            self,
+            agent_id: str,
+            seed_subagents: Optional[List[SubagentDisplayData]] = None,
+            card: Optional[Any] = None,
+        ) -> Callable[[str], Optional[SubagentDisplayData]]:
+            """Build a resilient status callback for spawn_subagents cards.
+
+            Primary source: live card snapshots from `_build_subagent_status_callback`.
+            Fallback source: `<workspace>/subagents/_spawn_status.json`.
+            """
+            fallback_subagents = list(seed_subagents or [])
+            by_id: Dict[str, SubagentDisplayData] = {sa.id: sa for sa in fallback_subagents if getattr(sa, "id", None)}
+            live_callback = self._build_subagent_status_callback(
+                card=card,
+                fallback_subagents=fallback_subagents,
+            )
+
+            status_file: Optional[Path] = None
+            try:
+                orchestrator = getattr(self.coordination_display, "orchestrator", None)
+                agent = getattr(orchestrator, "agents", {}).get(agent_id) if orchestrator else None
+                filesystem_manager = getattr(getattr(agent, "backend", None), "filesystem_manager", None)
+                workspace = getattr(filesystem_manager, "get_current_workspace", lambda: None)() if filesystem_manager else None
+                if workspace:
+                    status_file = Path(workspace) / "subagents" / "_spawn_status.json"
+            except Exception:
+                status_file = None
+
+            cache: Dict[str, Any] = {
+                "mtime": None,
+                "entries": {},
+            }
+
+            def _load_entries() -> Dict[str, Dict[str, Any]]:
+                if status_file is None or not status_file.exists():
+                    return {}
+                try:
+                    mtime = status_file.stat().st_mtime
+                except OSError:
+                    return {}
+                if cache["mtime"] == mtime:
+                    return cache["entries"]
+                try:
+                    payload = json.loads(status_file.read_text())
+                except (OSError, json.JSONDecodeError):
+                    return {}
+                entries: Dict[str, Dict[str, Any]] = {}
+                for entry in payload.get("subagents", []):
+                    if not isinstance(entry, dict):
+                        continue
+                    subagent_id = entry.get("subagent_id") or entry.get("id")
+                    if subagent_id:
+                        entries[str(subagent_id)] = entry
+                cache["mtime"] = mtime
+                cache["entries"] = entries
+                return entries
+
+            def _status_callback(subagent_id: str) -> Optional[SubagentDisplayData]:
+                latest = live_callback(subagent_id)
+                if latest and latest.status not in {"running", "pending"}:
+                    return latest
+
+                entry = _load_entries().get(subagent_id)
+                if not entry:
+                    return latest
+
+                # Ignore non-terminal file entries when we already have a live snapshot.
+                entry_status = str(entry.get("status", "")).lower()
+                if latest and entry_status in {"running", "pending", "spawning"}:
+                    return latest
+
+                baseline = latest or by_id.get(subagent_id)
+                merged = _build_subagent_display_data(entry, baseline)
+                by_id[subagent_id] = merged
+                return merged
+
+            return _status_callback
+
         def on_subagent_card_open_modal(self, event: SubagentCard.OpenModal) -> None:
             """Handle subagent card click - open separate screen."""
             # Track timeline child count before entering subagent view
@@ -5923,9 +9231,15 @@ Type your question and press Enter to ask the agents.
                 except Exception as e:
                     tui_log(f"[TextualDisplay] {e}")
 
+            card = getattr(event, "card", None)
+            status_callback = self._build_subagent_status_callback(
+                card=card,
+                fallback_subagents=event.all_subagents,
+            )
             screen = SubagentScreen(
                 subagent=event.subagent,
                 all_subagents=event.all_subagents,
+                status_callback=status_callback,
             )
             self.push_screen(screen, _on_screen_dismiss)
             event.stop()
@@ -5945,9 +9259,118 @@ Type your question and press Enter to ask the agents.
                     self.push_screen(modal)
             event.stop()
 
+        def on_background_tasks_clicked(self, event: BackgroundTasksClicked) -> None:
+            """Handle background tasks label click in ribbon."""
+            background_tasks, recent_tasks = self._collect_background_tools_for_agent(event.agent_id)
+            if background_tasks or recent_tasks:
+                self._show_modal_async(
+                    BackgroundTasksModal(
+                        background_tasks,
+                        recent_tasks=recent_tasks,
+                        agent_id=event.agent_id,
+                    ),
+                )
+            else:
+                self.notify("No background jobs running", severity="warning", timeout=3)
+            event.stop()
+
+        def on_context_paths_clicked(self, event: ContextPathsClicked) -> None:
+            """Handle context paths icon click in ribbon - open context paths modal."""
+            self._show_context_modal()
+            event.stop()
+
+        def on_final_presentation_card_view_final_answer(
+            self,
+            event: FinalPresentationCard.ViewFinalAnswer,
+        ) -> None:
+            """Re-open FinalAnswerModal from the card's View button.
+
+            Reuses the stored modal data (with changes) so the Review
+            Changes tab is still available, but marked as already approved.
+            """
+            from .textual.widgets.modals.final_answer_modal import (
+                FinalAnswerModal,
+                FinalAnswerModalData,
+            )
+
+            card = event.card
+            display = self.coordination_display
+
+            # Reuse stored data if available (includes changes for review tab)
+            stored = getattr(display, "_last_final_answer_modal_data", None)
+            # Determine prior action from stored result
+            stored_result = getattr(display, "_last_final_answer_result", None)
+            if stored_result is not None:
+                prior_action = "approved" if stored_result.approved else "rejected"
+            else:
+                prior_action = None  # No decision was made yet
+
+            # Resolve workspace_path: prefer stored data, then final workspace from logs
+            workspace_path = None
+            orchestrator = getattr(display, "orchestrator", None)
+            if orchestrator is not None:
+                try:
+                    resolve_fn = getattr(orchestrator, "_resolve_final_workspace_path", None)
+                    agent_id = card.agent_id if hasattr(card, "agent_id") else None
+                    if resolve_fn and agent_id:
+                        workspace_path = resolve_fn(agent_id)
+                except Exception:
+                    pass
+
+            if stored is not None:
+                data = FinalAnswerModalData(
+                    answer_content=stored.answer_content,
+                    vote_results=stored.vote_results,
+                    agent_id=stored.agent_id,
+                    model_name=stored.model_name,
+                    post_eval_content=stored.post_eval_content,
+                    post_eval_status=stored.post_eval_status,
+                    changes=stored.changes,
+                    context_paths=stored.context_paths,
+                    prior_action=prior_action,
+                    workspace_path=stored.workspace_path or workspace_path,
+                )
+            else:
+                data = FinalAnswerModalData(
+                    answer_content=card.get_content(),
+                    vote_results=card.vote_results,
+                    agent_id=card.agent_id,
+                    model_name=card.model_name,
+                    context_paths=card.context_paths,
+                    prior_action=prior_action,
+                    workspace_path=workspace_path,
+                )
+            modal = FinalAnswerModal(data=data)
+
+            def _on_modal_dismissed(_result=None):
+                # Update card review status if a new decision was made
+                # Only set review status when there are actual changes to review;
+                # workspace-only or answer-only modals don't need a status badge.
+                has_real_changes = bool(data.changes)
+                if _result is not None and display is not None and has_real_changes:
+                    # Prefer updating the card that launched the modal so the
+                    # indicator is guaranteed to reflect the same decision.
+                    try:
+                        status = "approved" if _result.approved else "rejected"
+                        card.set_review_status(status)
+                    except Exception:
+                        logger.exception(
+                            "[TextualDisplay] Failed to update clicked final card review status",
+                        )
+
+                    display._update_card_review_status(_result)
+                    display._last_final_answer_result = _result
+                # Scroll the final card into view after modal closes
+                try:
+                    card.scroll_visible(animate=True, top=False)
+                except Exception:
+                    pass
+
+            self.push_screen(modal, _on_modal_dismissed)
+
         def on_button_pressed(self, event: Button.Pressed) -> None:
             """Handle button clicks in main app."""
-            if event.button.id == "cancel_button":
+            if event.button.id == "turn_cancel_button":
                 # Trigger cancellation (same as Ctrl+C)
                 self.coordination_display.request_cancellation()
                 self.notify("Cancelling turn...", severity="warning", timeout=2)
@@ -6038,6 +9461,21 @@ Type your question and press Enter to ask the agents.
                 # Update the theme state
                 self.coordination_display.theme = new_theme
 
+                # Toggle theme classes on the app for CSS-based theme switching
+                # This allows theme-specific styles to update dynamically
+                if new_theme == "light":
+                    self.add_class("theme-light")
+                    self.remove_class("theme-dark")
+                else:
+                    self.add_class("theme-dark")
+                    self.remove_class("theme-light")
+
+                # Save the new theme to user preferences
+                try:
+                    user_settings = get_user_settings()
+                    user_settings.theme = new_theme
+                except Exception:
+                    pass
             except Exception as e:
                 self.notify(f"Theme error: {e}", severity="error", timeout=3)
                 logger.exception(f"Failed to toggle theme: {e}")
@@ -6085,6 +9523,122 @@ Type your question and press Enter to ask the agents.
                 self._show_agent_output_modal(agent_id)
             else:
                 self.notify("No agent selected", severity="warning")
+
+        def _collect_background_tools(self) -> List[Dict[str, Any]]:
+            """Collect active background jobs across all agent panels."""
+            active, _recent = self._collect_background_activity()
+            return active
+
+        @staticmethod
+        def _sort_background_tasks(tasks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            """Sort background task records chronologically by start time."""
+            return sorted(tasks, key=lambda item: item.get("start_time") or datetime.min)
+
+        def _collect_background_activity(self) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+            """Collect active + recent background jobs across all agent panels."""
+            active_tasks: List[Dict[str, Any]] = []
+            recent_tasks: List[Dict[str, Any]] = []
+            for agent_id, panel in self.agent_widgets.items():
+                panel_active, panel_recent = self._collect_background_tools_for_agent(agent_id)
+                active_tasks.extend(panel_active)
+                recent_tasks.extend(panel_recent)
+            return self._sort_background_tasks(active_tasks), self._sort_background_tasks(recent_tasks)
+
+        def _collect_background_tools_for_agent(self, agent_id: str) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+            """Collect active + recent background jobs from a single agent panel."""
+            panel = self.agent_widgets.get(agent_id)
+            if panel is None:
+                return [], []
+
+            get_history = getattr(panel, "_get_background_tool_history", None)
+            if callable(get_history):
+                try:
+                    history_items = get_history() or []
+                except Exception as e:
+                    tui_log(f"[TextualDisplay] {e}")
+                    history_items = []
+                active: List[Dict[str, Any]] = []
+                recent: List[Dict[str, Any]] = []
+                for task in history_items:
+                    if not isinstance(task, dict):
+                        continue
+                    merged_task = dict(task)
+                    merged_task.setdefault("agent_id", agent_id)
+                    is_active = bool(merged_task.get("is_active", True))
+                    if is_active:
+                        active.append(merged_task)
+                    else:
+                        recent.append(merged_task)
+                if active or recent:
+                    return self._sort_background_tasks(active), self._sort_background_tasks(recent)
+
+            get_tools = getattr(panel, "_get_background_tools", None)
+            if not callable(get_tools):
+                return [], []
+
+            try:
+                panel_tasks = get_tools() or []
+            except Exception as e:
+                tui_log(f"[TextualDisplay] {e}")
+                return [], []
+
+            tasks: List[Dict[str, Any]] = []
+            for task in panel_tasks:
+                if not isinstance(task, dict):
+                    continue
+                merged_task = dict(task)
+                merged_task.setdefault("agent_id", agent_id)
+                tasks.append(merged_task)
+            return self._sort_background_tasks(tasks), []
+
+        def _update_running_tools_count(self) -> None:
+            """Refresh status-bar tool counters across all agent panels."""
+            if not self._status_bar and not self._status_ribbon:
+                return
+
+            running_count = 0
+            background_count = 0
+            per_agent_background: Dict[str, int] = {}
+
+            for agent_id, panel in self.agent_widgets.items():
+                get_running = getattr(panel, "_get_running_tools_count", None)
+                if callable(get_running):
+                    try:
+                        running_count += int(get_running())
+                    except Exception as e:
+                        tui_log(f"[TextualDisplay] {e}")
+
+                agent_background_count = 0
+                get_background = getattr(panel, "_get_background_tools", None)
+                if callable(get_background):
+                    try:
+                        agent_background_count = len(get_background() or [])
+                        background_count += agent_background_count
+                    except Exception as e:
+                        tui_log(f"[TextualDisplay] {e}")
+                per_agent_background[agent_id] = agent_background_count
+
+            if self._status_bar:
+                self._status_bar.update_running_tools(
+                    running_count,
+                    background_count=background_count,
+                )
+            if self._status_ribbon:
+                for agent_id, count in per_agent_background.items():
+                    self._status_ribbon.set_background_jobs(agent_id, count)
+
+        def action_open_background_tools(self) -> None:
+            """Open modal showing active background tool jobs."""
+            background_tasks, recent_tasks = self._collect_background_activity()
+            if not background_tasks and not recent_tasks:
+                self.notify("No background jobs running", severity="warning", timeout=3)
+                return
+            self._show_modal_async(
+                BackgroundTasksModal(
+                    background_tasks,
+                    recent_tasks=recent_tasks,
+                ),
+            )
 
         def action_open_cost_breakdown(self):
             """Open cost breakdown modal."""
@@ -6199,7 +9753,7 @@ Type your question and press Enter to ask the agents.
                 self.notify("No answers yet - workspaces available after agents submit", severity="warning", timeout=3)
                 return
 
-            self._show_modal_async(
+            self._present_workspace_browser_modal(
                 WorkspaceBrowserModal(
                     answers=self._answers,
                     agent_ids=self.coordination_display.agent_ids,
@@ -6208,20 +9762,37 @@ Type your question and press Enter to ask the agents.
                 ),
             )
 
-        def _show_workspace_browser_for_agent(self, agent_id: str):
+        def _show_workspace_browser_for_agent(
+            self,
+            agent_id: str,
+            preferred_final_workspace: Optional[str] = None,
+        ):
             """Open workspace browser focused on the winning agent's final workspace.
 
             Args:
                 agent_id: The agent ID to show workspace for (typically the winner)
+                preferred_final_workspace: Optional already-resolved final workspace path
+                    for the agent. When provided, avoids rescanning log directories.
             """
             from pathlib import Path
 
+            started_total = time.perf_counter()
             # Get current workspace paths for ALL agents
             agent_workspace_paths: Dict[str, str] = {}
             final_workspace_paths: Dict[str, str] = {}
             orchestrator = getattr(self.coordination_display, "orchestrator", None)
 
+            if preferred_final_workspace:
+                preferred_path = Path(preferred_final_workspace)
+                if preferred_path.exists():
+                    final_workspace_paths[agent_id] = str(preferred_path)
+                    if self._timing_debug:
+                        tui_log(
+                            "[TIMING] WorkspaceBrowser.reuse_preferred_final_workspace " f"0.0ms agent={agent_id}",
+                        )
+
             if orchestrator:
+                started_collect = time.perf_counter()
                 # Get current workspaces
                 for aid, agent in getattr(orchestrator, "agents", {}).items():
                     fm = getattr(getattr(agent, "backend", None), "filesystem_manager", None)
@@ -6229,10 +9800,16 @@ Type your question and press Enter to ask the agents.
                         workspace = getattr(fm, "get_current_workspace", lambda: None)()
                         if workspace:
                             agent_workspace_paths[aid] = str(workspace)
+                if self._timing_debug:
+                    tui_log(
+                        "[TIMING] WorkspaceBrowser.collect_current_workspaces " f"{(time.perf_counter() - started_collect) * 1000.0:.1f}ms " f"count={len(agent_workspace_paths)}",
+                    )
 
-                # Scan for final workspaces in log directory
+                # Scan for final workspaces in log directory (unless we already
+                # received a resolved path from the final-answer card).
                 log_dir = getattr(orchestrator, "log_session_dir", None)
-                if log_dir:
+                if log_dir and not final_workspace_paths:
+                    started_scan = time.perf_counter()
                     log_path = Path(log_dir)
 
                     def scan_for_final(base_dir: Path) -> Dict[str, str]:
@@ -6258,6 +9835,10 @@ Type your question and press Enter to ask the agents.
                                     break
                             if final_workspace_paths:
                                 break
+                    if self._timing_debug:
+                        tui_log(
+                            "[TIMING] WorkspaceBrowser.scan_final_workspaces " f"{(time.perf_counter() - started_scan) * 1000.0:.1f}ms " f"count={len(final_workspace_paths)}",
+                        )
 
             # Merge final workspaces into agent_workspace_paths with special key
             # The modal will detect keys ending with "-final" as final workspaces
@@ -6267,9 +9848,13 @@ Type your question and press Enter to ask the agents.
 
             if not self._answers and not agent_workspace_paths and not agent_final_paths:
                 self.notify("No workspace available yet", severity="warning", timeout=3)
+                if self._timing_debug:
+                    tui_log(
+                        "[TIMING] WorkspaceBrowser.open " f"{(time.perf_counter() - started_total) * 1000.0:.1f}ms result=no_workspace",
+                    )
                 return
 
-            self._show_modal_async(
+            self._present_workspace_browser_modal(
                 WorkspaceBrowserModal(
                     answers=self._answers,
                     agent_ids=self.coordination_display.agent_ids,
@@ -6279,6 +9864,47 @@ Type your question and press Enter to ask the agents.
                     default_to_final=True,
                 ),
             )
+            if self._timing_debug:
+                tui_log(
+                    "[TIMING] WorkspaceBrowser.open "
+                    f"{(time.perf_counter() - started_total) * 1000.0:.1f}ms "
+                    f"answers={len(self._answers)} current={len(agent_workspace_paths)} final={len(agent_final_paths)}",
+                )
+
+        def _present_workspace_browser_modal(self, modal: WorkspaceBrowserModal) -> bool:
+            """Open workspace browser once, suppressing duplicate open bursts."""
+            now = time.monotonic()
+            # Ignore rapid repeated requests before the first modal appears.
+            if now - self._workspace_browser_last_request_at < 0.4:
+                if self._timing_debug:
+                    tui_log("[TIMING] WorkspaceBrowser.open suppressed=throttled")
+                return False
+            if self._workspace_browser_open_pending:
+                if self._timing_debug:
+                    tui_log("[TIMING] WorkspaceBrowser.open suppressed=pending")
+                return False
+
+            # If a workspace modal is already on stack, don't push another.
+            try:
+                if any(isinstance(screen, WorkspaceBrowserModal) for screen in self.screen_stack):
+                    if self._timing_debug:
+                        tui_log("[TIMING] WorkspaceBrowser.open suppressed=already_open")
+                    return False
+            except Exception:
+                pass
+
+            self._workspace_browser_open_pending = True
+            self._workspace_browser_last_request_at = now
+
+            def _on_dismiss(_result: Any = None) -> None:
+                self._workspace_browser_open_pending = False
+
+            try:
+                self.push_screen(modal, _on_dismiss)
+                return True
+            except Exception:
+                self._workspace_browser_open_pending = False
+                raise
 
         def action_open_unified_browser(self):
             """Open unified browser modal with tabs for Answers, Votes, Workspace, Timeline."""
@@ -6354,26 +9980,63 @@ Type your question and press Enter to ask the agents.
             """Handle click on status bar events counter - opens orchestrator events modal."""
             self._show_orchestrator_modal()
 
+        def on_status_bar_tools_clicked(self, event: StatusBarToolsClicked) -> None:
+            """Handle click on status bar running/background tools indicator."""
+            self.action_open_background_tools()
+
         def on_status_bar_cwd_clicked(self, event: StatusBarCwdClicked) -> None:
             """Handle CWD mode change from status bar click."""
-            self._cwd_context_mode = event.mode
-            # No toast - the visual update in the hint/status bar is enough
+            if self._is_cwd_context_toggle_blocked():
+                self._set_cwd_context_mode(self._cwd_context_mode, notify=False)
+                self.notify(
+                    self._cwd_context_toggle_blocked_message(),
+                    severity="warning",
+                    timeout=2,
+                )
+                return
+
+            self._set_cwd_context_mode(event.mode, notify=True, cwd=event.cwd)
 
         def on_status_bar_theme_clicked(self, event: StatusBarThemeClicked) -> None:
             """Handle theme toggle from status bar click."""
             self.action_toggle_theme()
 
-        def _toggle_cwd_auto_include(self) -> None:
-            """Cycle CWD context mode: off → read → write → off (Ctrl+P)."""
-            # Cycle through modes
-            modes = ["off", "read", "write"]
-            current_idx = modes.index(self._cwd_context_mode)
-            self._cwd_context_mode = modes[(current_idx + 1) % len(modes)]
+        def on_status_bar_context_clicked(self, event: StatusBarContextClicked) -> None:
+            """Handle click on status bar context indicator - opens context paths modal."""
+            self._show_context_modal()
 
-            cwd = Path.cwd()
-            cwd_short = f"~/{cwd.name}" if len(str(cwd)) > 30 else str(cwd)
+        @staticmethod
+        def _normalize_cwd_context_mode(mode: Optional[str]) -> str:
+            """Normalize mode aliases to off/read/write."""
+            normalized = str(mode or "off").strip().lower()
+            if normalized in {"rw", "write"}:
+                return "write"
+            if normalized in {"ro", "read"}:
+                return "read"
+            return "off"
 
-            # Update status bar display if available
+        def _cwd_context_toggle_blocked_message(self) -> str:
+            """Return user-facing reason why CWD context toggle is blocked."""
+            if self._mode_state.plan_mode == "execute":
+                return "Cannot change CWD context in execute mode."
+            return "Cannot change CWD context during execution."
+
+        def _is_cwd_context_toggle_blocked(self) -> bool:
+            """Return True when Ctrl+P/status-bar CWD toggles should be blocked."""
+            return self._mode_state.plan_mode == "execute" or self._mode_state.is_locked()
+
+        def _set_cwd_context_mode(
+            self,
+            mode: str,
+            *,
+            notify: bool,
+            cwd: Optional[str] = None,
+        ) -> None:
+            """Apply CWD context mode and sync status bar + hint UI."""
+            self._cwd_context_mode = self._normalize_cwd_context_mode(mode)
+            cwd_value = str(Path(cwd).resolve()) if cwd else str(Path.cwd())
+            cwd_short = f"~/{Path(cwd_value).name}" if len(cwd_value) > 30 else cwd_value
+
             if self._status_bar:
                 self._status_bar._cwd_context_mode = self._cwd_context_mode
                 try:
@@ -6387,24 +10050,92 @@ Type your question and press Enter to ask the agents.
                 except Exception as e:
                     tui_log(f"[TextualDisplay] {e}")
 
-            # Update welcome screen hint if showing
             self._update_cwd_hint()
+            if notify:
+                self._notify_cwd_context_change(self._cwd_context_mode, cwd_value)
+
+        def _toggle_cwd_auto_include(self) -> None:
+            """Cycle CWD context mode: off → read → write → off (Ctrl+P)."""
+            if self._is_cwd_context_toggle_blocked():
+                self.notify(
+                    self._cwd_context_toggle_blocked_message(),
+                    severity="warning",
+                    timeout=2,
+                )
+                return
+
+            # Cycle through modes
+            modes = ["off", "read", "write"]
+            current_idx = modes.index(self._cwd_context_mode)
+            self._set_cwd_context_mode(modes[(current_idx + 1) % len(modes)], notify=True)
+
+        def _notify_cwd_context_change(self, mode: str, cwd: str) -> None:
+            """Show a toast when CWD context visibility/mode changes."""
+            mode_label = {
+                "off": "hidden",
+                "read": "read-only",
+                "write": "read+write",
+            }.get(mode, mode)
+
+            if mode == "off":
+                message = f"Ctrl+P: CWD context {mode_label} ({cwd})"
+            else:
+                message = f"Ctrl+P: CWD context {mode_label} ({cwd})"
+
+            self.notify(message, severity="information", timeout=3)
+
+        def _format_cwd_for_hint(self, max_len: int) -> str:
+            """Return cwd text compacted for the right-side hint panel."""
+            cwd = Path.cwd()
+            cwd_text = str(cwd)
+
+            home = str(Path.home())
+            if cwd_text.startswith(home):
+                remainder = cwd_text[len(home) :].lstrip("/\\")
+                cwd_text = "~" if not remainder else f"~/{remainder}"
+
+            if len(cwd_text) <= max_len:
+                return cwd_text
+
+            leaf = cwd.name or cwd_text
+            compact = f".../{leaf}"
+            if len(compact) <= max_len:
+                return compact
+            return leaf if len(leaf) <= max_len else leaf[-max_len:]
+
+        def _build_welcome_context_hint_text(self) -> str:
+            """Build compact Ctrl+P context hint for the right-side status panel."""
+            mode_token = {
+                "off": "off",
+                "read": "[bold]ro[/]",
+                "write": "[bold]rw[/]",
+            }.get(self._cwd_context_mode, "off")
+
+            width = self.size.width or (self.app.size.width if self.app else 120)
+            cwd_name = Path.cwd().name or str(Path.cwd())
+            cwd_medium = self._format_cwd_for_hint(24)
+            cwd_long = self._format_cwd_for_hint(36)
+
+            if width >= 150:
+                return f"Ctrl+P: CWD {mode_token} ({cwd_long})"
+            if width >= 120:
+                return f"Ctrl+P: CWD {mode_token} ({cwd_medium})"
+            if width >= 90:
+                return f"Ctrl+P: CWD {mode_token} ({cwd_name})"
+            return f"Ctrl+P: CWD {mode_token} ({cwd_name})"
+
+        def _refresh_welcome_context_hint(self) -> None:
+            """Refresh right-side vim/path panel when layout or mode changes."""
+            if not hasattr(self, "question_input") or not self.question_input:
+                return
+            vim_normal: bool | None = None
+            if self.question_input.vim_mode:
+                vim_normal = bool(getattr(self.question_input, "_vim_normal", False))
+            self._update_vim_indicator(vim_normal)
 
         def _update_cwd_hint(self) -> None:
-            """Update the CWD hint display on welcome screen."""
-            try:
-                cwd = Path.cwd()
-                cwd_short = f"~/{cwd.name}" if len(str(cwd)) > 30 else str(cwd)
-                hint_widget = self.query_one("#cwd_hint", Static)
-                at_hint = "  •  @ for other paths"
-                if self._cwd_context_mode == "read":
-                    hint_widget.update(f"[green]● Ctrl+P: File access to {cwd_short} \\[r][/][dim]{at_hint}[/]")
-                elif self._cwd_context_mode == "write":
-                    hint_widget.update(f"[green]● Ctrl+P: File access to {cwd_short} \\[rw][/][dim]{at_hint}[/]")
-                else:
-                    hint_widget.update(f"[dim]○ Ctrl+P: File access to {cwd_short}{at_hint}[/]")
-            except Exception as e:
-                tui_log(f"[TextualDisplay] {e}")
+            """Update compact path/help hint display."""
+            self._refresh_welcome_context_hint()
 
         def _update_status_bar_restart_info(self) -> None:
             """Update StatusBar to show restart count."""
@@ -6729,9 +10460,6 @@ Type your question and press Enter to ask the agents.
                 winner_id: The winning agent's ID
                 answer_preview: Preview of the winning answer
             """
-            # Get model name for richer display
-            model_name = self.coordination_display.agent_models.get(winner_id, "")
-
             # 1. Update StatusBar with winner announcement
             if self._status_bar:
                 agent_count = len(self.coordination_display.agent_ids)
@@ -6756,21 +10484,7 @@ Type your question and press Enter to ask the agents.
             except Exception as e:
                 tui_log(f"[TextualDisplay] {e}")  # Tab bar might not be available
 
-            # 3. Enhanced toast notification for winner
-            winner_display = f"{winner_id}" + (f" ({model_name})" if model_name else "")
-
-            # Truncate answer preview
-            preview = answer_preview[:80].replace("\n", " ") if answer_preview else ""
-            if len(answer_preview or "") > 80:
-                preview += "..."
-
-            self.notify(
-                f"🏆 [bold yellow]Consensus Reached![/]\n" f"Winner: [bold]{winner_display}[/]\n" f"Preview: {preview}",
-                severity="information",
-                timeout=10,
-            )
-
-            # 4. Add orchestrator event
+            # 3. Add orchestrator event
             self.add_orchestrator_event(f"🏆 Winner: {winner_id} selected by consensus")
 
         def notify_phase(self, phase: str) -> None:
@@ -6786,6 +10500,7 @@ Type your question and press Enter to ask the agents.
                     # Not executing - show normal input
                     tui_log(f"  Phase '{phase}' -> removing execution-mode class")
                     input_area.remove_class("execution-mode")
+                    self._dismiss_decomposition_generation_modal()
                     # Stop execution status update timer
                     if hasattr(self, "_execution_status_timer") and self._execution_status_timer:
                         self._execution_status_timer.stop()
@@ -7084,6 +10799,7 @@ Type your question and press Enter to ask the agents.
             - f: Final presentation / files
             - c: Cost breakdown
             - m: MCP status / metrics
+            - k: Skills manager
             - a: Answer browser
             - t: Timeline
             - h or ?: Help/shortcuts
@@ -7147,6 +10863,12 @@ Type your question and press Enter to ask the agents.
             # m - MCP status or metrics
             if key_lower == "m":
                 self.action_open_mcp_status()
+                event.stop()
+                return True
+
+            # k - Skills manager
+            if key_lower == "k":
+                self._show_skills_modal()
                 event.stop()
                 return True
 
@@ -7280,6 +11002,247 @@ Type your question and press Enter to ask the agents.
                 ),
             )
 
+        @staticmethod
+        def _normalize_skill_name_list(skill_names: List[str]) -> List[str]:
+            """Normalize and deduplicate skill names while preserving order."""
+            seen: Set[str] = set()
+            normalized: List[str] = []
+            for name in skill_names:
+                cleaned = (name or "").strip()
+                if not cleaned:
+                    continue
+                key = cleaned.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                normalized.append(cleaned)
+            return normalized
+
+        def _collect_skill_inventory(
+            self,
+            include_previous_session_skills: bool = True,
+        ) -> Dict[str, List[Dict[str, Any]]]:
+            """Collect available skills grouped by source location."""
+            from massgen.filesystem_manager.skills_manager import scan_skills
+            from massgen.logs_analyzer import get_logs_dir
+
+            skills_dir = Path(".agent/skills")
+            logs_dir = get_logs_dir()
+            logs_source = logs_dir if include_previous_session_skills and logs_dir.exists() else None
+            all_skills = scan_skills(skills_dir, logs_dir=logs_source)
+
+            grouped: Dict[str, List[Dict[str, Any]]] = {
+                "builtin": [],
+                "project": [],
+                "user": [],
+                "previous_session": [],
+            }
+            for skill in all_skills:
+                location = str(skill.get("location", "project"))
+                if location not in grouped:
+                    grouped[location] = []
+                grouped[location].append(skill)
+
+            for location in grouped:
+                grouped[location] = sorted(
+                    grouped[location],
+                    key=lambda s: str(s.get("name", "")).lower(),
+                )
+            return grouped
+
+        @staticmethod
+        def _flatten_skill_inventory(
+            skills_by_location: Dict[str, List[Dict[str, Any]]],
+            include_previous_session_skills: bool,
+        ) -> List[Dict[str, Any]]:
+            """Flatten grouped skills into a single list with optional evolving exclusion."""
+            flattened: List[Dict[str, Any]] = []
+            for location, skills in skills_by_location.items():
+                if location == "previous_session" and not include_previous_session_skills:
+                    continue
+                flattened.extend(skills)
+            return flattened
+
+        def _refresh_skills_button_state(self) -> None:
+            """Compatibility hook retained after removing skills from the mode bar."""
+            if self._mode_bar:
+                self._mode_bar.set_skills_available(False)
+
+        def _show_skills_modal(self) -> None:
+            """Show session skill manager modal."""
+            include_previous = bool(
+                self._mode_state.analysis_config.include_previous_session_skills,
+            )
+            skills_by_location = self._collect_skill_inventory(
+                include_previous_session_skills=True,
+            )
+            current_enabled = self._mode_state.analysis_config.get_enabled_skill_names()
+
+            # Load registry content if SKILL_REGISTRY.md exists
+            registry_content = None
+            try:
+                registry_path = Path(".agent/skills/SKILL_REGISTRY.md")
+                if registry_path.is_file():
+                    registry_content = registry_path.read_text(encoding="utf-8").strip()
+            except Exception:
+                pass
+
+            modal = SkillsModal(
+                skills_by_location=skills_by_location,
+                enabled_skill_names=current_enabled,
+                include_previous_session_skills=include_previous,
+                registry_content=registry_content if registry_content else None,
+            )
+
+            def _on_skills_dismiss(result: Optional[Dict[str, Any]]) -> None:
+                if result is None:
+                    return
+
+                selected = self._normalize_skill_name_list(
+                    result.get("enabled_skill_names", []),
+                )
+                include_previous_session_skills = bool(
+                    result.get("include_previous_session_skills", include_previous),
+                )
+                self._mode_state.analysis_config.include_previous_session_skills = include_previous_session_skills
+                discovered = self._normalize_skill_name_list(
+                    [
+                        str(s.get("name", ""))
+                        for s in self._flatten_skill_inventory(
+                            skills_by_location,
+                            include_previous_session_skills=include_previous_session_skills,
+                        )
+                    ],
+                )
+
+                selected_set = {name.lower() for name in selected}
+                discovered_set = {name.lower() for name in discovered}
+
+                if discovered and selected_set == discovered_set:
+                    # None = unfiltered; automatically includes newly discovered skills.
+                    self._mode_state.analysis_config.enabled_skill_names = None
+                    enabled_count = len(discovered)
+                    self.notify(f"Skills enabled: all {enabled_count} discovered", severity="information", timeout=3)
+                else:
+                    self._mode_state.analysis_config.enabled_skill_names = selected
+                    self.notify(f"Skills enabled: {len(selected)}", severity="information", timeout=3)
+                self._refresh_skills_button_state()
+
+            self.push_screen(modal, _on_skills_dismiss)
+
+        @staticmethod
+        def _snapshot_skill_dirs() -> set:
+            """Return set of directory names in .agent/skills/ that contain a SKILL.md."""
+            skills_root = Path(".agent") / "skills"
+            if not skills_root.is_dir():
+                return set()
+            return {d.name for d in skills_root.iterdir() if d.is_dir() and (d / "SKILL.md").is_file()}
+
+        def _detect_new_skills_from_analysis(self) -> None:
+            """Harvest skills from agent workspaces and copy to project .agent/skills/.
+
+            After an analysis run with the "user" profile, agents may have created
+            SKILL.md files inside their workspace (e.g. final/agent_*/workspace/.agent/skills/*/).
+            This method copies those to the project-root skills directory so they
+            are discoverable by future runs.
+            """
+            if self._mode_state.plan_mode != "analysis":
+                return
+            if self._mode_state.analysis_config.profile != "user":
+                return
+
+            try:
+                self._harvest_skills_from_workspace()
+            finally:
+                # Clear snapshot after detection.
+                self._mode_state.analysis_config._pre_analysis_skill_dirs = None
+
+        def _harvest_skills_from_workspace(self) -> None:
+            """Apply skill lifecycle updates from analysis outputs into .agent/skills/."""
+
+            from massgen.filesystem_manager.skills_manager import (
+                apply_analysis_skill_lifecycle,
+                normalize_skill_lifecycle_mode,
+            )
+            from massgen.logger_config import get_log_session_dir
+
+            project_skills_root = Path(".agent") / "skills"
+            pre_snapshot = self._mode_state.analysis_config._pre_analysis_skill_dirs or set()
+            lifecycle_mode = normalize_skill_lifecycle_mode(
+                self._mode_state.analysis_config.skill_lifecycle_mode,
+            )
+
+            # Find SKILL.md files in agent workspaces
+            log_dir = get_log_session_dir()
+            final_dir = log_dir / "final"
+            if not final_dir.exists():
+                tui_log("[SkillHarvest] No final/ directory found")
+                return
+
+            actions: list[Dict[str, Any]] = []
+            for skill_md in sorted(final_dir.glob("agent_*/workspace/.agent/skills/*/SKILL.md")):
+                skill_dir = skill_md.parent
+
+                try:
+                    result = apply_analysis_skill_lifecycle(
+                        skill_dir,
+                        project_skills_root,
+                        lifecycle_mode=lifecycle_mode,
+                        preexisting_skill_dirs=pre_snapshot,
+                    )
+                    actions.append(result)
+                    tui_log(f"[SkillHarvest] lifecycle={lifecycle_mode} result={result}")
+                except Exception as e:
+                    tui_log(f"[SkillHarvest] Failed lifecycle apply for {skill_dir.name}: {e}")
+
+            created_names = []
+            updated_names = []
+            for item in actions:
+                name = str(item.get("name", "") or "").strip()
+                if not name:
+                    continue
+                if item.get("action") == "created":
+                    created_names.append(name)
+                elif item.get("action") == "updated":
+                    updated_names.append(name)
+
+            created_names = self._normalize_skill_name_list(created_names)
+            updated_names = self._normalize_skill_name_list(updated_names)
+
+            if not created_names and not updated_names:
+                return
+
+            summary_parts = []
+            if created_names:
+                summary_parts.append(f"created {len(created_names)}")
+            if updated_names:
+                summary_parts.append(f"updated {len(updated_names)}")
+
+            summary_text = ", ".join(summary_parts)
+            self.notify(f"Skills lifecycle applied: {summary_text}", severity="information", timeout=5)
+
+            # Suggest git tracking if skills aren't version-controlled
+            try:
+                from massgen.filesystem_manager.skills_manager import (
+                    check_skills_git_tracking,
+                )
+
+                tracking = check_skills_git_tracking(Path.cwd())
+                if tracking == "untracked":
+                    self.notify(
+                        "Tip: Track skills in git — add !.agent/skills/ and !.agent/skills/** to .gitignore",
+                        severity="information",
+                        timeout=8,
+                    )
+            except Exception:
+                pass  # Non-critical — don't break harvest on gitignore check failure
+
+            # Auto-add to enabled filter if one is active.
+            enabled = self._mode_state.analysis_config.get_enabled_skill_names()
+            if enabled is not None:
+                self._mode_state.analysis_config.enabled_skill_names = self._normalize_skill_name_list(enabled + created_names + updated_names)
+            self._refresh_skills_button_state()
+
         def _show_file_inspection_modal(self):
             """Display file inspection modal with tree view."""
             orchestrator = getattr(self.coordination_display, "orchestrator", None)
@@ -7329,15 +11292,18 @@ Type your question and press Enter to ask the agents.
             """Refresh widgets when the terminal window is resized with debounce."""
             if self._resize_debounce_handle:
                 try:
-                    self._resize_debounce_handle.cancel()
+                    self._resize_debounce_handle.stop()
                 except Exception as e:
                     tui_log(f"[TextualDisplay] {e}")
 
             debounce_time = 0.15 if self.coordination_display._terminal_type in ("vscode", "windows_terminal") else 0.05
             try:
-                self._resize_debounce_handle = self.set_timer(debounce_time, lambda: self.refresh(layout=True))
+                self._resize_debounce_handle = self.set_timer(
+                    debounce_time,
+                    lambda: (self.refresh(layout=True), self.call_later(self._refresh_welcome_context_hint)),
+                )
             except Exception:
-                self.call_later(lambda: self.refresh(layout=True))
+                self.call_later(lambda: (self.refresh(layout=True), self._refresh_welcome_context_hint()))
 
     # Widget implementations
     class WelcomeScreen(Container):
@@ -7351,26 +11317,110 @@ Type your question and press Enter to ask the agents.
    ██║ ╚═╝ ██║ ██║  ██║ ███████║ ███████║ ╚██████╔╝ ███████╗ ██║ ╚████║
    ╚═╝     ╚═╝ ╚═╝  ╚═╝ ╚══════╝ ╚══════╝  ╚═════╝  ╚══════╝ ╚═╝  ╚═══╝"""
 
+        MASSGEN_LOGO_COMPACT = "MASSGEN"
+
         def __init__(self, agents_info: list = None):
             super().__init__(id="welcome_screen")
             self.agents_info = agents_info or []
+            self._logo_label: Optional[Label] = None
+            self._divider_label: Optional[Static] = None
+            self._agents_label: Optional[Label] = None
+            self._hint_label: Optional[Label] = None
 
         def compose(self) -> ComposeResult:
-            yield Label(self.MASSGEN_LOGO, id="welcome_logo")
+            self._logo_label = Label(self.MASSGEN_LOGO, id="welcome_logo")
+            yield self._logo_label
             yield Label("Multi-Agent Collaboration System", id="welcome_tagline")
-            # Show agent list
-            if self.agents_info:
-                agents_list = "  •  ".join(self.agents_info)
-                yield Label(agents_list, id="welcome_agents")
-            else:
-                yield Label(f"Ready with {len(self.agents_info)} agents", id="welcome_agents")
-            yield Label("Type your question below to begin...", id="welcome_hint")
-            # CWD context hint - shows current mode, explains what it does
-            cwd = Path.cwd()
-            cwd_short = f"~/{cwd.name}" if len(str(cwd)) > 30 else str(cwd)
-            # Use fixed-width format: ○/● indicator + consistent text
-            yield Static(f"[dim]Ctrl+P file access to {cwd_short}  •  @ for other paths[/]", id="cwd_hint")
-            yield Static("[dim]Ctrl+G help  •  Ctrl+C quit[/]", id="shortcuts_hint")
+            self._divider_label = Static("", id="welcome_divider")
+            yield self._divider_label
+            with Container(id="welcome_agents_wrap"):
+                self._agents_label = Label("", id="welcome_agents")
+                yield self._agents_label
+            self._hint_label = Label("", id="welcome_hint")
+            yield self._hint_label
+
+        def on_mount(self) -> None:
+            """Apply responsive formatting once widget dimensions are known."""
+            self.call_after_refresh(self._refresh_for_size)
+
+        def on_resize(self, event: events.Resize) -> None:
+            """Reflow welcome content when terminal size changes."""
+            del event
+            self._refresh_for_size()
+
+        def _refresh_for_size(self) -> None:
+            """Keep welcome screen readable at narrow widths/heights."""
+            width = self.size.width or (self.app.size.width if self.app else 120)
+            height = self.size.height or (self.app.size.height if self.app else 40)
+
+            if self._logo_label:
+                logo = self.MASSGEN_LOGO_COMPACT if width < 110 or height < 26 else self.MASSGEN_LOGO
+                self._logo_label.update(logo)
+
+            if self._divider_label:
+                self._divider_label.update(self._build_divider(width))
+
+            if self._agents_label:
+                self._agents_label.update(self._build_agent_summary(width))
+
+            if self._hint_label:
+                if width < 84:
+                    self._hint_label.update("Type your question and press Enter.")
+                else:
+                    self._hint_label.update("Type your question below, then press Enter.")
+
+        def _build_divider(self, width: int) -> str:
+            """Return a balanced separator line for the welcome card."""
+            length = max(26, min(72, width - 18))
+            return "─" * length
+
+        def _build_agent_summary(self, width: int) -> str:
+            """Build a readable summary of ready agents and models."""
+            if not self.agents_info:
+                return "Ready: 0 agents"
+
+            entries: List[Tuple[str, str]] = []
+            for item in self.agents_info:
+                if isinstance(item, dict):
+                    agent_id = str(item.get("id", "") or "").strip()
+                    model = str(item.get("model", "") or "").strip()
+                else:
+                    agent_text = str(item).strip()
+                    if " (" in agent_text and agent_text.endswith(")"):
+                        agent_id, model = agent_text.rsplit(" (", 1)
+                        model = model[:-1]
+                    else:
+                        agent_id, model = agent_text, ""
+                    agent_id = agent_id.strip()
+                    model = model.strip()
+
+                if agent_id:
+                    entries.append((agent_id, model))
+
+            summary_lines = [f"Ready: {len(entries)} agents"]
+            agent_col_width = max((len(agent_id) for agent_id, _ in entries), default=0)
+
+            for agent_id, model in entries:
+                if not model:
+                    summary_lines.append(agent_id)
+                    continue
+
+                model_budget = max(12, width - agent_col_width - 8)
+                summary_lines.append(
+                    f"{agent_id.ljust(agent_col_width)} - {self._truncate_middle(model, model_budget)}",
+                )
+            return "\n".join(summary_lines)
+
+        @staticmethod
+        def _truncate_middle(value: str, max_length: int) -> str:
+            """Truncate long values while preserving start/end context."""
+            if len(value) <= max_length:
+                return value
+            if max_length <= 8:
+                return value[:max_length]
+            head = (max_length - 1) // 2
+            tail = max_length - head - 1
+            return f"{value[:head]}…{value[-tail:]}"
 
     class HeaderWidget(Static):
         """Compact header widget showing minimal branding and session info."""
@@ -7541,6 +11591,13 @@ Type your question and press Enter to ask the agents.
             self._final_answer_metadata = None
 
             logger.info(f"[AgentPanel] After reset: _current_round={self._current_round}, _viewed_round={self._viewed_round}")
+
+            # Clear task plan state for the new turn (new workspace starts empty)
+            try:
+                if hasattr(self, "_task_plan_host") and self._task_plan_host:
+                    self._task_plan_host.clear()
+            except Exception as e:
+                logger.warning(f"[AgentPanel] Failed to clear task plan for {self.agent_id}: {e}")
 
             # Reset round state in child widgets
             try:
@@ -7818,7 +11875,6 @@ Type your question and press Enter to ask the agents.
 
             # Reset per-attempt UI state
             self._hide_completion_footer()
-            self._tool_handler.reset()
             self._batch_tracker.reset()
             self._reasoning_header_shown = False
 
@@ -7844,7 +11900,12 @@ Type your question and press Enter to ask the agents.
             tool_lower = tool_name.lower()
             return any(st in tool_lower for st in subagent_tools)
 
-        def _show_subagent_card_from_args(self, tool_data, timeline) -> None:
+        def _show_subagent_card_from_args(
+            self,
+            tool_data,
+            timeline,
+            round_number: Optional[int] = None,
+        ) -> None:
             """Show SubagentCard when spawn_subagents tool starts, parsing tasks from args.
 
             This allows users to see subagents as they're being spawned, not just after completion.
@@ -7852,12 +11913,10 @@ Type your question and press Enter to ask the agents.
             should create the card immediately. This path only runs when the "running" chunk
             arrives (which may be delayed due to stream buffering).
             """
-            import json
-
             from massgen.subagent.models import SubagentDisplayData
 
             # Check if card already exists (created by callback)
-            card_id = f"subagent_{tool_data.tool_id}"
+            card_id = _subagent_card_dom_id(tool_data.tool_id)
             try:
                 timeline.query_one(f"#{card_id}", SubagentCard)
                 tui_log(f"_show_subagent_card_from_args: card {card_id} already exists, skipping")
@@ -7869,7 +11928,8 @@ Type your question and press Enter to ask the agents.
             # (callback path might use a different ID scheme)
             try:
                 for existing_card in timeline.query(SubagentCard):
-                    if getattr(existing_card, "tool_call_id", None) == tool_data.tool_id:
+                    existing_tool_call_id = getattr(existing_card, "tool_call_id", None) or getattr(existing_card, "_tool_call_id", None)
+                    if str(existing_tool_call_id) == str(tool_data.tool_id):
                         tui_log(f"_show_subagent_card_from_args: card for tool {tool_data.tool_id} already exists ({existing_card.id}), skipping")
                         return
             except Exception as e:
@@ -7881,13 +11941,9 @@ Type your question and press Enter to ask the agents.
                 tui_log("_show_subagent_card_from_args: no args_full")
                 return
 
-            try:
-                args_data = json.loads(args)
-            except (json.JSONDecodeError, TypeError):
-                tui_log(f"_show_subagent_card_from_args: failed to parse args: {args[:100]}")
-                return
-
-            if not isinstance(args_data, dict):
+            args_data = _parse_spawn_subagents_args(args)
+            if args_data is None:
+                tui_log(f"_show_subagent_card_from_args: failed to parse args: {str(args)[:100]}")
                 return
 
             # Extract tasks from args
@@ -7937,15 +11993,30 @@ Type your question and press Enter to ask the agents.
                 return
 
             # Create and add SubagentCard to timeline
-            import re as _re
-
-            _safe_id = _re.sub(r"[^a-zA-Z0-9_-]", "_", tool_data.tool_id)
+            resolved_round = round_number
+            if resolved_round is None:
+                resolved_round = getattr(self, "_current_round", getattr(timeline, "_viewed_round", 1))
+            try:
+                resolved_round = max(1, int(resolved_round or 1))
+            except Exception:
+                resolved_round = 1
+            status_callback = None
+            app = getattr(self, "app", None)
+            if app and hasattr(app, "_build_spawn_status_callback"):
+                try:
+                    status_callback = app._build_spawn_status_callback(
+                        agent_id=self.agent_id,
+                        seed_subagents=subagents,
+                    )
+                except Exception as e:
+                    tui_log(f"[TextualDisplay] {e}")
             card = SubagentCard(
                 subagents=subagents,
                 tool_call_id=tool_data.tool_id,
-                id=f"subagent_{_safe_id}",
+                status_callback=status_callback,
+                id=card_id,
             )
-            timeline.add_widget(card)
+            timeline.add_widget(card, round_number=resolved_round)
             tui_log(f"_show_subagent_card_from_args: added SubagentCard with {len(subagents)} pending subagents")
 
         def _update_subagent_card_with_results(self, tool_data, timeline) -> None:
@@ -7953,12 +12024,8 @@ Type your question and press Enter to ask the agents.
 
             Called when spawn_subagents tool completes to update status, progress, answers, etc.
             """
-            import json
-
-            from massgen.subagent.models import SubagentDisplayData
-
             # Find existing card - check both possible IDs since callback might use different ID
-            card_id = f"subagent_{tool_data.tool_id}"
+            card_id = _subagent_card_dom_id(tool_data.tool_id)
             card = None
             try:
                 card = timeline.query_one(f"#{card_id}", SubagentCard)
@@ -7966,20 +12033,28 @@ Type your question and press Enter to ask the agents.
             except Exception:
                 # Also try querying by tool_call_id if different
                 if hasattr(tool_data, "tool_call_id") and tool_data.tool_call_id != tool_data.tool_id:
-                    alt_id = f"subagent_{tool_data.tool_call_id}"
+                    alt_id = _subagent_card_dom_id(tool_data.tool_call_id)
                     try:
                         card = timeline.query_one(f"#{alt_id}", SubagentCard)
                         tui_log(f"_update_subagent_card_with_results: found card by tool_call_id: {alt_id}")
                     except Exception as e:
                         tui_log(f"[TextualDisplay] {e}")
 
-                # Try finding ANY SubagentCard in the timeline
+                # Try finding card by explicit tool_call_id metadata.
                 if card is None:
                     try:
                         cards = list(timeline.query(SubagentCard))
-                        if cards:
-                            card = cards[0]  # Use first matching card
-                            tui_log(f"_update_subagent_card_with_results: found card by query: {card.id}")
+                        target_ids = {str(tool_data.tool_id)}
+                        if hasattr(tool_data, "tool_call_id") and tool_data.tool_call_id:
+                            target_ids.add(str(tool_data.tool_call_id))
+                        for candidate in cards:
+                            candidate_tool_call_id = getattr(candidate, "tool_call_id", None) or getattr(candidate, "_tool_call_id", None)
+                            if candidate_tool_call_id is not None and str(candidate_tool_call_id) in target_ids:
+                                card = candidate
+                                tui_log(
+                                    "_update_subagent_card_with_results: " f"found card by metadata: {candidate.id}",
+                                )
+                                break
                     except Exception as e:
                         tui_log(f"[TextualDisplay] {e}")
 
@@ -7989,21 +12064,9 @@ Type your question and press Enter to ask the agents.
                 # Just log and return to avoid duplicates
                 return
 
-            # Parse results
-            result = tool_data.result_full
-            if not result:
+            result_data, spawned = _extract_spawned_subagents(tool_data.result_full)
+            if result_data is None:
                 return
-
-            try:
-                result_data = json.loads(result)
-            except (json.JSONDecodeError, TypeError):
-                return
-
-            if not isinstance(result_data, dict):
-                return
-
-            # Extract spawned subagents list
-            spawned = result_data.get("results", result_data.get("spawned_subagents", result_data.get("subagents", [])))
 
             # Remove card only on true spawn failure (no results at all)
             if not result_data.get("success", True) and not spawned:
@@ -8018,62 +12081,14 @@ Type your question and press Enter to ask the agents.
             # Build updated subagent list
             updated_subagents = []
             for sa_data in spawned:
-                # Map status from result to our display status
-                raw_status = sa_data.get("status", "running")
-                if raw_status == "completed":
-                    display_status = "completed"
-                    progress = 100
-                elif raw_status == "completed_but_timeout":
-                    display_status = "timeout"
-                    progress = sa_data.get("completion_percentage", 100)
-                elif raw_status == "failed":
-                    display_status = "failed"
-                    progress = 0
-                else:
-                    display_status = "running"
-                    progress = 0
-
-                elapsed = sa_data.get("execution_time_seconds", 0.0)
-
-                # Count files in workspace if it exists
-                workspace_path = sa_data.get("workspace", "")
-                file_count = 0
-                if workspace_path:
-                    from pathlib import Path
-
-                    workspace = Path(workspace_path)
-                    if workspace.exists():
-                        try:
-                            file_count = sum(1 for _ in workspace.rglob("*") if _.is_file())
-                        except Exception as e:
-                            tui_log(f"[TextualDisplay] {e}")
-
-                # Try to get task from original card data
-                task = sa_data.get("task", "")
-                if not task:
-                    # Try to find in existing card
-                    subagent_id = sa_data.get("subagent_id", sa_data.get("id", "unknown"))
-                    for existing in card.subagents:
-                        if existing.id == subagent_id:
-                            task = existing.task
+                subagent_id = str(sa_data.get("subagent_id") or sa_data.get("id") or "")
+                existing = None
+                if subagent_id:
+                    for candidate in card.subagents:
+                        if candidate.id == subagent_id:
+                            existing = candidate
                             break
-
-                updated_subagents.append(
-                    SubagentDisplayData(
-                        id=sa_data.get("subagent_id", sa_data.get("id", "unknown")),
-                        task=task,
-                        status=display_status,
-                        progress_percent=progress,
-                        elapsed_seconds=elapsed,
-                        timeout_seconds=sa_data.get("timeout_seconds", 300),
-                        workspace_path=workspace_path,
-                        workspace_file_count=file_count,
-                        last_log_line=sa_data.get("error", "") if sa_data.get("error") else "",
-                        error=sa_data.get("error"),
-                        answer_preview=sa_data.get("answer", "")[:200] if sa_data.get("answer") else None,
-                        log_path=sa_data.get("log_path"),
-                    ),
-                )
+                updated_subagents.append(_build_subagent_display_data(sa_data, existing))
 
             if updated_subagents:
                 card.update_subagents(updated_subagents)
@@ -8086,32 +12101,13 @@ Type your question and press Enter to ask the agents.
             - spawn_subagents
             - spawn_subagent
             """
-            import json
-
-            from massgen.subagent.models import SubagentDisplayData
-
             # Check if tool name matches a subagent tool
             tool_name = tool_data.tool_name.lower()
             tui_log(f"_check_and_display_subagent_card: tool_name={tool_name}, is_subagent={self._is_subagent_tool(tool_name)}")
             if not self._is_subagent_tool(tool_name):
                 return
 
-            # Try to parse the result as JSON to extract spawned subagents
-            result = tool_data.result_full
-            if not result:
-                return
-
-            try:
-                result_data = json.loads(result)
-            except (json.JSONDecodeError, TypeError):
-                return
-
-            if not isinstance(result_data, dict):
-                return
-
-            # Extract spawned subagents list
-            # The spawn_subagents tool returns results in "results" key
-            spawned = result_data.get("results", result_data.get("spawned_subagents", result_data.get("subagents", [])))
+            _, spawned = _extract_spawned_subagents(tool_data.result_full)
             tui_log(f"_check_and_display_subagent_card: found {len(spawned) if spawned else 0} spawned subagents")
             if not spawned:
                 return
@@ -8119,52 +12115,7 @@ Type your question and press Enter to ask the agents.
             # Create SubagentDisplayData for each spawned subagent
             subagents = []
             for sa_data in spawned:
-                # Map status from result to our display status
-                raw_status = sa_data.get("status", "running")
-                if raw_status == "completed":
-                    display_status = "completed"
-                    progress = 100
-                elif raw_status == "completed_but_timeout":
-                    display_status = "timeout"
-                    progress = sa_data.get("completion_percentage", 100)
-                elif raw_status == "failed":
-                    display_status = "failed"
-                    progress = 0
-                else:
-                    display_status = "running"
-                    progress = 0
-
-                elapsed = sa_data.get("execution_time_seconds", 0.0)
-
-                # Count files in workspace if it exists
-                workspace_path = sa_data.get("workspace", "")
-                file_count = 0
-                if workspace_path:
-                    from pathlib import Path
-
-                    workspace = Path(workspace_path)
-                    if workspace.exists():
-                        try:
-                            file_count = sum(1 for _ in workspace.rglob("*") if _.is_file())
-                        except Exception as e:
-                            tui_log(f"[TextualDisplay] {e}")
-
-                subagents.append(
-                    SubagentDisplayData(
-                        id=sa_data.get("subagent_id", sa_data.get("id", "unknown")),
-                        task=sa_data.get("task", ""),  # May be empty if not in result
-                        status=display_status,
-                        progress_percent=progress,
-                        elapsed_seconds=elapsed,
-                        timeout_seconds=sa_data.get("timeout_seconds", 300),
-                        workspace_path=workspace_path,
-                        workspace_file_count=file_count,
-                        last_log_line=sa_data.get("error", "") if sa_data.get("error") else "",
-                        error=sa_data.get("error"),
-                        answer_preview=sa_data.get("answer", "")[:200] if sa_data.get("answer") else None,
-                        log_path=sa_data.get("log_path"),
-                    ),
-                )
+                subagents.append(_build_subagent_display_data(sa_data))
 
             if not subagents:
                 return
@@ -8768,6 +12719,14 @@ Type your question and press Enter to ask the agents.
             except Exception:
                 return 0
 
+        def _get_running_tools_count(self) -> int:
+            """Get count of running/background tools for this agent."""
+            try:
+                timeline = self.query_one(f"#{self._timeline_section_id}", TimelineSection)
+                return timeline.get_running_tools_count()
+            except Exception:
+                return 0
+
         def _get_background_tools(self) -> list:
             """Get list of background/async operations for this agent."""
             try:
@@ -8775,6 +12734,21 @@ Type your question and press Enter to ask the agents.
                 return timeline.get_background_tools()
             except Exception:
                 return []
+
+        def _get_background_tool_history(self) -> list:
+            """Get background job history (active + recent terminal statuses)."""
+            try:
+                timeline = self.query_one(f"#{self._timeline_section_id}", TimelineSection)
+                return timeline.get_background_tool_history()
+            except Exception:
+                return []
+
+        def _update_running_tools_count(self) -> None:
+            """Delegate running/background tool counter refresh to the app."""
+            app = self.app
+            updater = getattr(app, "_update_running_tools_count", None)
+            if callable(updater):
+                updater()
 
         def _header_text(self) -> str:
             """Compose full header text (for compatibility)."""

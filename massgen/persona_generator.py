@@ -7,21 +7,23 @@ diversity without requiring users to manually craft different system messages.
 """
 
 import json
+import os
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional
 
 from loguru import logger
 
 from massgen.structured_logging import log_persona_generation, trace_persona_generation
 
-# Template for softening perspectives after agents see other solutions
+# Template for easing persona strength after agents see peer solutions
 SOFTENED_PERSPECTIVE_TEMPLATE = """Your initial perspective was:
 {persona_text}
 
-Now that you've seen other solutions, evaluate ALL approaches objectively on their merits.
-The best solution may combine ideas from multiple approaches - don't defend your original
-perspective, seek the genuinely best outcome."""
+Now that you've seen peer solutions, treat your perspective as a preference, not a position
+to defend. Keep full end-to-end coverage of the task, evaluate ALL approaches objectively,
+and synthesize the strongest ideas into the best overall answer."""
 
 
 @dataclass
@@ -39,7 +41,7 @@ class GeneratedPersona:
     attributes: Dict[str, str]
 
     def get_softened_text(self) -> str:
-        """Get the softened perspective for convergence phase."""
+        """Get the eased persona text after peer answers are visible."""
         return SOFTENED_PERSPECTIVE_TEMPLATE.format(persona_text=self.persona_text)
 
 
@@ -48,6 +50,7 @@ class DiversityMode:
 
     PERSPECTIVE = "perspective"  # Different values/priorities, same problem
     IMPLEMENTATION = "implementation"  # Different solution types/interpretations
+    METHODOLOGY = "methodology"  # Different working approaches, same problem
 
 
 @dataclass
@@ -59,6 +62,7 @@ class PersonaGeneratorConfig:
         diversity_mode: Type of diversity to generate:
             - "perspective": Different values/priorities (what to optimize for)
             - "implementation": Different solution types/interpretations (what kind of solution)
+            - "methodology": Different working approaches (how to tackle the work)
         persona_guidelines: Optional custom guidelines for persona generation
         persist_across_turns: If True, reuse personas across turns in multi-turn sessions.
             If False (default), generate fresh personas each turn.
@@ -71,7 +75,8 @@ class PersonaGeneratorConfig:
 
     def __post_init__(self):
         # Validate diversity_mode
-        if self.diversity_mode not in (DiversityMode.PERSPECTIVE, DiversityMode.IMPLEMENTATION):
+        valid_modes = (DiversityMode.PERSPECTIVE, DiversityMode.IMPLEMENTATION, DiversityMode.METHODOLOGY)
+        if self.diversity_mode not in valid_modes:
             self.diversity_mode = DiversityMode.PERSPECTIVE
 
 
@@ -116,6 +121,7 @@ class PersonaGenerator:
         """
         self.guidelines = guidelines
         self.diversity_mode = diversity_mode
+        self.last_generation_source = "unknown"
 
     async def generate_personas(
         self,
@@ -531,6 +537,9 @@ Generate personas now:"""
         Returns:
             Dictionary mapping agent_id to GeneratedPersona with default personas
         """
+        if self.diversity_mode == DiversityMode.METHODOLOGY:
+            return self._generate_methodology_fallback_personas(agent_ids)
+
         fallback_templates = [
             (
                 "analytical",
@@ -570,6 +579,53 @@ Generate personas now:"""
 
         return personas
 
+    def _generate_methodology_fallback_personas(self, agent_ids: List[str]) -> Dict[str, GeneratedPersona]:
+        """Generate fallback personas for methodology mode (different working approaches)."""
+        fallback_templates = [
+            (
+                "top-down",
+                "Start by sketching the full structure and architecture before writing any details. Work from the big picture down to"
+                " specifics, ensuring everything fits together before diving deep into any one part.",
+            ),
+            (
+                "risk-first",
+                "Identify the hardest, riskiest, or most uncertain part of the task and tackle it first. Get that working before"
+                " building anything else — if the hard part doesn't work, everything else is wasted effort.",
+            ),
+            (
+                "iterative",
+                "Begin with the simplest complete version that could possibly work, then improve it in passes. Each iteration should"
+                " produce something functional — layer on sophistication gradually rather than trying to get everything right the"
+                " first time.",
+            ),
+            (
+                "example-driven",
+                "Start from concrete examples of what the desired output should look like. Work backwards from those examples to"
+                " figure out what's needed, letting the concrete cases drive the design rather than abstract planning.",
+            ),
+            (
+                "foundation-first",
+                "Build the solid foundational infrastructure first using proven patterns and reliable approaches. Only innovate or"
+                " experiment once the base is rock-solid — creativity on a strong foundation beats ambitious ideas on a shaky one.",
+            ),
+        ]
+
+        personas = {}
+        for i, agent_id in enumerate(agent_ids):
+            style, text = fallback_templates[i % len(fallback_templates)]
+            personas[agent_id] = GeneratedPersona(
+                agent_id=agent_id,
+                persona_text=text,
+                attributes={
+                    "thinking_style": style,
+                    "focus_area": "general",
+                    "communication": "balanced",
+                },
+            )
+            logger.debug(f"Using fallback methodology persona for {agent_id}: {style}")
+
+        return personas
+
     # =========================================================================
     # Subagent-based persona generation (uses MassGen coordination)
     # =========================================================================
@@ -583,6 +639,7 @@ Generate personas now:"""
         parent_workspace: str,
         orchestrator_id: str,
         log_directory: Optional[str] = None,
+        on_subagent_started: Optional[Callable[[str, str, int, Callable[[str], Optional[Any]], Optional[str]], None]] = None,
     ) -> Dict[str, GeneratedPersona]:
         """Generate all personas via a single subagent call.
 
@@ -611,6 +668,20 @@ Generate personas now:"""
 
         logger.info(f"Generating personas via subagent for {len(agent_ids)} agents")
 
+        # Build a dedicated workspace with CONTEXT.md (required by SubagentManager).
+        base_workspace = parent_workspace or os.getcwd()
+        persona_workspace = os.path.join(base_workspace, ".persona_generation")
+        try:
+            os.makedirs(persona_workspace, exist_ok=True)
+            context_md = os.path.join(persona_workspace, "CONTEXT.md")
+            with open(context_md, "w", encoding="utf-8") as f:
+                f.write(
+                    "# Persona Generation Context\n\n" f"Task:\n{task}\n\n" f"Agents:\n{', '.join(agent_ids)}\n\n" "Goal: generate diverse, high-quality personas for each agent in personas.json.\n",
+                )
+        except Exception as e:
+            logger.warning(f"[PersonaGenerator] Failed to prepare dedicated persona workspace: {e}")
+            persona_workspace = base_workspace
+
         try:
             from massgen.subagent.manager import SubagentManager
             from massgen.subagent.models import SubagentOrchestratorConfig
@@ -629,7 +700,7 @@ Generate personas now:"""
             )
 
             manager = SubagentManager(
-                parent_workspace=parent_workspace,
+                parent_workspace=persona_workspace,
                 parent_agent_id="persona_generator",
                 orchestrator_id=orchestrator_id,
                 parent_agent_configs=simplified_configs,
@@ -639,15 +710,35 @@ Generate personas now:"""
                 log_directory=log_directory,
             )
 
+            def _status_callback(subagent_id: str) -> Optional[Any]:
+                try:
+                    return manager.get_subagent_display_data(subagent_id)
+                except Exception:
+                    return None
+
             # Build the prompt asking for ALL personas at once
             prompt = self._build_subagent_personas_prompt(agent_ids, task, existing_system_messages)
+
+            if on_subagent_started:
+                try:
+                    subagent_log_path = None
+                    if log_directory:
+                        subagent_log_path = str(Path(log_directory) / "subagents" / "persona_generation")
+                    on_subagent_started(
+                        "persona_generation",
+                        prompt,
+                        300,
+                        _status_callback,
+                        subagent_log_path,
+                    )
+                except Exception:
+                    pass
 
             # Execute single subagent
             result = await manager.spawn_subagent(
                 task=prompt,
                 subagent_id="persona_generation",
                 timeout_seconds=300,
-                context=f"Generate diverse personas for {len(agent_ids)} agents",
             )
 
             # Check for output files regardless of success status
@@ -655,6 +746,7 @@ Generate personas now:"""
             if log_directory:
                 personas = self._find_personas_json(log_directory, agent_ids)
                 if personas:
+                    self.last_generation_source = "subagent"
                     if result.success:
                         logger.info(f"Successfully loaded {len(personas)} personas from personas.json")
                     else:
@@ -667,6 +759,7 @@ Generate personas now:"""
             if result.answer:
                 personas = self._parse_response(result.answer, agent_ids)
                 if personas:
+                    self.last_generation_source = "subagent"
                     logger.info(f"Successfully parsed {len(personas)} personas from answer")
                     return personas
 
@@ -674,11 +767,13 @@ Generate personas now:"""
                 logger.warning(f"Persona subagent failed: {result.error}, using fallback")
             else:
                 logger.warning("No valid persona output found, using fallback")
+            self.last_generation_source = "fallback"
             return self._generate_fallback_personas(agent_ids)
 
         except Exception as e:
             logger.error(f"Failed to generate personas via subagent: {e}")
             logger.info("Using fallback personas")
+            self.last_generation_source = "fallback"
             return self._generate_fallback_personas(agent_ids)
 
     def _create_simplified_agent_configs(
@@ -759,6 +854,14 @@ Generate personas now:"""
                 agent_ids_json,
                 guidelines_section,
             )
+        elif self.diversity_mode == DiversityMode.METHODOLOGY:
+            return self._build_methodology_diversity_prompt(
+                agent_ids,
+                task,
+                agents_list,
+                agent_ids_json,
+                guidelines_section,
+            )
         else:
             return self._build_perspective_diversity_prompt(
                 agent_ids,
@@ -811,6 +914,8 @@ Examples of perspectives (do NOT use these literally - create ones appropriate f
 4. Do NOT tell them HOW to work - just WHAT to optimize for
 5. Each agent must solve the ENTIRE task - perspectives differ, scope does not
 6. If agent has existing instructions, add perspective without changing their workflow
+7. Each persona must explicitly reinforce complete end-to-end delivery quality
+8. Never assign a narrow role (e.g., "only testing" or "only frontend")
 
 ## Output Format
 IMPORTANT: Write the JSON to a file called `personas.json` in your workspace.
@@ -874,6 +979,8 @@ Examples for a "create a website" task (do NOT use these literally):
 4. Do NOT tell them implementation steps - just the vision/direction
 5. Each agent must solve the ENTIRE task - interpretations differ, completeness does not
 6. If agent has existing instructions, add direction without changing their workflow
+7. Each persona must explicitly reinforce complete end-to-end delivery quality
+8. Never assign a narrow role (e.g., "only testing" or "only frontend")
 
 ## Output Format
 IMPORTANT: Write the JSON to a file called `personas.json` in your workspace.
@@ -883,6 +990,76 @@ The JSON must have this structure:
     "personas": {{
         "<agent_id>": {{
             "persona_text": "Solution direction statement...",
+            "attributes": {{
+                "approach_summary": "2-3 word summary"
+            }}
+        }}
+    }}
+}}
+
+Agent IDs: {agent_ids_json}
+
+Write personas.json now."""
+
+    def _build_methodology_diversity_prompt(
+        self,
+        agent_ids: List[str],
+        task: str,
+        agents_list: str,
+        agent_ids_json: str,
+        guidelines_section: str,
+    ) -> str:
+        """Build prompt for methodology-based diversity (different working approaches)."""
+        return f"""You are assigning different WORKING APPROACHES to {len(agent_ids)} AI agents who will work on a task in parallel.
+
+## Task
+{task}
+
+## Agents
+{agents_list}
+{guidelines_section}
+## Your Goal
+Give each agent a genuinely different METHODOLOGY for how they tackle the work.
+The value of multiple agents is that they approach the same problem in fundamentally different
+ways — different processes, different starting points, different ways of structuring their work.
+This naturally produces different solutions even when agents have the same goal.
+
+## What Makes Good Methodology Diversity
+
+Think about HOW each agent works, not WHAT they optimize for or WHAT they build:
+- Where do they start? (big picture first? hardest problem first? simplest prototype first?)
+- How do they structure their process? (top-down? bottom-up? inside-out?)
+- What do they do when stuck? (experiment? analyze? simplify? reframe?)
+- What's their relationship to risk? (bold experiments? proven patterns? defensive builds?)
+
+Examples (do NOT use these literally - create approaches appropriate for the task):
+- "Start with the hardest, riskiest piece first. Get that working, then build everything else around it."
+- "Begin with a complete but minimal version, then iteratively layer on sophistication."
+- "Work top-down: sketch the full architecture first, then fill in each component."
+- "Start from concrete examples of the desired output, then reverse-engineer the solution."
+- "Build the foundational infrastructure with proven patterns first, then innovate on top."
+
+The approaches should be different enough that agents will naturally produce different solutions
+even if given the same task and the same goals.
+
+## Requirements
+1. Keep personas concise (3-5 sentences)
+2. Focus on HOW to approach the work, not WHAT to optimize for or WHAT kind of solution
+3. Do NOT prescribe specific technologies, file structures, or code patterns
+4. Do NOT tell them what to value - tell them how to work
+5. Each agent must solve the ENTIRE task - approaches differ, scope does not
+6. If agent has existing instructions, add working approach without changing their workflow
+7. Each persona must explicitly reinforce complete end-to-end delivery quality
+8. Never assign a narrow role (e.g., "only testing" or "only frontend")
+
+## Output Format
+IMPORTANT: Write the JSON to a file called `personas.json` in your workspace.
+
+The JSON must have this structure:
+{{
+    "personas": {{
+        "<agent_id>": {{
+            "persona_text": "Working approach statement...",
             "attributes": {{
                 "approach_summary": "2-3 word summary"
             }}

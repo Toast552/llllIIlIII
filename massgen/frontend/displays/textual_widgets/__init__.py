@@ -7,6 +7,9 @@ This module provides reusable Textual widgets for the production TUI interface.
 
 from .agent_status_ribbon import (
     AgentStatusRibbon,
+    BackgroundTasksClicked,
+    BackgroundTasksLabel,
+    ContextPathsClicked,
     DropdownItem,
     RoundSelected,
     RoundSelector,
@@ -32,20 +35,33 @@ from .injection_card import InjectionSubCard
 from .mode_bar import (
     ModeBar,
     ModeChanged,
+    ModeHelpClicked,
     ModeToggle,
     OverrideRequested,
     PlanConfigChanged,
     PlanSettingsClicked,
+    SkillsClicked,
+    SubtasksClicked,
 )
 from .multi_line_input import MultiLineInput
 from .path_suggestion import PathSuggestion, PathSuggestionDropdown
 from .phase_indicator_bar import PhaseIndicatorBar
 from .plan_approval_modal import PlanApprovalModal, PlanApprovalResult
 from .plan_options import (
+    AnalysisProfileChanged,
+    AnalysisSkillLifecycleChanged,
+    AnalysisTargetChanged,
+    AnalysisTargetTypeChanged,
     BroadcastModeChanged,
+    ExecuteAutoContinueChanged,
+    ExecutePrefillRequested,
+    ExecuteRefinementModeChanged,
+    PlanChunkTargetChanged,
     PlanDepthChanged,
     PlanOptionsPopover,
     PlanSelected,
+    PlanStepTargetChanged,
+    ViewAnalysisRequested,
     ViewPlanRequested,
 )
 from .queued_input_banner import QueuedInputBanner
@@ -77,15 +93,28 @@ __all__ = [
     "ModeBar",
     "ModeToggle",
     "ModeChanged",
+    "ModeHelpClicked",
     "OverrideRequested",
     "PlanConfigChanged",
     "PlanSettingsClicked",
+    "SkillsClicked",
+    "SubtasksClicked",
     # Plan options popover
     "PlanOptionsPopover",
     "PlanSelected",
     "PlanDepthChanged",
+    "PlanStepTargetChanged",
+    "PlanChunkTargetChanged",
     "BroadcastModeChanged",
     "ViewPlanRequested",
+    "ExecuteAutoContinueChanged",
+    "ExecuteRefinementModeChanged",
+    "ExecutePrefillRequested",
+    "AnalysisProfileChanged",
+    "AnalysisSkillLifecycleChanged",
+    "AnalysisTargetChanged",
+    "AnalysisTargetTypeChanged",
+    "ViewAnalysisRequested",
     # Tab bar
     "AgentTab",
     "AgentTabBar",
@@ -93,6 +122,9 @@ __all__ = [
     "SessionInfoClicked",
     # Agent status ribbon
     "AgentStatusRibbon",
+    "BackgroundTasksClicked",
+    "BackgroundTasksLabel",
+    "ContextPathsClicked",
     "DropdownItem",
     "RoundSelected",
     "RoundSelector",

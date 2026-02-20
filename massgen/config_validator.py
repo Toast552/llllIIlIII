@@ -139,10 +139,36 @@ class ConfigValidator:
     VALID_DISPLAY_TYPES = {"rich_terminal", "simple", "textual_terminal"}
 
     # Valid voting sensitivity levels
-    VALID_VOTING_SENSITIVITY = {"lenient", "balanced", "strict"}
+    VALID_VOTING_SENSITIVITY = {
+        "lenient",
+        "balanced",
+        "strict",
+        "roi",
+        "roi_conservative",
+        "roi_balanced",
+        "roi_aggressive",
+        "sequential",
+        "adversarial",
+        "consistency",
+        "diversity",
+        "reflective",
+        "checklist",
+        "checklist_scored",
+        "checklist_gated",
+    }
 
     # Valid answer novelty requirements
     VALID_ANSWER_NOVELTY = {"lenient", "balanced", "strict"}
+
+    # Valid write modes for isolated write contexts
+    VALID_WRITE_MODES = {"auto", "worktree", "isolated", "legacy"}
+    VALID_DRIFT_CONFLICT_POLICIES = {"skip", "prefer_presenter", "fail"}
+    VALID_NOVELTY_INJECTION = {"none", "gentle", "moderate", "aggressive"}
+    VALID_SUBAGENT_RUNTIME_MODES = {"isolated", "inherited"}
+    VALID_SUBAGENT_RUNTIME_FALLBACK_MODES = {"inherited"}
+
+    # Valid gap report modes
+    VALID_GAP_REPORT_MODES = {"changedoc", "separate", "none"}
 
     def __init__(self):
         """Initialize the validator."""
@@ -363,6 +389,16 @@ class ConfigValidator:
                         f"Invalid voting_sensitivity: '{voting_sensitivity}'",
                         f"{agent_location}.voting_sensitivity",
                         f"Use one of: {valid_values}",
+                    )
+
+            # Validate optional field: subtask (decomposition mode)
+            if "subtask" in agent_config:
+                subtask = agent_config["subtask"]
+                if not isinstance(subtask, str):
+                    result.add_error(
+                        f"Agent 'subtask' must be a string, got {type(subtask).__name__}",
+                        f"{agent_location}.subtask",
+                        "Use a string describing the agent's subtask",
                     )
 
     def _validate_backend(self, backend_config: Dict[str, Any], location: str, result: ValidationResult) -> None:
@@ -736,6 +772,27 @@ class ConfigValidator:
             )
             return
 
+        # Validate coordination_mode if present
+        if "coordination_mode" in orchestrator_config:
+            coordination_mode = orchestrator_config["coordination_mode"]
+            valid_modes = ["voting", "decomposition"]
+            if coordination_mode not in valid_modes:
+                result.add_error(
+                    f"Invalid coordination_mode: '{coordination_mode}'",
+                    f"{location}.coordination_mode",
+                    f"Use one of: {', '.join(valid_modes)}",
+                )
+
+        # Validate presenter_agent if present
+        if "presenter_agent" in orchestrator_config:
+            presenter = orchestrator_config["presenter_agent"]
+            if not isinstance(presenter, str):
+                result.add_error(
+                    f"'presenter_agent' must be a string, got {type(presenter).__name__}",
+                    f"{location}.presenter_agent",
+                    "Use an agent ID string like 'integrator'",
+                )
+
         # Validate context_paths if present
         if "context_paths" in orchestrator_config:
             context_paths = orchestrator_config["context_paths"]
@@ -784,7 +841,7 @@ class ConfigValidator:
                 )
             else:
                 # Validate boolean fields
-                boolean_fields = ["enable_planning_mode", "use_two_tier_workspace"]
+                boolean_fields = ["enable_planning_mode", "use_two_tier_workspace", "enable_changedoc"]
                 for field_name in boolean_fields:
                     if field_name in coordination:
                         value = coordination[field_name]
@@ -794,6 +851,20 @@ class ConfigValidator:
                                 f"{location}.coordination.{field_name}",
                                 "Use 'true' or 'false'",
                             )
+
+                # Deprecation warning for use_two_tier_workspace
+                if coordination.get("use_two_tier_workspace"):
+                    write_mode = coordination.get("write_mode")
+                    if write_mode:
+                        result.add_warning(
+                            "'use_two_tier_workspace' is deprecated and ignored when 'write_mode' is set. " "Remove 'use_two_tier_workspace' from your config.",
+                            f"{location}.coordination.use_two_tier_workspace",
+                        )
+                    else:
+                        result.add_warning(
+                            "'use_two_tier_workspace' is deprecated. " "Migrate to 'write_mode: auto' for the same functionality with git worktree isolation.",
+                            f"{location}.coordination.use_two_tier_workspace",
+                        )
 
                 # Validate integer fields
                 if "max_orchestration_restarts" in coordination:
@@ -805,45 +876,72 @@ class ConfigValidator:
                             "Use a value like 0, 1, 2, etc.",
                         )
 
-                # Validate async_subagents if present
+                # Hard-break rename: async_subagents -> background_subagents
                 if "async_subagents" in coordination:
-                    async_config = coordination["async_subagents"]
-                    if not isinstance(async_config, dict):
+                    result.add_error(
+                        "'async_subagents' has been removed. Use 'background_subagents' instead.",
+                        f"{location}.coordination.async_subagents",
+                        "Replace with background_subagents: {enabled: true, injection_strategy: 'tool_result'}",
+                    )
+
+                # Validate background_subagents if present
+                if "background_subagents" in coordination:
+                    background_config = coordination["background_subagents"]
+                    if not isinstance(background_config, dict):
                         result.add_error(
-                            f"'async_subagents' must be a dictionary, got {type(async_config).__name__}",
-                            f"{location}.coordination.async_subagents",
-                            "Use async_subagents: {enabled: true, injection_strategy: 'tool_result'}",
+                            f"'background_subagents' must be a dictionary, got {type(background_config).__name__}",
+                            f"{location}.coordination.background_subagents",
+                            "Use background_subagents: {enabled: true, injection_strategy: 'tool_result'}",
                         )
                     else:
                         # Validate enabled field
-                        if "enabled" in async_config:
-                            enabled = async_config["enabled"]
+                        if "enabled" in background_config:
+                            enabled = background_config["enabled"]
                             if not isinstance(enabled, bool):
                                 result.add_error(
-                                    f"'async_subagents.enabled' must be a boolean, got {type(enabled).__name__}",
-                                    f"{location}.coordination.async_subagents.enabled",
+                                    f"'background_subagents.enabled' must be a boolean, got {type(enabled).__name__}",
+                                    f"{location}.coordination.background_subagents.enabled",
                                     "Use 'true' or 'false'",
                                 )
 
                         # Validate injection_strategy field
-                        if "injection_strategy" in async_config:
-                            strategy = async_config["injection_strategy"]
+                        if "injection_strategy" in background_config:
+                            strategy = background_config["injection_strategy"]
                             valid_strategies = ["tool_result", "user_message"]
                             if strategy not in valid_strategies:
                                 result.add_error(
-                                    f"Invalid async_subagents.injection_strategy: '{strategy}'",
-                                    f"{location}.coordination.async_subagents.injection_strategy",
+                                    f"Invalid background_subagents.injection_strategy: '{strategy}'",
+                                    f"{location}.coordination.background_subagents.injection_strategy",
                                     f"Use one of: {', '.join(valid_strategies)}",
                                 )
                 # Validate plan_depth if present
                 if "plan_depth" in coordination:
                     value = coordination["plan_depth"]
-                    valid_depths = ["shallow", "medium", "deep"]
+                    valid_depths = ["dynamic", "shallow", "medium", "deep"]
                     if value not in valid_depths:
                         result.add_error(
                             f"'plan_depth' must be one of {valid_depths}, got '{value}'",
                             f"{location}.coordination.plan_depth",
-                            "Use 'shallow' (5-10 tasks), 'medium' (20-50 tasks), or 'deep' (100-200+ tasks)",
+                            "Use 'dynamic', 'shallow' (5-10 tasks), 'medium' (20-50 tasks), or 'deep' (100-200+ tasks)",
+                        )
+
+                # Validate optional explicit planning targets
+                if "plan_target_steps" in coordination:
+                    value = coordination["plan_target_steps"]
+                    if value is not None and (not isinstance(value, int) or value <= 0):
+                        result.add_error(
+                            "'plan_target_steps' must be a positive integer or null",
+                            f"{location}.coordination.plan_target_steps",
+                            "Use values like 20, 40, 80, or omit/null for dynamic sizing.",
+                        )
+
+                if "plan_target_chunks" in coordination:
+                    value = coordination["plan_target_chunks"]
+                    if value is not None and (not isinstance(value, int) or value <= 0):
+                        result.add_error(
+                            "'plan_target_chunks' must be a positive integer or null",
+                            f"{location}.coordination.plan_target_chunks",
+                            "Use values like 3, 5, 8, or omit/null for dynamic sizing.",
                         )
 
                 # Validate subagent_round_timeouts if present
@@ -879,6 +977,79 @@ class ConfigValidator:
                                             "Use a value like 300 (seconds)",
                                         )
 
+                # Validate subagent runtime isolation settings
+                runtime_mode = coordination.get("subagent_runtime_mode", "isolated")
+                if "subagent_runtime_mode" in coordination and runtime_mode not in self.VALID_SUBAGENT_RUNTIME_MODES:
+                    valid_values = ", ".join(sorted(self.VALID_SUBAGENT_RUNTIME_MODES))
+                    result.add_error(
+                        f"Invalid subagent_runtime_mode: '{runtime_mode}'",
+                        f"{location}.coordination.subagent_runtime_mode",
+                        f"Use one of: {valid_values}",
+                    )
+
+                if "subagent_runtime_fallback_mode" in coordination:
+                    fallback_mode = coordination["subagent_runtime_fallback_mode"]
+                    if fallback_mode is not None and fallback_mode not in self.VALID_SUBAGENT_RUNTIME_FALLBACK_MODES:
+                        valid_values = ", ".join(sorted(self.VALID_SUBAGENT_RUNTIME_FALLBACK_MODES))
+                        result.add_error(
+                            f"Invalid subagent_runtime_fallback_mode: '{fallback_mode}'",
+                            f"{location}.coordination.subagent_runtime_fallback_mode",
+                            f"Use one of: null, {valid_values}",
+                        )
+                    elif fallback_mode is not None and runtime_mode != "isolated":
+                        result.add_error(
+                            "subagent_runtime_fallback_mode can only be set when subagent_runtime_mode is 'isolated'",
+                            f"{location}.coordination.subagent_runtime_fallback_mode",
+                            "Set subagent_runtime_mode: isolated or remove subagent_runtime_fallback_mode",
+                        )
+
+                if "subagent_host_launch_prefix" in coordination:
+                    host_launch_prefix = coordination["subagent_host_launch_prefix"]
+                    if host_launch_prefix is not None:
+                        if not isinstance(host_launch_prefix, list):
+                            result.add_error(
+                                f"'subagent_host_launch_prefix' must be a list or null, got {type(host_launch_prefix).__name__}",
+                                f"{location}.coordination.subagent_host_launch_prefix",
+                                "Use a list of command tokens, for example ['host-launch', '--exec']",
+                            )
+                        else:
+                            for i, token in enumerate(host_launch_prefix):
+                                if not isinstance(token, str) or not token.strip():
+                                    result.add_error(
+                                        "'subagent_host_launch_prefix' entries must be non-empty strings",
+                                        f"{location}.coordination.subagent_host_launch_prefix[{i}]",
+                                        "Use command token strings only",
+                                    )
+
+                # Validate write_mode if present
+                if "write_mode" in coordination:
+                    write_mode = coordination["write_mode"]
+                    if write_mode not in self.VALID_WRITE_MODES:
+                        valid_values = ", ".join(sorted(self.VALID_WRITE_MODES))
+                        result.add_error(
+                            f"Invalid write_mode: '{write_mode}'",
+                            f"{location}.coordination.write_mode",
+                            f"Use one of: {valid_values}",
+                        )
+                if "drift_conflict_policy" in coordination:
+                    policy = coordination["drift_conflict_policy"]
+                    if policy not in self.VALID_DRIFT_CONFLICT_POLICIES:
+                        valid_values = ", ".join(sorted(self.VALID_DRIFT_CONFLICT_POLICIES))
+                        result.add_error(
+                            f"Invalid drift_conflict_policy: '{policy}'",
+                            f"{location}.coordination.drift_conflict_policy",
+                            f"Use one of: {valid_values}",
+                        )
+                if "novelty_injection" in coordination:
+                    novelty = coordination["novelty_injection"]
+                    if novelty not in self.VALID_NOVELTY_INJECTION:
+                        valid_values = ", ".join(sorted(self.VALID_NOVELTY_INJECTION))
+                        result.add_error(
+                            f"Invalid novelty_injection: '{novelty}'",
+                            f"{location}.coordination.novelty_injection",
+                            f"Use one of: {valid_values}",
+                        )
+
         # Validate voting_sensitivity if present
         if "voting_sensitivity" in orchestrator_config:
             voting_sensitivity = orchestrator_config["voting_sensitivity"]
@@ -899,6 +1070,67 @@ class ConfigValidator:
                     f"Invalid answer_novelty_requirement: '{answer_novelty}'",
                     f"{location}.answer_novelty_requirement",
                     f"Use one of: {valid_values}",
+                )
+
+        # Validate answer cap fields if present (null means unlimited)
+        for field_name in ("max_new_answers_per_agent", "max_new_answers_global"):
+            if field_name not in orchestrator_config:
+                continue
+            value = orchestrator_config[field_name]
+            if value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                result.add_error(
+                    f"'{field_name}' must be a positive integer or null, got {type(value).__name__}",
+                    f"{location}.{field_name}",
+                    "Use null (unlimited) or a positive integer like 1, 2, or 3",
+                )
+
+        if "checklist_require_gap_report" in orchestrator_config:
+            checklist_report_gate = orchestrator_config["checklist_require_gap_report"]
+            if not isinstance(checklist_report_gate, bool):
+                result.add_error(
+                    f"'checklist_require_gap_report' must be a boolean, got {type(checklist_report_gate).__name__}",
+                    f"{location}.checklist_require_gap_report",
+                    "Use true or false",
+                )
+
+        if "gap_report_mode" in orchestrator_config:
+            gap_mode = orchestrator_config["gap_report_mode"]
+            if gap_mode not in self.VALID_GAP_REPORT_MODES:
+                valid_values = ", ".join(sorted(self.VALID_GAP_REPORT_MODES))
+                result.add_error(
+                    f"Invalid gap_report_mode: '{gap_mode}'",
+                    f"{location}.gap_report_mode",
+                    f"Use one of: {valid_values}",
+                )
+
+        # Validate fairness controls if present
+        if "fairness_enabled" in orchestrator_config:
+            fairness_enabled = orchestrator_config["fairness_enabled"]
+            if not isinstance(fairness_enabled, bool):
+                result.add_error(
+                    f"'fairness_enabled' must be a boolean, got {type(fairness_enabled).__name__}",
+                    f"{location}.fairness_enabled",
+                    "Use true or false",
+                )
+
+        if "fairness_lead_cap_answers" in orchestrator_config:
+            lead_cap = orchestrator_config["fairness_lead_cap_answers"]
+            if isinstance(lead_cap, bool) or not isinstance(lead_cap, int) or lead_cap < 0:
+                result.add_error(
+                    f"'fairness_lead_cap_answers' must be a non-negative integer, got {type(lead_cap).__name__}",
+                    f"{location}.fairness_lead_cap_answers",
+                    "Use 0 (strict lockstep) or a positive integer like 1 or 2",
+                )
+
+        if "max_midstream_injections_per_round" in orchestrator_config:
+            injection_cap = orchestrator_config["max_midstream_injections_per_round"]
+            if isinstance(injection_cap, bool) or not isinstance(injection_cap, int) or injection_cap <= 0:
+                result.add_error(
+                    f"'max_midstream_injections_per_round' must be a positive integer, got {type(injection_cap).__name__}",
+                    f"{location}.max_midstream_injections_per_round",
+                    "Use a positive integer like 1 or 2",
                 )
 
         # Validate timeout if present
@@ -1207,3 +1439,45 @@ class ConfigValidator:
 
             # Warning: Check for deprecated fields (add as needed)
             # This is a placeholder for future deprecations
+
+        # Cross-validation: checklist_gated + changedoc
+        orchestrator_cfg = config.get("orchestrator", {})
+        if isinstance(orchestrator_cfg, dict):
+            voting_sens = orchestrator_cfg.get("voting_sensitivity", "")
+            coordination = orchestrator_cfg.get("coordination", {})
+            if isinstance(coordination, dict):
+                changedoc_enabled = coordination.get("enable_changedoc", True)
+                if voting_sens == "checklist_gated" and changedoc_enabled is False:
+                    result.add_warning(
+                        "checklist_gated voting works best with changedoc enabled for integrated quality assessment",
+                        "orchestrator.voting_sensitivity",
+                        "Set coordination.enable_changedoc: true or use gap_report_mode: 'separate'",
+                    )
+
+        # Cross-validation: decomposition mode
+        if isinstance(orchestrator_cfg, dict):
+            coordination_mode = orchestrator_cfg.get("coordination_mode")
+            if coordination_mode == "decomposition":
+                # Collect agent IDs
+                agent_ids = []
+                for agent_config in agents:
+                    if isinstance(agent_config, dict) and "id" in agent_config:
+                        agent_ids.append(agent_config["id"])
+
+                # Validate presenter_agent references a valid agent
+                presenter = orchestrator_cfg.get("presenter_agent")
+                if presenter and presenter not in agent_ids:
+                    result.add_error(
+                        f"presenter_agent '{presenter}' does not match any agent ID",
+                        "orchestrator.presenter_agent",
+                        f"Use one of: {', '.join(agent_ids)}",
+                    )
+
+                # Warn if no subtasks defined (runtime decomposition subagent will be used)
+                has_subtasks = any(isinstance(a, dict) and "subtask" in a for a in agents)
+                if not has_subtasks:
+                    result.add_warning(
+                        "No explicit 'subtask' fields defined on agents in decomposition mode",
+                        "orchestrator.coordination_mode",
+                        "MassGen will spawn a decomposition subagent at runtime to assign subtasks. Add 'subtask' per agent for deterministic assignments.",
+                    )

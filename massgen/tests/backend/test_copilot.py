@@ -2,24 +2,27 @@
 """Unit tests for CopilotBackend."""
 
 import asyncio
-
-# Mock copilot module for imports
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-mock_copilot = MagicMock()
-mock_copilot.types = MagicMock()
-mock_copilot.generated.session_events = MagicMock()
-sys.modules["copilot"] = mock_copilot
-sys.modules["github_copilot_sdk"] = mock_copilot  # Alias if needed
 
-from massgen.backend.copilot import CopilotBackend  # noqa: E402
+@pytest.fixture
+def mock_copilot_module():
+    """Provide a scoped fake copilot module so the import doesn't leak."""
+    mock_mod = MagicMock()
+    mock_mod.types = MagicMock()
+    mock_mod.generated.session_events = MagicMock()
+    with patch.dict(
+        sys.modules,
+        {"copilot": mock_mod, "github_copilot_sdk": mock_mod},
+    ):
+        yield mock_mod
 
 
 @pytest.fixture
-def mock_copilot_client():
+def mock_copilot_client(mock_copilot_module):
     with patch("massgen.backend.copilot.CopilotClient") as mock:
         client_instance = AsyncMock()
         mock.return_value = client_instance
@@ -28,6 +31,8 @@ def mock_copilot_client():
 
 @pytest.fixture
 def copilot_backend(mock_copilot_client):
+    from massgen.backend.copilot import CopilotBackend
+
     # Ensure SDK availability check passes
     with patch("massgen.backend.copilot.COPILOT_SDK_AVAILABLE", True):
         backend = CopilotBackend(api_key="dummy")

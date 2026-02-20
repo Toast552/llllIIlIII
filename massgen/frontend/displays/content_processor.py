@@ -29,6 +29,7 @@ from .content_handlers import (
     get_tool_category,
 )
 from .content_normalizer import ContentNormalizer, NormalizedContent
+from .shared.tui_debug import tui_log
 from .task_plan_support import is_planning_tool
 
 # Output types for ContentProcessor
@@ -207,6 +208,8 @@ class ContentProcessor:
             return self._handle_event_answer_submitted(event, round_number)
         elif event.event_type == EventType.VOTE:
             return self._handle_event_vote(event, round_number)
+        elif event.event_type == EventType.AGENT_STOPPED:
+            return self._handle_event_agent_stopped(event, round_number)
         elif event.event_type == EventType.WINNER_SELECTED:
             return self._handle_event_winner_selected(event, round_number)
         elif event.event_type == EventType.CONTEXT_RECEIVED:
@@ -241,6 +244,8 @@ class ContentProcessor:
         if ContentNormalizer.is_filtered_tool(tool_name) and not is_planning_tool(tool_name):
             return None
 
+        tui_log(f"[TOOL_EVENT] tool_name={tool_name} server_name={server_name} tool_type={'mcp' if server_name else 'tool'}")
+
         # Get category info for proper styling
         category_info = get_tool_category(tool_name)
         display_name = format_tool_display_name(tool_name)
@@ -267,6 +272,7 @@ class ContentProcessor:
             start_time=datetime.fromisoformat(event.timestamp) if event.timestamp else datetime.now(),
             args_summary=args_summary,
             args_full=args_str,
+            server_name=server_name,
         )
 
         # Store tool state for completion matching
@@ -299,6 +305,8 @@ class ContentProcessor:
         result_text = event.data.get("result", "")
         elapsed = event.data.get("elapsed_seconds", 0)
         is_error = event.data.get("is_error", False)
+        completion_status = str(event.data.get("status", "success")).lower()
+        async_id = event.data.get("async_id")
 
         # Filter out internal coordination tools (task_plan, etc.),
         # but keep planning tools so task plans can update.
@@ -314,24 +322,42 @@ class ContentProcessor:
         if not original_data:
             # No matching start - create minimal tool data
             tool_name = event.data.get("tool_name", "unknown")
+            server_name = event.data.get("server_name")
             category_info = get_tool_category(tool_name)
             display_name = format_tool_display_name(tool_name)
             original_data = ToolDisplayData(
                 tool_id=tool_id,
                 tool_name=tool_name,
                 display_name=display_name,
-                tool_type="tool",
+                tool_type="mcp" if server_name else "tool",
                 category=category_info["category"],
                 icon=category_info["icon"],
                 color=category_info["color"],
                 status="running",
                 start_time=datetime.now(),
+                server_name=server_name,
             )
 
         # Create result summary
         result_summary = result_text[:100] + "..." if len(result_text) > 100 else result_text
 
+        # Infer background metadata for generalized start_background_tool payloads
+        # where backends may emit status=success and encode job_id in JSON result.
+        completion_status, async_id = self._infer_background_tool_metadata(
+            tool_name=original_data.tool_name,
+            completion_status=completion_status,
+            async_id=async_id,
+            result_text=result_text,
+        )
+
         # Create updated ToolDisplayData
+        if completion_status == "background":
+            display_status = "background"
+        elif is_error or completion_status in {"error", "failed", "cancelled"}:
+            display_status = "error"
+        else:
+            display_status = "success"
+
         tool_data = ToolDisplayData(
             tool_id=tool_id,
             tool_name=original_data.tool_name,
@@ -340,15 +366,17 @@ class ContentProcessor:
             category=original_data.category,
             icon=original_data.icon,
             color=original_data.color,
-            status="error" if is_error else "success",
+            status=display_status,
             start_time=original_data.start_time,
             end_time=datetime.fromisoformat(event.timestamp) if event.timestamp else datetime.now(),
             args_summary=original_data.args_summary,
             args_full=original_data.args_full,
             result_summary=result_summary,
             result_full=result_text,
-            error=result_text if is_error else None,
+            error=result_text if display_status == "error" else None,
             elapsed_seconds=elapsed,
+            async_id=async_id,
+            server_name=original_data.server_name,
         )
 
         # Determine batch action for completion
@@ -365,6 +393,85 @@ class ContentProcessor:
             batch_id=batch_id,
             server_name=batch_server,
         )
+
+    @staticmethod
+    def _is_start_background_tool(tool_name: str) -> bool:
+        """Return True when tool_name represents the background start lifecycle tool."""
+        return str(tool_name or "").lower().endswith("start_background_tool")
+
+    @staticmethod
+    def _parse_text_payload(text: str) -> Optional[Union[Dict[str, Any], List[Any]]]:
+        """Parse a text payload that may be JSON or a Python repr."""
+        if not isinstance(text, str):
+            return None
+        trimmed = text.strip()
+        if not trimmed:
+            return None
+
+        for parser in (json.loads, ast.literal_eval):
+            try:
+                parsed = parser(trimmed)
+            except (json.JSONDecodeError, TypeError, ValueError, SyntaxError):
+                continue
+            if isinstance(parsed, (dict, list)):
+                return parsed
+        return None
+
+    @classmethod
+    def _parse_result_dict(cls, result_text: str) -> Optional[Dict[str, Any]]:
+        """Parse tool result text as a dict, unwrapping Claude SDK content blocks when needed."""
+        parsed = cls._parse_text_payload(result_text)
+        if isinstance(parsed, dict):
+            return parsed
+
+        if isinstance(parsed, list):
+            for item in parsed:
+                if not isinstance(item, dict):
+                    continue
+                for key in ("text", "data", "content"):
+                    nested_raw = item.get(key)
+                    if nested_raw is None:
+                        continue
+                    if isinstance(nested_raw, dict):
+                        return nested_raw
+                    nested = cls._parse_text_payload(str(nested_raw))
+                    if isinstance(nested, dict):
+                        return nested
+        return None
+
+    def _infer_background_tool_metadata(
+        self,
+        tool_name: str,
+        completion_status: str,
+        async_id: Optional[str],
+        result_text: str,
+    ) -> tuple[str, Optional[str]]:
+        """Infer background display metadata from lifecycle tool payloads."""
+        inferred_status = completion_status
+        inferred_async_id = async_id
+
+        if inferred_async_id and inferred_status == "success":
+            inferred_status = "background"
+            return inferred_status, inferred_async_id
+
+        payload = self._parse_result_dict(result_text)
+        if not payload:
+            return inferred_status, inferred_async_id
+
+        job_id = str(payload.get("job_id") or "").strip()
+        payload_status = str(payload.get("status") or "").lower().strip()
+        payload_success = payload.get("success")
+
+        if job_id:
+            inferred_async_id = job_id
+
+        should_mark_background = bool(job_id) and (
+            payload_status in {"running", "background", "pending", "queued"} or (self._is_start_background_tool(tool_name) and payload_success is True and not payload_status)
+        )
+        if should_mark_background and inferred_status == "success":
+            inferred_status = "background"
+
+        return inferred_status, inferred_async_id
 
     def _handle_event_thinking(
         self,
@@ -505,8 +612,8 @@ class ContentProcessor:
         """Handle workspace_action event."""
         action_type = event.data.get("action_type", "unknown")
         params = event.data.get("params")
-        # Suppress vote/new_answer actions (rendered via dedicated tool cards)
-        if action_type in {"vote", "new_answer"}:
+        # Suppress vote/new_answer/stop actions (rendered via dedicated tool cards)
+        if action_type in {"vote", "new_answer", "stop"}:
             return None
         label = f"workspace/{action_type}"
         if params:
@@ -560,6 +667,10 @@ class ContentProcessor:
     ) -> Optional[ContentOutput]:
         """Handle agent_restart event."""
         agent_round = event.data.get("restart_round", round_number)
+        try:
+            agent_round = max(1, int(agent_round))
+        except Exception:
+            agent_round = 1
 
         # Extract restart reason from event data
         restart_reason = event.data.get("restart_reason", "")
@@ -789,6 +900,55 @@ class ContentProcessor:
             args_summary=f'voted_for="{target}"',
             args_full=f'voted_for="{target}", reason="{reason}"',
             result_summary=f"Voted for {target}",
+            result_full=result_text,
+            elapsed_seconds=0.0,
+        )
+
+        self._batch_tracker.mark_content_arrived()
+        return ContentOutput(
+            output_type="tool",
+            round_number=event_round,
+            tool_data=tool_data,
+            batch_action="standalone",
+        )
+
+    def _handle_event_agent_stopped(
+        self,
+        event: MassGenEvent,
+        round_number: int,
+    ) -> Optional[ContentOutput]:
+        """Handle agent_stopped coordination event (decomposition mode).
+
+        Creates a workspace/stop tool card for the subagent TUI parity.
+        """
+        event_round = event.round_number if event.round_number > 0 else 1
+
+        agent_id = event.agent_id or "unknown"
+        summary = event.data.get("summary", "")
+        stop_status = event.data.get("status", "complete")
+
+        tool_id = f"stop_{agent_id}_{id(event)}"
+        now = datetime.fromisoformat(event.timestamp) if event.timestamp else datetime.now()
+
+        status_emoji = "\u2705" if stop_status == "complete" else "\u26a0\ufe0f"
+        result_text = f"Stopped ({stop_status})"
+        if summary:
+            result_text += f"\nSummary: {summary}"
+
+        tool_data = ToolDisplayData(
+            tool_id=tool_id,
+            tool_name="workspace/stop",
+            display_name="Workspace/Stop",
+            tool_type="workspace",
+            category="workspace",
+            icon=status_emoji,
+            color="#3fb950",
+            status="success",
+            start_time=now,
+            end_time=now,
+            args_summary=f'status="{stop_status}"',
+            args_full=f'status="{stop_status}", summary="{summary}"',
+            result_summary=f"Stopped ({stop_status})",
             result_full=result_text,
             elapsed_seconds=0.0,
         )

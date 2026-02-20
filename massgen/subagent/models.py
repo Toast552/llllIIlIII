@@ -20,6 +20,62 @@ SUBAGENT_DEFAULT_TIMEOUT = 300  # 5 minutes
 
 
 @dataclass
+class SpecializedSubagentConfig:
+    """
+    Configuration for a specialized subagent type discovered from disk.
+
+    Types are defined as directories containing SUBAGENT.md with YAML frontmatter.
+    Discovered at startup and listed in the system prompt so agents know to use them.
+
+    Attributes:
+        name: Type identifier (e.g., "evaluator", "explorer")
+        description: Short description of what this type does
+        system_prompt: Full system prompt for the subagent (body of SUBAGENT.md)
+        default_background: Whether to spawn in background mode by default
+        default_refine: Whether to enable refinement by default
+        skills: Skill names to pre-load for the subagent
+        mcp_servers: MCP server names to ensure are available
+        source_path: Path to the SUBAGENT.md file for provenance
+    """
+
+    name: str
+    description: str
+    system_prompt: str = ""
+    default_background: bool = False
+    default_refine: bool = False
+    skills: List[str] = field(default_factory=list)
+    mcp_servers: List[str] = field(default_factory=list)
+    source_path: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {
+            "name": self.name,
+            "description": self.description,
+            "system_prompt": self.system_prompt,
+            "default_background": self.default_background,
+            "default_refine": self.default_refine,
+            "skills": self.skills.copy(),
+            "mcp_servers": self.mcp_servers.copy(),
+            "source_path": self.source_path,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "SpecializedSubagentConfig":
+        """Create from dictionary."""
+        return cls(
+            name=data["name"],
+            description=data.get("description", ""),
+            system_prompt=data.get("system_prompt", ""),
+            default_background=data.get("default_background", False),
+            default_refine=data.get("default_refine", False),
+            skills=data.get("skills", []),
+            mcp_servers=data.get("mcp_servers", []),
+            source_path=data.get("source_path", ""),
+        )
+
+
+@dataclass
 class SubagentConfig:
     """
     Configuration for spawning a subagent.
@@ -31,6 +87,7 @@ class SubagentConfig:
         model: Optional model override (inherits from parent if None)
         timeout_seconds: Maximum execution time (clamped to configured min/max range)
         context_files: List of file paths the subagent can READ (read-only access enforced)
+        context_paths: Paths to mount read-only (files/dirs, "./" = parent workspace)
         use_docker: Whether to use Docker container (inherits from parent settings)
         system_prompt: Optional custom system prompt for the subagent
     """
@@ -41,6 +98,7 @@ class SubagentConfig:
     model: Optional[str] = None
     timeout_seconds: int = 300
     context_files: List[str] = field(default_factory=list)
+    context_paths: List[str] = field(default_factory=list)
     use_docker: bool = True
     system_prompt: Optional[str] = None
     created_at: datetime = field(default_factory=datetime.now)
@@ -55,6 +113,7 @@ class SubagentConfig:
         model: Optional[str] = None,
         timeout_seconds: int = SUBAGENT_DEFAULT_TIMEOUT,
         context_files: Optional[List[str]] = None,
+        context_paths: Optional[List[str]] = None,
         use_docker: bool = True,
         system_prompt: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
@@ -69,6 +128,7 @@ class SubagentConfig:
             model: Optional model override
             timeout_seconds: Execution timeout (clamped at manager level to configured range)
             context_files: File paths subagent can read (read-only, no write access)
+            context_paths: Paths to mount read-only (files/dirs, "./" = parent workspace)
             use_docker: Whether to use Docker
             system_prompt: Optional custom system prompt
             metadata: Additional metadata
@@ -84,6 +144,7 @@ class SubagentConfig:
             model=model,
             timeout_seconds=timeout_seconds,
             context_files=context_files or [],
+            context_paths=context_paths or [],
             use_docker=use_docker,
             system_prompt=system_prompt,
             metadata=metadata or {},
@@ -98,6 +159,7 @@ class SubagentConfig:
             "model": self.model,
             "timeout_seconds": self.timeout_seconds,
             "context_files": self.context_files.copy(),
+            "context_paths": self.context_paths.copy(),
             "use_docker": self.use_docker,
             "system_prompt": self.system_prompt,
             "created_at": self.created_at.isoformat(),
@@ -115,6 +177,7 @@ class SubagentConfig:
             model=data.get("model"),
             timeout_seconds=data.get("timeout_seconds", SUBAGENT_DEFAULT_TIMEOUT),
             context_files=data.get("context_files", []),
+            context_paths=data.get("context_paths", []),
             use_docker=data.get("use_docker", True),
             system_prompt=data.get("system_prompt"),
             created_at=datetime.fromisoformat(data["created_at"]) if "created_at" in data else datetime.now(),

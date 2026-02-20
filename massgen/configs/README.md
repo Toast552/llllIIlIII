@@ -227,7 +227,99 @@ Most configurations use environment variables for API keys:so
 
 ## Release History & Examples
 
-### v0.1.47 - Latest
+### v0.1.53 - Latest
+**New Features:** Background Tool Execution, Planning Task Verification, TUI Background Job Indicators
+
+**Key Features:**
+- **Background Tool Execution**: Non-blocking lifecycle tools (`start_background_tool`, `get_background_tool_status`, `get_background_tool_result`, `wait_for_background_tool`, `cancel_background_tool`, `list_background_tools`)
+- **Planning Task Verification**: Tasks require `verification` and `verification_method` by default; `--no-require-verification` to opt out
+- **TUI Background Job Indicators**: Agent status ribbon and background tasks modal with lifecycle controls
+- **Subagent Infrastructure**: Groundwork for Evaluator and Explorer subagent types via `SUBAGENT.md` frontmatter
+- **Tool Argument Normalization**: Consistent argument handling across backends
+
+**Try It:**
+```bash
+# Install or upgrade to v0.1.53
+pip install --upgrade massgen
+
+# Launch — background tools available with any multi-agent config
+uv run massgen
+
+# Multi-agent coordination with background tool execution
+uv run massgen --config @examples/tools/custom_tools/docker_with_background.yaml "Create a multi-page website. Include an AI-generated image you generate in the background while building the website"
+```
+
+### v0.1.52
+**New Features:** Dedicated Final Answer Modal, Substantive Gate, Novelty Injection, Agent Identity & Versioning
+
+**Key Features:**
+- **Dedicated Final Answer Modal**: Tabbed modal with Answer tab (markdown, post-eval, file list) and Workspace/Review Changes tab (diff review)
+- **Substantive Gate**: Quality gate preventing coordination from continuing with only incremental changes
+- **Novelty Injection**: Creative pressure injection when agents converge — levels: `none`, `gentle`, `moderate`, `aggressive`
+- **Agent Identity & Versioning**: Versioned answer labels (e.g., `agent1.2`) with `answer_label_mapping` for provenance tracking
+- **First Answer Non-Restart**: First answers no longer trigger automatic restarts on quality check failure
+
+### v0.1.51
+**New Features:** Change Documents (Changedoc), Changedoc-Anchored Evaluation, Checklist Gap Report, Drift Conflict Policy
+
+**Key Features:**
+- **Change Documents**: Decision journals in `tasks/changedoc.md` capturing decision provenance, rationale, and code traceability
+- **Changedoc-Anchored Evaluation**: 5 changedoc-specific checklist items with mandatory gap report
+- **Drift Conflict Policy**: `drift_conflict_policy: skip|prefer_presenter|fail` for safer change application
+- **Review Modal Improvements**: Multi-context, multi-file diff visualization with critique
+- **`--cwd-context` CLI Flag**: Inject CWD as context path (`ro`/`rw`)
+
+### v0.1.50
+**New Features:** Chunked Plan Execution, Skill Lifecycle Management, Iterative Planning Review
+
+**Key Features:**
+- **Chunked Plan Execution**: Plans divided into chunks and executed one at a time with progress checkpoints
+- **Iterative Planning Review**: New modal with Continue Planning / Quick Edit / Finalize Plan options
+- **Skill Lifecycle Management**: New lifecycle modes, skill organizer, `SKILL_REGISTRY.md`, previous-session skills
+- **Local Skills MCP**: New MCP tool for skill access in Docker/local execution
+- **Worktree Improvements**: Branch accumulation, cross-agent diff visibility, orphan cleanup
+- **Responsive TUI Mode Bar**: Adaptive layout with compact labels on narrow terminals
+
+**Try It:**
+```bash
+# Launch with chunked plan execution and skill lifecycle
+uv run massgen
+```
+
+> Press `Shift+Tab` then press the three dots above the input bar to see plan settings.
+
+### v0.1.49
+**New Features:** Log Analysis TUI Mode, Fairness Gate, Checklist Voting, Testing Infrastructure
+
+**Key Features:**
+- **Log Analysis in TUI**: New "Analyzing" mode in TUI mode bar for in-app run analysis with configurable profiles
+- **Fairness Gate**: Prevents fast agents from dominating coordination with configurable lead caps
+- **Checklist Voting**: Structured quality evaluation with binary pass/fail scoring via MCP server
+- **Skills Modal**: TUI modal for discovering and toggling skills in interactive mode
+- **Persona Easing in TUI**: Persona easing toggle now available in the TUI mode bar
+
+**Try It:**
+```bash
+# Launch and cycle to Analysis mode via the TUI mode bar
+uv run massgen
+```
+
+### v0.1.48
+**New Features:** Decomposition Mode, Worktree Isolation, Quickstart Docker Setup
+
+**Key Features:**
+- **Decomposition Mode**: New coordination mode that decomposes tasks into subtasks assigned to individual agents
+- **Worktree Isolation**: Git worktree-based isolation for agent file writes with review modal
+- **Quickstart Docker Setup**: Docker setup step in quickstart wizard with animated pull progress
+- **Stop Tool**: Agents can signal completion and exit workflows
+
+**Try It:**
+```bash
+# Launch the quickstart wizard and select Decomposition mode
+uv run massgen
+```
+
+### v0.1.47
 **New Features:** Codex Backend, TUI Theme Refactoring, Per-agent Voting Sensitivity
 
 **Key Features:**
@@ -333,10 +425,10 @@ uv run massgen --display textual \
 ```
 
 ### v0.1.41
-**New Features:** Async Subagent Execution, Subagent Round Timeouts, Extended Subagent Configuration
+**New Features:** Background Subagent Execution, Subagent Round Timeouts, Extended Subagent Configuration
 
 **Key Features:**
-- **Async Subagent Execution**: Spawn subagents with `async_=True` for non-blocking parallel work while parent continues
+- **Background Subagent Execution**: Spawn subagents with `background=True` for non-blocking parallel work while parent continues
 - **Poll for Completion**: Check subagent status and retrieve results when ready
 - **Subagent Round Timeouts**: Per-round timeout control with `subagent_round_timeouts` config section
 - **Extended Subagent Config**: `subagent_default_timeout`, `subagent_min_timeout`, `subagent_max_timeout`, `subagent_max_concurrent`
@@ -346,8 +438,8 @@ uv run massgen --display textual \
 # Install or upgrade
 pip install --upgrade massgen
 
-# Async subagent execution - parent continues while subagent works in background
-uv run massgen --display textual --config massgen/configs/features/async_subagent_example.yaml \
+# Background subagent execution - parent continues while subagent works in background
+uv run massgen --display textual --config massgen/configs/features/background_subagent_example.yaml \
   "Use one subagent to research the band Geese in the background while you create a creative website about them, including similar bands."
 ```
 
@@ -983,7 +1075,7 @@ uv run massgen --config massgen/configs/providers/gemini/gemini_3_pro.yaml \
 **Key Features:**
 - **Code-Based Tools (CodeAct Paradigm)**: Revolutionary tool integration via importable Python code, reducing token usage by 98%
 - **MCP Server Registry**: Auto-discovery and intelligent tool routing with on-demand loading
-- **Skills Installation System**: Cross-platform automated installer for openskills CLI, Anthropic skills, and Crawl4AI
+- **Skills Installation System**: Cross-platform automated installer for openskills CLI, Anthropic/OpenAI/Vercel skills, Agent Browser skill, and Crawl4AI
 - **NLIP Integration**: Advanced tool routing with Natural Language Interface Protocol across all backends
 - **Shared Tools Directory**: Tools generated once and shared across all agents to avoid duplication
 - **Auto-Discover Custom Tools**: Automatically discover and load all tools from `massgen/tool/` directory
@@ -996,7 +1088,7 @@ uv run massgen --config massgen/configs/providers/gemini/gemini_3_pro.yaml \
 pip install --upgrade massgen
 
 # Automated Skills Installation - cross-platform setup
-massgen --setup-skills  # Installs openskills CLI, Anthropic skills, and Crawl4AI
+massgen --setup-skills  # Installs openskills CLI, Anthropic/OpenAI/Vercel skills, Agent Browser skill, and Crawl4AI
 
 # Code-Based Tools with Auto-Discovery - demonstrates 98% context reduction
 # Prerequisites: Docker running, .env file with API keys (OPENAI_API_KEY, GOOGLE_API_KEY, etc.)

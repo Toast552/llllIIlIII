@@ -179,45 +179,9 @@ class DockerManager:
                     )
                 raise RuntimeError(f"Failed to pull Docker image '{self.image}': {e}")
 
-    def _load_env_file(self, env_file_path: str) -> Dict[str, str]:
-        """
-        Load environment variables from a .env file.
-
-        Automatically checks common locations in order:
-        1. ~/.massgen/.env (recommended global location)
-        2. The provided env_file_path (expanded)
-        3. ./.env (current directory fallback)
-
-        Args:
-            env_file_path: Path to .env file
-
-        Returns:
-            Dictionary of environment variables
-
-        Raises:
-            RuntimeError: If file cannot be read or parsed
-        """
+    def _parse_single_env_file(self, env_path: Path) -> Dict[str, str]:
+        """Parse a single .env file and return its key-value pairs."""
         env_vars = {}
-
-        # Check common locations in priority order
-        home_env = Path.home() / ".massgen" / ".env"
-        provided_path = Path(env_file_path).expanduser().resolve()
-        local_env = Path(".env").resolve()
-
-        # Determine which path to use
-        if home_env.exists():
-            env_path = home_env
-        elif provided_path.exists():
-            env_path = provided_path
-        elif local_env.exists():
-            env_path = local_env
-        else:
-            # No .env file found - this is OK (e.g., using Claude Code with CLI login)
-            logger.info("📄 [Docker] No .env file found - continuing without environment file")
-            return env_vars
-
-        logger.info(f"📄 [Docker] Loading environment variables from: {env_path}")
-
         try:
             with open(env_path, "r") as f:
                 for line_num, line in enumerate(f, 1):
@@ -240,13 +204,62 @@ class DockerManager:
 
                         env_vars[key] = value
                     else:
-                        logger.warning(f"⚠️ [Docker] Skipping invalid line {line_num} in {env_file_path}: {line}")
-
-            logger.info(f"    Loaded {len(env_vars)} environment variable(s)")
-            return env_vars
-
+                        logger.warning(f"⚠️ [Docker] Skipping invalid line {line_num} in {env_path}: {line}")
         except Exception as e:
-            raise RuntimeError(f"Failed to read environment file {env_file_path}: {e}")
+            raise RuntimeError(f"Failed to read environment file {env_path}: {e}")
+        return env_vars
+
+    def _load_env_file(self, env_file_path: str) -> Dict[str, str]:
+        """
+        Load environment variables from .env files.
+
+        Loads cumulatively from all locations that exist, with later files
+        overriding earlier ones:
+        1. ~/.massgen/.env (global defaults)
+        2. The provided env_file_path (expanded)
+        3. ./.env (current directory, highest priority)
+
+        Args:
+            env_file_path: Path to .env file
+
+        Returns:
+            Dictionary of environment variables
+
+        Raises:
+            RuntimeError: If a found file cannot be read or parsed
+        """
+        env_vars = {}
+
+        # Build deduplicated list of candidate paths (preserving order)
+        home_env = Path.home() / ".massgen" / ".env"
+        provided_path = Path(env_file_path).expanduser().resolve()
+        local_env = Path(".env").resolve()
+
+        seen = set()
+        candidates = []
+        for p in [home_env, provided_path, local_env]:
+            resolved = p.resolve()
+            if resolved not in seen:
+                seen.add(resolved)
+                candidates.append(resolved)
+
+        loaded_any = False
+        for env_path in candidates:
+            if env_path.exists():
+                logger.info(f"📄 [Docker] Loading environment variables from: {env_path}")
+                file_vars = self._parse_single_env_file(env_path)
+                logger.info(f"    Loaded {len(file_vars)} variable(s) from {env_path.name}")
+                env_vars.update(file_vars)
+                loaded_any = True
+
+        if not loaded_any:
+            # No .env file found - this is OK (e.g., using Claude Code with CLI login)
+            logger.info("📄 [Docker] No .env file found - continuing without environment file")
+
+        if loaded_any:
+            logger.info(f"    Total environment variables from .env files: {len(env_vars)}")
+
+        return env_vars
 
     def _build_environment(self) -> Dict[str, str]:
         """
@@ -264,7 +277,13 @@ class DockerManager:
                 # Filter to only specific vars if env_vars_from_file is specified
                 if self.env_vars_from_file:
                     filtered_env = {k: v for k, v in file_env.items() if k in self.env_vars_from_file}
+                    matched = [k for k in self.env_vars_from_file if k in file_env]
+                    missing = [k for k in self.env_vars_from_file if k not in file_env]
                     logger.info(f"    Filtered to {len(filtered_env)} of {len(file_env)} variables from .env file")
+                    logger.info(f"    Matched keys: {matched}")
+                    if missing:
+                        logger.warning(f"    Requested env vars not found in .env files: {missing}")
+                        logger.info(f"    Available keys in .env files: {sorted(file_env.keys())}")
                     env_vars.update(filtered_env)
                 else:
                     # Load all variables from file
@@ -498,6 +517,8 @@ class DockerManager:
         massgen_skills: Optional[List[str]] = None,
         shared_tools_directory: Optional[Path] = None,
         load_previous_session_skills: bool = False,
+        extra_mount_paths: Optional[List[tuple]] = None,
+        skills_writable: bool = False,
     ) -> Optional[Path]:
         """
         Create and start a persistent Docker container for an agent.
@@ -518,13 +539,16 @@ class DockerManager:
                           {host_path: {"bind": container_path, "mode": "ro"}}. When provided,
                           enables automatic visibility of all turn workspaces without container
                           recreation between turns.
-            skills_directory: Path to skills directory (e.g., .agent/skills) to mount read-only
+            skills_directory: Path to skills directory (e.g., .agent/skills) to mount
             massgen_skills: List of MassGen built-in skills to enable (optional)
             shared_tools_directory: Path to shared tools directory (servers/, custom_tools/, .mcp/) to mount read-only
             load_previous_session_skills: If True, include evolving skills from previous sessions
+            skills_writable: If True, mount the actual project skills directory with write access
+                instead of creating a read-only temp merged directory. Used during final presentation
+                so the agent can persist skill reorganization changes directly.
 
         Returns:
-            Path to temporary merged skills directory if skills are enabled, None otherwise
+            Path to temporary merged skills directory if skills are enabled (and not writable), None otherwise
 
         Raises:
             RuntimeError: If container creation fails
@@ -580,6 +604,9 @@ class DockerManager:
         env_vars["XDG_CACHE_HOME"] = workspace_cache
         env_vars["XDG_DATA_HOME"] = workspace_data
 
+        # Suppress FastMCP CLI banner for MCP servers running inside the container
+        env_vars["FASTMCP_SHOW_CLI_BANNER"] = "false"
+
         # Python tools
         env_vars["PIP_CACHE_DIR"] = f"{workspace_cache}/pip"
         env_vars["UV_CACHE_DIR"] = f"{workspace_cache}/uv"
@@ -599,6 +626,10 @@ class DockerManager:
 
         # Other common tools
         env_vars["GRADLE_USER_HOME"] = f"{workspace_data}/gradle"
+
+        # Playwright browsers are pre-installed in the image under /home/massgen/.cache.
+        # Keep this path fixed so runtime cache redirection does not trigger re-downloads.
+        env_vars["PLAYWRIGHT_BROWSERS_PATH"] = "/home/massgen/.cache/ms-playwright"
 
         if env_vars:
             logger.info(f"    Environment variables: {len(env_vars)} variable(s)")
@@ -653,9 +684,33 @@ class DockerManager:
         volumes[str(massgen_package_dir)] = {"bind": str(massgen_package_dir), "mode": "ro"}
         mount_info.append(f"      {massgen_package_dir} ← {massgen_package_dir} (ro, massgen package)")
 
-        # Create merged skills directory (user skills + massgen skills)
+        # Mount extra paths (e.g., worktree isolation paths)
+        if extra_mount_paths:
+            for host_path, container_path, mode in extra_mount_paths:
+                host_path_resolved = str(Path(host_path).resolve())
+                container_path_str = str(Path(container_path).resolve())
+                volumes[host_path_resolved] = {"bind": container_path_str, "mode": mode}
+                mount_info.append(f"      {host_path_resolved} ← {container_path_str} ({mode}, extra)")
+
+        # Mount skills directory
         # openskills expects skills in ~/.agent/skills
-        if skills_directory or massgen_skills:
+        container_skills_path = "/home/massgen/.agent/skills"
+
+        if skills_writable and skills_directory:
+            # Presentation mode: mount the actual project skills dir with write access
+            # so the agent can persist skill reorganization (create/delete/modify) directly.
+            # Built-in/home skills are NOT merged — the agent already analyzed them during
+            # coordination and has their content in its conversation context.
+            skills_path = Path(skills_directory).resolve()
+            if not skills_path.exists():
+                skills_path.mkdir(parents=True, exist_ok=True)
+                logger.info(f"[Docker] Created skills directory for write access: {skills_path}")
+            volumes[str(skills_path)] = {"bind": container_skills_path, "mode": "rw"}
+            mount_info.append(f"      {skills_path} → {container_skills_path} (rw, direct)")
+            logger.info(f"[Docker] Mounted skills directory with WRITE access: {skills_path} → {container_skills_path}")
+
+        elif skills_directory or massgen_skills:
+            # Normal mode: create a read-only temp merged directory with all skill sources
             import shutil
             import tempfile
 
@@ -729,7 +784,6 @@ class DockerManager:
                             logger.info(f"[Docker] Added previous session skill: {skill_name} from {source}")
 
             # Mount the temp merged directory to ~/.agent/skills
-            container_skills_path = "/home/massgen/.agent/skills"
             volumes[str(temp_skills_dir)] = {"bind": container_skills_path, "mode": "ro"}
             mount_info.append(f"      {temp_skills_dir} → {container_skills_path} (ro, merged)")
             logger.info(f"[Docker] Mounted merged skills directory: {temp_skills_dir} → {container_skills_path}")

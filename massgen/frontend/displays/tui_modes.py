@@ -6,13 +6,16 @@ and generates orchestrator overrides based on current mode settings.
 """
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Set
 
 if TYPE_CHECKING:
     from massgen.plan_storage import PlanSession
 
 # Type alias for plan depth
-PlanDepth = Literal["shallow", "medium", "deep"]
+PlanDepth = Literal["dynamic", "shallow", "medium", "deep"]
+AnalysisProfile = Literal["dev", "user"]
+AnalysisTarget = Literal["log", "skills"]
+SkillLifecycleMode = Literal["create_new", "create_or_update"]
 
 
 @dataclass
@@ -21,9 +24,17 @@ class PlanConfig:
 
     Attributes:
         depth: Plan granularity level
+            - "dynamic": planner chooses based on scope (default)
             - "shallow": 5-10 high-level tasks
-            - "medium": 20-50 tasks (default)
+            - "medium": 20-50 tasks
             - "deep": 100-200+ granular tasks
+        target_steps: Optional explicit target number of tasks (None = dynamic)
+        target_chunks: Optional explicit target number of chunks (default = 1, None = dynamic)
+        execute_auto_continue_chunks: If True, auto-continue to next chunk after completion.
+        execute_refinement_mode: Execute-time refinement mode:
+            - "inherit": Use mode-bar refinement toggle
+            - "on": Force refinement ON during execute turns
+            - "off": Force refinement OFF during execute turns
         auto_execute: If True, skip approval and auto-execute after planning
         broadcast: Broadcast mode for planning phase
             - "human": Agents can ask human questions (default)
@@ -31,18 +42,71 @@ class PlanConfig:
             - False: Fully autonomous, no questions
     """
 
-    depth: PlanDepth = "medium"
+    depth: PlanDepth = "dynamic"
+    target_steps: Optional[int] = None
+    target_chunks: Optional[int] = 1
+    execute_auto_continue_chunks: bool = True
+    execute_refinement_mode: Literal["inherit", "on", "off"] = "inherit"
     auto_execute: bool = False
     broadcast: Any = "human"  # "human" | "agents" | False
 
     def get_depth_description(self) -> str:
         """Get human-readable description of current depth."""
         descriptions = {
+            "dynamic": "scope-adaptive",
             "shallow": "5-10 tasks",
             "medium": "20-50 tasks",
             "deep": "100-200+ tasks",
         }
-        return descriptions.get(self.depth, "20-50 tasks")
+        return descriptions.get(self.depth, "scope-adaptive")
+
+
+@dataclass
+class AnalysisConfig:
+    """Configuration for log analysis mode behavior."""
+
+    # Analysis target:
+    # - "log": analyze a specific log session/turn (existing behavior)
+    # - "skills": analyze all installed skills for organization/merging/registry
+    target: AnalysisTarget = "log"
+
+    # Profile focus (used when target is "log"):
+    # - "dev": internal MassGen debugging/improvement focus
+    # - "user": reusable skill creation/refinement focus
+    profile: AnalysisProfile = "user"
+
+    # Selected analysis target. None means "auto-select current/latest".
+    selected_log_dir: Optional[str] = None
+    selected_turn: Optional[int] = None
+
+    # Session-only skill allowlist. None means "no filtering" (all discovered skills).
+    enabled_skill_names: Optional[List[str]] = None
+
+    # Include evolving skills discovered from previous sessions.
+    include_previous_session_skills: bool = False
+
+    # How newly discovered analysis skills are applied to project skills.
+    skill_lifecycle_mode: SkillLifecycleMode = "create_or_update"
+
+    # Pre-analysis snapshot for detecting new skills. Internal state only.
+    _pre_analysis_skill_dirs: Optional[Set[str]] = field(default=None, repr=False)
+
+    def get_enabled_skill_names(self) -> Optional[List[str]]:
+        """Return normalized enabled skill names, or None if unfiltered."""
+        if self.enabled_skill_names is None:
+            return None
+        seen: set[str] = set()
+        normalized: List[str] = []
+        for name in self.enabled_skill_names:
+            cleaned = (name or "").strip()
+            if not cleaned:
+                continue
+            key = cleaned.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(cleaned)
+        return normalized
 
 
 @dataclass
@@ -52,11 +116,12 @@ class TuiModeState:
     Manages state for:
     - Plan mode: normal → plan → execute workflow
     - Agent mode: single vs multi-agent
+    - Coordination mode: parallel voting vs decomposition subtasks
     - Refinement mode: enable/disable voting
     - Override state: human override of final answer selection
     """
 
-    # Plan mode: "normal" | "plan" | "plan_and_execute" | "execute"
+    # Plan mode: "normal" | "plan" | "plan_and_execute" | "execute" | "analysis"
     # - "normal": Standard mode, no planning
     # - "plan": Planning mode, will show approval before execute
     # - "plan_and_execute": Planning mode, auto-execute without approval
@@ -65,6 +130,16 @@ class TuiModeState:
     plan_session: Optional["PlanSession"] = None
     pending_plan_approval: bool = False
     plan_config: PlanConfig = field(default_factory=PlanConfig)
+    analysis_config: AnalysisConfig = field(default_factory=AnalysisConfig)
+    plan_revision: int = 0
+    planning_iteration_count: int = 0
+    planning_feedback_history: List[str] = field(default_factory=list)
+    last_planning_mode: str = "multi"  # "multi" | "single"
+    pending_planning_feedback: Optional[str] = None
+    pending_planning_mode: Optional[str] = None  # "multi" | "single"
+    quick_edit_prev_agent_mode: Optional[str] = None
+    quick_edit_prev_selected_agent: Optional[str] = None
+    quick_edit_restore_pending: bool = False
 
     # Selected plan ID for execution (None = use latest, "new" = create new)
     selected_plan_id: Optional[str] = None
@@ -79,6 +154,20 @@ class TuiModeState:
     # Agent mode: "multi" | "single"
     agent_mode: str = "multi"
     selected_single_agent: Optional[str] = None
+
+    # Coordination mode shown in TUI:
+    # - "parallel" -> orchestrator coordination_mode="voting"
+    # - "decomposition" -> orchestrator coordination_mode="decomposition"
+    coordination_mode: str = "parallel"
+    # Parallel persona generation toggle (off by default).
+    # When enabled (and coordination mode is parallel), runtime persona generation is used.
+    parallel_personas_enabled: bool = False
+    # Diversity mode for persona generation ("perspective", "implementation", "methodology").
+    persona_diversity_mode: str = "perspective"
+    # Set to True after the user explicitly changes the coordination toggle
+    coordination_mode_user_set: bool = False
+    # Optional per-agent subtask overrides for decomposition mode
+    decomposition_subtasks: Dict[str, str] = field(default_factory=dict)
 
     # Refinement mode: True = normal voting, False = disabled
     refinement_enabled: bool = True
@@ -115,6 +204,7 @@ class TuiModeState:
             Dictionary of config overrides to apply to the orchestrator.
 
         Behavior matrix:
+        - Coordination: parallel -> voting, decomposition -> decomposition
         - Single agent + refinement ON: Keep voting (vote = "I'm done refining")
         - Single agent + refinement OFF: max_new_answers_per_agent=1, skip_voting=True,
           skip_final_presentation=True (quick mode: one answer → done, no extra LLM call)
@@ -124,6 +214,14 @@ class TuiModeState:
           (quick mode: agents work independently, vote once after all answered)
         """
         overrides: Dict[str, Any] = {}
+
+        # Coordination mode mapping from TUI labels to orchestrator config values.
+        # Decomposition requires multiple active agents, so single-agent mode
+        # always falls back to voting/parallel.
+        effective_coordination_mode = self.coordination_mode
+        if self.agent_mode == "single" and effective_coordination_mode == "decomposition":
+            effective_coordination_mode = "parallel"
+        overrides["coordination_mode"] = "decomposition" if effective_coordination_mode == "decomposition" else "voting"
 
         # Refinement disabled = quick mode
         if not self.refinement_enabled:
@@ -166,6 +264,8 @@ class TuiModeState:
             "enable_agent_task_planning": True,
             "task_planning_filesystem_mode": True,
             "plan_depth": self.plan_config.depth,
+            "plan_target_steps": self.plan_config.target_steps,
+            "plan_target_chunks": self.plan_config.target_chunks,
             "broadcast": self.plan_config.broadcast,
         }
 
@@ -206,6 +306,15 @@ class TuiModeState:
         self.planning_started_turn = None
         self.selected_plan_id = None
         self.planning_context_paths = None
+        self.plan_revision = 0
+        self.planning_iteration_count = 0
+        self.planning_feedback_history = []
+        self.last_planning_mode = "multi"
+        self.pending_planning_feedback = None
+        self.pending_planning_mode = None
+        self.quick_edit_prev_agent_mode = None
+        self.quick_edit_prev_selected_agent = None
+        self.quick_edit_restore_pending = False
 
     def reset_plan_state_with_error(self, error_msg: str) -> str:
         """Reset plan state due to an error.
@@ -252,6 +361,12 @@ class TuiModeState:
             parts.append("Plan: Creating")
         elif self.plan_mode == "execute":
             parts.append("Plan: Executing")
+        elif self.plan_mode == "analysis":
+            if self.analysis_config.target == "skills":
+                parts.append("Analyze: Organize Skills")
+            else:
+                profile = self.analysis_config.profile.capitalize()
+                parts.append(f"Analyze: {profile}")
 
         # Agent mode
         if self.agent_mode == "single":
@@ -259,6 +374,12 @@ class TuiModeState:
             parts.append(f"Agent: {agent_name}")
         else:
             parts.append("Agents: Multi")
+
+        # Coordination mode
+        if self.coordination_mode == "decomposition":
+            parts.append("Coord: Decomposition")
+        elif self.parallel_personas_enabled:
+            parts.append(f"Personas: {self.persona_diversity_mode.title()}")
 
         # Refinement mode
         if not self.refinement_enabled:
@@ -268,3 +389,10 @@ class TuiModeState:
             return "Normal mode"
 
         return " | ".join(parts)
+
+
+def get_analysis_placeholder_text(target: str) -> str:
+    """Return input bar placeholder text for the given analysis target type."""
+    if target == "skills":
+        return "Enter to organize skills • or describe what to organize • Shift+Enter newline • @ for files • \u22ee for analysis options"
+    return "Enter to analyze selected log • or describe what to analyze • Shift+Enter newline • @ for files • \u22ee for analysis options"

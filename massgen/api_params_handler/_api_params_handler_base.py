@@ -85,6 +85,8 @@ class APIParamsHandlerBase(ABC):
             "command_line_docker_credentials",
             "command_line_docker_packages",
             "exclude_file_operation_mcps",
+            "use_mcpwrapped_for_tool_filtering",
+            "use_no_roots_wrapper",
             # Code-based tools (CodeAct paradigm)
             "enable_code_based_tools",
             "custom_tools_path",
@@ -102,7 +104,13 @@ class APIParamsHandlerBase(ABC):
             "mcp_servers",
             # Coordination parameters (handled by orchestrator, not passed to API)
             "vote_only",  # Vote-only mode flag for coordination
+            "plan_depth",
+            "plan_target_steps",
+            "plan_target_chunks",
             "use_two_tier_workspace",  # Two-tier workspace (scratch/deliverable) + git versioning
+            "write_mode",  # Isolated write context mode (auto/worktree/isolated/legacy)
+            "drift_conflict_policy",  # Isolated apply drift resolution policy
+            "novelty_injection",  # Novelty pressure level (none/gentle/moderate/aggressive)
             # NLIP configuration belongs to MassGen routing, never provider APIs
             "enable_nlip",
             "nlip",
@@ -123,6 +131,17 @@ class APIParamsHandlerBase(ABC):
             "debug_delay_after_n_tools",
             # Per-agent voting sensitivity (coordination config, not API param)
             "voting_sensitivity",
+            "voting_threshold",
+            "checklist_require_gap_report",
+            "gap_report_mode",
+            # Decomposition mode parameters (handled by orchestrator, not passed to API)
+            "coordination_mode",
+            "presenter_agent",
+            "subtask",
+            # Fairness controls (handled by orchestrator, not passed to API)
+            "fairness_enabled",
+            "fairness_lead_cap_answers",
+            "max_midstream_injections_per_round",
         }
 
     def build_base_api_params(
@@ -146,4 +165,43 @@ class APIParamsHandlerBase(ABC):
         if hasattr(self.backend, "_mcp_functions") and self.backend._mcp_functions:
             if hasattr(self.backend, "get_mcp_tools_formatted"):
                 return self.backend.get_mcp_tools_formatted()
+        return []
+
+    def get_custom_tools(self) -> List[Dict[str, Any]]:
+        """Get custom tools, preferring backend-provided full schemas when available.
+
+        Backends that inherit CustomToolAndMCPBackend expose
+        `_get_custom_tools_schemas()`, which includes internal background lifecycle
+        management tools in addition to user custom tools. Falling back to
+        `custom_tool_manager.registered_tools` keeps compatibility for handlers
+        instantiated with mocked backends in tests.
+        """
+        if hasattr(self.backend, "_get_custom_tools_schemas"):
+            try:
+                custom_schemas = self.backend._get_custom_tools_schemas()
+            except Exception:  # noqa: BLE001
+                custom_schemas = []
+            if not isinstance(custom_schemas, list):
+                custom_schemas = []
+
+            if custom_schemas:
+                normalized_schemas: List[Dict[str, Any]] = []
+                for schema in custom_schemas:
+                    if schema.get("type") == "function" and "function" in schema:
+                        function_block = dict(schema.get("function", {}))
+                        function_block.setdefault("description", "")
+                        normalized_schema = dict(schema)
+                        normalized_schema["function"] = function_block
+                        normalized_schemas.append(normalized_schema)
+                    else:
+                        normalized_schemas.append(schema)
+
+                if hasattr(self.formatter, "format_tools"):
+                    return self.formatter.format_tools(normalized_schemas)
+                return normalized_schemas
+
+        custom_tools = getattr(self.custom_tool_manager, "registered_tools", None)
+        if custom_tools:
+            return self.formatter.format_custom_tools(custom_tools)
+
         return []

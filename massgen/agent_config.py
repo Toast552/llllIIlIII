@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from .persona_generator import PersonaGeneratorConfig
+from .task_decomposer import TaskDecomposerConfig
 
 if TYPE_CHECKING:
     from .message_templates import MessageTemplates
@@ -105,29 +106,49 @@ class CoordinationConfig:
         subagent_max_timeout: Maximum allowed timeout in seconds (default 600). Prevents runaway subagents.
         subagent_max_concurrent: Maximum number of concurrent subagents an agent can spawn (default 3).
         subagent_round_timeouts: Optional per-round timeout settings for subagents.
+        subagent_runtime_mode: Runtime boundary mode for subagent execution.
+                              - "isolated" (default): require isolated runtime semantics
+                              - "inherited": run in parent runtime boundary
+        subagent_runtime_fallback_mode: Optional fallback when isolated runtime prerequisites are unavailable.
+                                       - None (default): strict isolation (fail if unavailable)
+                                       - "inherited": explicit opt-in fallback to shared runtime
+        subagent_host_launch_prefix: Optional command prefix used to launch isolated subagents
+                                    when running inside a containerized parent runtime.
+                                    Example: ["host-launch", "--exec"]
         subagent_orchestrator: Configuration for subagent orchestrator mode. When enabled, subagents
                               use a full Orchestrator with multiple agents. This enables multi-agent coordination within
                               subagent execution.
-        async_subagents: Configuration for async subagent execution. When enabled, agents can spawn
-                        subagents with async_=True to run in the background while continuing work.
+        background_subagents: Configuration for background subagent execution. When enabled, agents can spawn
+                        subagents with background=True to run in the background while continuing work.
                         Results are automatically injected when subagents complete.
-                        - enabled: bool (default True) - Whether to allow async subagent execution
+                        - enabled: bool (default True) - Whether to allow background subagent execution
                         - injection_strategy: str (default "tool_result") - How to inject results:
                           - "tool_result": Append result to next tool call output
                           - "user_message": Inject as separate user message
-        use_two_tier_workspace: If True, agent workspaces are structured with two directories:
-                               - scratch/: Working files, experiments, intermediate results, evaluation scripts
-                               - deliverable/: Final outputs to showcase to voters
-                               When enabled, git versioning is automatically initialized in the workspace
-                               for audit trails and history tracking. Both directories are shared with
-                               other agents during voting/coordination phases.
+        use_two_tier_workspace: DEPRECATED - Use write_mode instead.
+                               If True, agent workspaces are structured with scratch/ and deliverable/
+                               directories. Superseded by write_mode which provides git worktree
+                               isolation with in-worktree scratch space.
+        write_mode: Controls how agent file writes are isolated during coordination.
+                   - "auto": Automatically detect (worktree for git repos, shadow for non-git)
+                   - "worktree": Use git worktrees for isolation (requires git repo)
+                   - "isolated": Use shadow repos for full isolation
+                   - "legacy": Use direct writes (no isolation, current behavior)
+                   - None: Disabled (default, same as "legacy")
+        drift_conflict_policy: How to handle target-file drift when applying isolated
+                              presenter changes back to source context.
+                              - "skip": Skip drifted files, apply remaining files (default)
+                              - "prefer_presenter": Apply presenter changes even on drift
+                              - "fail": Block apply if any drift is detected
     """
 
     enable_planning_mode: bool = False
     planning_mode_instruction: str = (
         "During coordination, describe what you would do without actually executing actions. Only provide concrete implementation details without calling external APIs or tools."
     )
-    plan_depth: Optional[str] = None  # "shallow" | "medium" | "deep" - Task planning mode depth
+    plan_depth: Optional[str] = None  # "dynamic" | "shallow" | "medium" | "deep" - Task planning mode depth
+    plan_target_steps: Optional[int] = None  # Optional explicit task-count target (None = dynamic)
+    plan_target_chunks: Optional[int] = None  # Optional explicit chunk-count target (None = dynamic)
     max_orchestration_restarts: int = 0
     enable_agent_task_planning: bool = False
     max_tasks_per_plan: int = 10
@@ -151,15 +172,26 @@ class CoordinationConfig:
     subagent_max_timeout: int = 600  # Maximum 10 minutes
     subagent_max_concurrent: int = 3
     subagent_round_timeouts: Optional[Dict[str, Any]] = None
+    subagent_runtime_mode: str = "isolated"  # "isolated" | "inherited"
+    subagent_runtime_fallback_mode: Optional[str] = None  # None | "inherited"
+    subagent_host_launch_prefix: Optional[List[str]] = None  # Optional command prefix for containerized isolated launch
     subagent_orchestrator: Optional["SubagentOrchestratorConfig"] = None
-    # Async subagent execution configuration
-    async_subagents: Optional[Dict[str, Any]] = None  # {enabled: bool, injection_strategy: str}
+    # Background subagent execution configuration
+    background_subagents: Optional[Dict[str, Any]] = None  # {enabled: bool, injection_strategy: str}
     use_two_tier_workspace: bool = False  # Enable scratch/deliverable structure + git versioning
+    task_decomposer: TaskDecomposerConfig = field(default_factory=TaskDecomposerConfig)
+    write_mode: Optional[str] = None  # "auto" | "worktree" | "isolated" | "legacy"
+    enable_changedoc: bool = True  # Write changedoc.md decision journal during coordination
+    drift_conflict_policy: str = "skip"  # "skip" | "prefer_presenter" | "fail"
+    novelty_injection: str = "none"  # "none" | "gentle" | "moderate" | "aggressive"
 
     def __post_init__(self):
         """Validate configuration after initialization."""
         self._validate_broadcast_config()
         self._validate_timeout_config()
+        self._validate_subagent_runtime_config()
+        self._validate_drift_conflict_policy()
+        self._validate_novelty_injection()
 
     def _validate_timeout_config(self):
         """Validate subagent timeout configuration."""
@@ -208,6 +240,47 @@ class CoordinationConfig:
             if self.broadcast_timeout < 30:
                 logger.warning(f"Broadcast timeout is very low ({self.broadcast_timeout}s). Agents may not have enough time to respond.")
 
+    def _validate_drift_conflict_policy(self):
+        """Validate drift conflict policy for isolated change apply."""
+        valid_policies = {"skip", "prefer_presenter", "fail"}
+        if self.drift_conflict_policy not in valid_policies:
+            raise ValueError(
+                "Invalid drift_conflict_policy: " f"{self.drift_conflict_policy}. " f"Must be one of: {sorted(valid_policies)}",
+            )
+
+    def _validate_novelty_injection(self):
+        """Validate novelty_injection setting."""
+        valid_values = {"none", "gentle", "moderate", "aggressive"}
+        if self.novelty_injection not in valid_values:
+            raise ValueError(
+                f"Invalid novelty_injection: '{self.novelty_injection}'. " f"Must be one of: {sorted(valid_values)}",
+            )
+
+    def _validate_subagent_runtime_config(self):
+        """Validate subagent runtime mode/fallback configuration."""
+        valid_modes = {"isolated", "inherited"}
+        if self.subagent_runtime_mode not in valid_modes:
+            raise ValueError(
+                f"Invalid subagent_runtime_mode: '{self.subagent_runtime_mode}'. " f"Must be one of: {sorted(valid_modes)}",
+            )
+
+        valid_fallback_modes = {None, "inherited"}
+        if self.subagent_runtime_fallback_mode not in valid_fallback_modes:
+            raise ValueError(
+                "Invalid subagent_runtime_fallback_mode: " f"'{self.subagent_runtime_fallback_mode}'. Must be one of: [None, 'inherited']",
+            )
+
+        if self.subagent_runtime_mode != "isolated" and self.subagent_runtime_fallback_mode is not None:
+            raise ValueError(
+                "subagent_runtime_fallback_mode is only valid when subagent_runtime_mode is 'isolated'",
+            )
+
+        if self.subagent_host_launch_prefix is not None:
+            if not isinstance(self.subagent_host_launch_prefix, list) or any(not isinstance(item, str) or not item.strip() for item in self.subagent_host_launch_prefix):
+                raise ValueError(
+                    "subagent_host_launch_prefix must be a list of non-empty strings when set",
+                )
+
 
 @dataclass
 class AgentConfig:
@@ -226,7 +299,12 @@ class AgentConfig:
         skip_coordination_rounds: Debug/test mode - skip voting rounds and go straight to final presentation (default: False)
         voting_sensitivity: Controls how critical agents are when voting ("lenient", "balanced", "strict")
         max_new_answers_per_agent: Maximum number of new answers each agent can provide (None = unlimited)
+        max_new_answers_global: Maximum number of new answers across all agents (None = unlimited)
+        checklist_require_gap_report: In checklist_gated mode, require a markdown gap report before verdict (default: True)
         answer_novelty_requirement: How different new answers must be from existing ones ("lenient", "balanced", "strict")
+        fairness_enabled: Enable fairness controls across all coordination modes (default: True)
+        fairness_lead_cap_answers: Maximum allowed lead in answer revisions over slowest active peer
+        max_midstream_injections_per_round: Maximum unseen source updates injected per agent per round
     """
 
     # Core backend configuration (includes tool enablement)
@@ -237,8 +315,15 @@ class AgentConfig:
 
     # Voting behavior configuration
     voting_sensitivity: str = "lenient"
+    voting_threshold: Optional[int] = None  # Numeric threshold for ROI-style voting (e.g., 15 = 15% improvement required)
     max_new_answers_per_agent: Optional[int] = None
+    max_new_answers_global: Optional[int] = None
+    checklist_require_gap_report: bool = True
+    gap_report_mode: str = "changedoc"  # "changedoc" | "separate" | "none"
     answer_novelty_requirement: str = "lenient"
+    fairness_enabled: bool = True
+    fairness_lead_cap_answers: int = 2
+    max_midstream_injections_per_round: int = 2
 
     # Agent customization
     agent_id: Optional[str] = None
@@ -269,6 +354,13 @@ class AgentConfig:
     # When True, voting only starts after all agents submit their answers
     # Prevents wasteful restarts when agents vote before everyone has answered
     defer_voting_until_all_answered: bool = False
+
+    # Coordination mode: "voting" (default) or "decomposition"
+    # In decomposition mode, each agent works on an assigned subtask and calls stop when done.
+    # A presenter agent synthesizes the final output.
+    coordination_mode: str = "voting"
+    # Agent ID that presents the final synthesized output (decomposition mode)
+    presenter_agent: Optional[str] = None
 
     # Debug mode for restart feature - override final answer on attempt 1 only
     debug_final_answer: Optional[str] = None
@@ -927,8 +1019,14 @@ class AgentConfig:
             # Access private attribute to avoid deprecation warning
             "custom_system_instruction": self._custom_system_instruction,
             "voting_sensitivity": self.voting_sensitivity,
+            "voting_threshold": self.voting_threshold,
             "max_new_answers_per_agent": self.max_new_answers_per_agent,
+            "max_new_answers_global": self.max_new_answers_global,
+            "checklist_require_gap_report": self.checklist_require_gap_report,
             "answer_novelty_requirement": self.answer_novelty_requirement,
+            "fairness_enabled": self.fairness_enabled,
+            "fairness_lead_cap_answers": self.fairness_lead_cap_answers,
+            "max_midstream_injections_per_round": self.max_midstream_injections_per_round,
             "timeout_config": {
                 "orchestrator_timeout_seconds": self.timeout_config.orchestrator_timeout_seconds,
                 "initial_round_timeout_seconds": self.timeout_config.initial_round_timeout_seconds,
@@ -942,6 +1040,7 @@ class AgentConfig:
             "enable_planning_mode": self.coordination_config.enable_planning_mode,
             "planning_mode_instruction": self.coordination_config.planning_mode_instruction,
             "max_orchestration_restarts": self.coordination_config.max_orchestration_restarts,
+            "drift_conflict_policy": self.coordination_config.drift_conflict_policy,
         }
 
         # Handle debug fields
@@ -971,8 +1070,14 @@ class AgentConfig:
         agent_id = data.get("agent_id")
         custom_system_instruction = data.get("custom_system_instruction")
         voting_sensitivity = data.get("voting_sensitivity", "lenient")
+        voting_threshold = data.get("voting_threshold")
         max_new_answers_per_agent = data.get("max_new_answers_per_agent")
+        max_new_answers_global = data.get("max_new_answers_global")
+        checklist_require_gap_report = data.get("checklist_require_gap_report", True)
         answer_novelty_requirement = data.get("answer_novelty_requirement", "lenient")
+        fairness_enabled = data.get("fairness_enabled", True)
+        fairness_lead_cap_answers = data.get("fairness_lead_cap_answers", 2)
+        max_midstream_injections_per_round = data.get("max_midstream_injections_per_round", 2)
 
         # Handle timeout_config
         timeout_config = TimeoutConfig()
@@ -1002,8 +1107,14 @@ class AgentConfig:
             message_templates=message_templates,
             agent_id=agent_id,
             voting_sensitivity=voting_sensitivity,
+            voting_threshold=voting_threshold,
             max_new_answers_per_agent=max_new_answers_per_agent,
+            max_new_answers_global=max_new_answers_global,
+            checklist_require_gap_report=checklist_require_gap_report,
             answer_novelty_requirement=answer_novelty_requirement,
+            fairness_enabled=fairness_enabled,
+            fairness_lead_cap_answers=fairness_lead_cap_answers,
+            max_midstream_injections_per_round=max_midstream_injections_per_round,
             timeout_config=timeout_config,
             coordination_config=coordination_config,
         )

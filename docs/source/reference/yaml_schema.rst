@@ -573,7 +573,11 @@ Full multi-agent configuration demonstrating all 6 configuration levels:
      # Voting and answer control
      voting_sensitivity: "balanced"         # How critical agents are when voting (lenient/balanced)
      max_new_answers_per_agent: 2           # Cap new answers per agent (null=unlimited)
+     max_new_answers_global: 8              # Cap total new answers across all agents (null=unlimited)
      answer_novelty_requirement: "balanced" # How different new answers must be (lenient/balanced/strict)
+     fairness_enabled: true                 # Keep coordination pacing balanced (default: true)
+     fairness_lead_cap_answers: 2           # Max lead in answer revisions vs slowest active peer
+     max_midstream_injections_per_round: 2  # Cap injected unseen source updates per round
 
      # Advanced settings
      skip_coordination_rounds: false        # Normal coordination
@@ -739,6 +743,11 @@ Backend
      - **Codex** (Docker mode)
      - All with MCP support
      - Docker network mode: "bridge", "host", "none". **Required for Codex in Docker mode** (use "bridge").
+   * - ``model_reasoning_effort``
+     - string
+     - No
+     - ``codex``
+     - Codex reasoning effort: "low", "medium", "high", or "xhigh". OpenAI-style ``reasoning.effort`` is also accepted for Codex compatibility.
    * - ``command_line_docker_enable_sudo``
      - boolean
      - No
@@ -995,14 +1004,26 @@ Coordination Configuration
      - object
      - No
      - Optional per-round timeout settings for subagents. Uses the same keys as ``timeout_settings`` and inherits from parent if omitted.
+   * - ``subagent_runtime_mode``
+     - string
+     - No
+     - Subagent runtime boundary mode. ``isolated`` (default) or ``inherited``.
+   * - ``subagent_runtime_fallback_mode``
+     - string or null
+     - No
+     - Optional fallback mode when isolated prerequisites are unavailable. ``inherited`` or ``null`` (strict isolation).
+   * - ``subagent_host_launch_prefix``
+     - list or null
+     - No
+     - Optional command prefix used to bridge isolated launches from containerized parent runtimes.
    * - ``subagent_orchestrator``
      - object
      - No
      - Subagent orchestrator configuration (multi-agent subagents with custom models)
-   * - ``async_subagents``
+   * - ``background_subagents``
      - object
      - No
-     - Async subagent configuration (``enabled``, ``injection_strategy``)
+     - Background subagent configuration (``enabled``, ``injection_strategy``)
 
 .. note::
 
@@ -1032,6 +1053,8 @@ Voting and Answer Control
 
 These parameters control coordination behavior to balance quality and duration.
 
+Fairness controls are designed to solve a common multi-agent failure mode: fast agents can repeatedly submit revisions while slower peers are still working, which creates uneven effort, restart churn, and noisy coordination loops. With fairness enabled (default), agents stay within a bounded revision lead and wait for peer updates before terminal decisions.
+
 .. list-table::
    :header-rows: 1
 
@@ -1046,11 +1069,27 @@ These parameters control coordination behavior to balance quality and duration.
    * - ``max_new_answers_per_agent``
      - integer or null
      - No
-     - Maximum number of new answers each agent can provide. Once an agent reaches this limit, they can only vote (not provide new answers). **Options:** ``null`` (default) - unlimited answers; ``1``, ``2``, ``3``, etc. - cap at N answers per agent. Prevents endless coordination rounds.
+     - Maximum number of new answers each agent can provide. In ``coordination_mode: voting``, this is a total per-agent cap. In ``coordination_mode: decomposition``, this is a **consecutive** cap that resets after the agent sees unseen external answer updates. **Options:** ``null`` (default) - unlimited answers; ``1``, ``2``, ``3``, etc.
+   * - ``max_new_answers_global``
+     - integer or null
+     - No
+     - Maximum number of new answers across all agents combined. When reached, ``new_answer`` is disabled for everyone. In voting mode, agents must vote; in decomposition mode, agents auto-stop. **Options:** ``null`` (default) - unlimited total answers; positive integer - global cap.
    * - ``answer_novelty_requirement``
      - string
      - No
      - Controls how different new answers must be from existing ones to prevent rephrasing. **Options:** ``"lenient"`` (default) - no similarity checks (fastest); ``"balanced"`` - reject if >70% token overlap, requires meaningful differences; ``"strict"`` - reject if >50% token overlap, requires substantially different solutions.
+   * - ``fairness_enabled``
+     - boolean
+     - No
+     - Enable fairness pacing controls across both ``coordination_mode: voting`` and ``coordination_mode: decomposition``. **Default:** ``true``.
+   * - ``fairness_lead_cap_answers``
+     - integer
+     - No
+     - Maximum allowed lead in answer revisions over the slowest active peer. When exceeded, ``new_answer`` is blocked until peers catch up. **Default:** ``2`` (set ``0`` for strict lockstep).
+   * - ``max_midstream_injections_per_round``
+     - integer
+     - No
+     - Maximum unseen source-agent updates injected mid-stream into a single agent during one round. Helps prevent fast models from receiving runaway update fanout. **Default:** ``2``.
 
 **Example Configurations:**
 
@@ -1061,7 +1100,11 @@ Fast but thorough (recommended for balanced evaluation):
    orchestrator:
      voting_sensitivity: "balanced"       # Critical evaluation
      max_new_answers_per_agent: 2         # But cap at 2 tries
+     max_new_answers_global: 8            # Stop global churn in long runs
      answer_novelty_requirement: "balanced"  # Must actually improve
+     fairness_enabled: true
+     fairness_lead_cap_answers: 2
+     max_midstream_injections_per_round: 2
 
 Maximum quality with bounded time:
 
@@ -1070,6 +1113,7 @@ Maximum quality with bounded time:
    orchestrator:
      voting_sensitivity: "strict"          # Highest quality bar
      max_new_answers_per_agent: 3
+     max_new_answers_global: 12
      answer_novelty_requirement: "strict"   # Only accept real improvements
 
 Quick convergence:
@@ -1079,7 +1123,25 @@ Quick convergence:
    orchestrator:
      voting_sensitivity: "lenient"
      max_new_answers_per_agent: 1
+     max_new_answers_global: 3
      answer_novelty_requirement: "lenient"
+
+Decomposition mode (recommended defaults):
+
+.. code-block:: yaml
+
+   orchestrator:
+     coordination_mode: "decomposition"
+     presenter_agent: "integrator"
+     # In decomposition mode, use a lower per-agent cap than parallel voting mode.
+     # This cap is consecutive and resets when the agent sees new external answers.
+     max_new_answers_per_agent: 2  # Recommended range: 2-3
+     # Add a global cap for deterministic total coordination budget.
+     max_new_answers_global: 9
+     answer_novelty_requirement: "balanced"
+     fairness_enabled: true
+     fairness_lead_cap_answers: 2
+     max_midstream_injections_per_round: 2
 
 Timeout Configuration
 ~~~~~~~~~~~~~~~~~~~~~

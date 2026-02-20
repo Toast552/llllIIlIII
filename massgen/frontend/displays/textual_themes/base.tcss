@@ -41,12 +41,21 @@ Screen {
 }
 
 #welcome_screen Label, #welcome_screen Static {
-    width: auto;
+    width: 100%;
     text-align: center;
+    text-wrap: wrap;
     color: $text;
 }
 
+#welcome_agents_wrap {
+    width: 100%;
+    height: auto;
+    align: center top;
+}
+
 #welcome_logo {
+    width: auto;
+    text-wrap: nowrap;
     color: $primary;
     text-style: bold;
 }
@@ -54,7 +63,13 @@ Screen {
 #welcome_tagline {
     color: $secondary;
     text-style: none;
-    margin-top: 2;
+    margin-top: 1;
+}
+
+#welcome_divider {
+    color: $text-muted;
+    margin-top: 1;
+    margin-bottom: 1;
 }
 
 #welcome_workflow {
@@ -62,27 +77,33 @@ Screen {
     margin-top: 1;
 }
 
-#welcome_agents {
-    color: $text;
+#welcome_screen #welcome_agents {
+    color: $text-muted;
     margin-top: 1;
+    width: auto;
+    max-width: 100%;
+    text-align: left;
+    padding: 0 1;
 }
 
 #welcome_hint {
     color: $primary;
-    text-style: italic;
+    text-style: bold;
     margin-top: 2;
 }
 
 #welcome_shortcuts_hint {
     color: $text-muted;
     text-style: italic;
-    margin-top: 1;
+    margin-top: 0;
+    padding: 0 2;
 }
 
 #cwd_hint {
     color: $text-muted;
     text-style: italic;
     margin-top: 1;
+    padding: 0 2;
 }
 
 #main_container {
@@ -185,7 +206,6 @@ Screen {
 
 /* === Agent Tab Bar === */
 /* NOTE: No dock: top - flows naturally below HeaderWidget */
-/* Phase 9: Removed border-bottom for edge-to-edge layout */
 AgentTabBar {
     height: 3;
     width: 100%;
@@ -282,6 +302,10 @@ AgentTab.status-voted {
     border-bottom: tall $success;
 }
 
+AgentTab.status-stopped {
+    border-bottom: tall $success;
+}
+
 AgentTab.status-done {
     border-bottom: tall $primary-lighten-1;
     color: $text-muted;
@@ -313,6 +337,11 @@ AgentTab.active.status-completed {
 }
 
 AgentTab.active.status-voted {
+    background: $success 15%;
+    border-bottom: tall $success;
+}
+
+AgentTab.active.status-stopped {
     background: $success 15%;
     border-bottom: tall $success;
 }
@@ -390,8 +419,17 @@ AgentStatusRibbon {
     height: auto;
     min-height: 1;
     background: transparent;
-    border-top: solid $surface-lighten-1;
+    border-top: solid $separator-border;
     padding: 0 1;
+}
+
+/* Theme-class based separator colors for dynamic switching */
+.theme-light AgentStatusRibbon {
+    border-top: solid #eaeef2;
+}
+
+.theme-dark AgentStatusRibbon {
+    border-top: solid #30363d;
 }
 
 AgentStatusRibbon .ribbon-container {
@@ -493,24 +531,31 @@ SessionInfoPanel #session_content {
 /* === Mode Bar (now inside input_header on the left) === */
 /* Override ModeBar widget's DEFAULT_CSS - keep width: auto so buttons fit content */
 ModeBar {
-    height: 2;
-    width: auto;
-    layout: horizontal;
+    height: auto;
+    width: 1fr;
+    min-width: 0;
+    max-width: 100%;
+    layout: vertical;
     background: $background;
     padding: 0;
-    margin-left: 1;  /* Align with input box left edge */
-    align: left middle;
+    align: left top;
+    overflow-x: hidden;
+    overflow-y: hidden;
     border: none;
     border-bottom: none;
 }
 
 #mode_bar {
-    height: 2;
-    width: auto;
-    layout: horizontal;
+    height: auto;
+    width: 1fr;
+    min-width: 0;
+    max-width: 100%;
+    layout: vertical;
     background: $background;
     padding: 0;
-    align: left middle;
+    align: left top;
+    overflow-x: hidden;
+    overflow-y: hidden;
     border: none;
     border-bottom: none;
 }
@@ -519,36 +564,79 @@ ModeBar {
     display: none;
 }
 
-/* Mode Toggle buttons - underline style */
+#mode_rows {
+    width: 100%;
+    height: 2;
+    layout: horizontal;
+    align: left middle;
+    overflow-x: hidden;
+    overflow-y: hidden;
+}
+
+#mode_row_primary,
+#mode_row_secondary {
+    width: auto;
+    height: 2;
+    layout: horizontal;
+    align: left middle;
+    overflow-x: hidden;
+    overflow-y: hidden;
+}
+
+#mode_row_secondary {
+    width: 1fr;
+}
+
+ModeBar.compact-layout #mode_rows {
+    height: auto;
+    layout: vertical;
+    align: left top;
+}
+
+ModeBar.compact-layout #mode_row_primary,
+ModeBar.compact-layout #mode_row_secondary {
+    width: 100%;
+}
+
+/* Add breathing room between stacked rows so underline borders don't visually
+ * collide in compact mode. */
+ModeBar.compact-layout #mode_row_secondary {
+    margin-top: 1;
+}
+
+/* Mode Toggle buttons - underline style
+ * Uses semantic variables: $mode-toggle-border, $mode-toggle-active-color, $mode-toggle-inactive-color
+ * These are defined per-theme in palette files for proper visibility in both light and dark modes
+ */
 ModeToggle {
     width: auto;
     height: 2;
     margin: 0 1 0 0;
     padding: 0 1;
     background: transparent;
-    color: $text;
+    color: $mode-toggle-inactive-color;
     border: none;
-    border-bottom: tall $surface-lighten-2;
+    border-bottom: tall $mode-toggle-border;
     outline: none;
 }
 
 ModeToggle:hover {
     background: transparent;
-    color: $text;
-    border-bottom: tall $primary-lighten-1;
+    color: $mode-toggle-active-color;
+    border-bottom: tall $mode-toggle-active-color;
 }
 
 ModeToggle:focus {
     background: transparent;
-    color: $text;
-    border-bottom: tall $primary-lighten-1;
+    color: $mode-toggle-active-color;
+    border-bottom: tall $mode-toggle-active-color;
     outline: none;
 }
 
 ModeToggle.disabled {
     background: transparent;
     color: $text-muted;
-    border-bottom: tall $surface;
+    border-bottom: tall $mode-toggle-border;
     text-style: italic;
 }
 
@@ -577,34 +665,74 @@ ModeToggle.state-execute:focus {
     text-style: bold;
 }
 
+ModeToggle.state-analysis {
+    color: $warning;
+    border-bottom: tall $warning;
+    text-style: bold;
+}
+
+ModeToggle.state-analysis:hover,
+ModeToggle.state-analysis:focus {
+    color: $warning;
+    border-bottom: tall $warning;
+    text-style: bold;
+}
+
 /* Agent mode states - single is muted (reduced mode) */
 ModeToggle.state-single {
-    color: $text-muted;
-    border-bottom: tall $surface-lighten-2;
+    color: $mode-toggle-inactive-color;
+    border-bottom: tall $mode-toggle-border;
 }
 
-/* Multi-agent (default) - normal text */
+/* Multi-agent (default) - highlighted as active state */
 ModeToggle.state-multi {
-    color: $text;
-    border-bottom: tall $surface-lighten-2;
+    color: $mode-toggle-active-color;
+    border-bottom: tall $mode-toggle-active-color;
 }
 
-/* Refinement on - default state, not highlighted */
+/* Coordination mode states */
+ModeToggle.state-parallel {
+    color: $mode-toggle-inactive-color;
+    border-bottom: tall $mode-toggle-border;
+}
+
+ModeToggle.state-decomposition {
+    color: $warning;
+    border-bottom: tall $warning;
+}
+
+/* Refinement on - highlighted as active state */
 ModeToggle.state-on {
-    color: $text;
-    border-bottom: tall $surface-lighten-2;
+    color: $mode-toggle-active-color;
+    border-bottom: tall $mode-toggle-active-color;
+}
+
+/* Persona diversity modes - highlighted as active state */
+ModeToggle.state-perspective {
+    color: $mode-toggle-active-color;
+    border-bottom: tall $mode-toggle-active-color;
+}
+
+ModeToggle.state-implementation {
+    color: $mode-toggle-active-color;
+    border-bottom: tall $mode-toggle-active-color;
+}
+
+ModeToggle.state-methodology {
+    color: $mode-toggle-active-color;
+    border-bottom: tall $mode-toggle-active-color;
 }
 
 /* Refinement off - muted gray (reduced mode) */
 ModeToggle.state-off {
-    color: $text-muted;
-    border-bottom: tall $surface-lighten-2;
+    color: $mode-toggle-inactive-color;
+    border-bottom: tall $mode-toggle-border;
 }
 
 /* Normal (inactive plan) - visible but subdued */
 ModeToggle.state-normal {
-    color: $text;
-    border-bottom: tall $surface-lighten-2;
+    color: $mode-toggle-inactive-color;
+    border-bottom: tall $mode-toggle-border;
 }
 
 /* Override button in mode bar */
@@ -946,7 +1074,7 @@ HeaderWidget.hidden {
 #input_area {
     dock: bottom;
     height: auto;
-    min-height: 4;
+    min-height: 5;
     width: 100%;
     padding: 0 1;
     background: $background;
@@ -1003,7 +1131,7 @@ HeaderWidget.hidden {
     background: $panel;
     border: solid $primary;
     padding: 0;
-    margin-bottom: 7;
+    margin-bottom: 9;
     layout: vertical;
 }
 
@@ -1067,59 +1195,127 @@ SuggestionRow.selected {
     display: none;
 }
 
-/* Input header - contains modes (left) and hint (right) on same line */
+#question_input .text-area--placeholder {
+    color: $text-muted;
+    text-style: italic;
+}
+
+/* Input header - mode controls and compact vim/help hints in one row */
 #input_header {
-    layout: horizontal;
+    layout: vertical;
     height: auto;
     width: 100%;
     margin: 0;
-    align: left middle;
-    /* Full-width subtle separator line above mode buttons */
-    border-top: solid $surface-lighten-2;
+    align: left top;
+    border-top: solid $separator-border;
     padding: 0;
     background: $background;
 }
 
-/* Input hint text - docked to right side */
+#input_modes_row {
+    layout: horizontal;
+    width: 100%;
+    height: auto;
+    align: left top;
+    padding: 0 1;
+}
+
+#input_modes_row.meta-stacked {
+    layout: vertical;
+}
+
+#input_meta_spacer {
+    width: 1fr;
+}
+
+#input_meta_panel {
+    layout: vertical;
+    width: auto;
+    min-width: 0;
+    max-width: 100%;
+    height: auto;
+    align: right middle;
+    margin-left: 1;
+    padding: 0;
+    overflow-x: hidden;
+    overflow-y: hidden;
+}
+
+#input_modes_row.meta-stacked #mode_bar {
+    width: 100%;
+}
+
+#input_modes_row.meta-stacked #input_meta_panel {
+    width: 100%;
+    align: left top;
+    margin-left: 0;
+    margin-top: 1;
+}
+
+#input_meta_panel Static {
+    width: auto;
+    min-width: 0;
+    text-align: right;
+}
+
+#input_modes_row.meta-stacked #input_meta_panel Static {
+    text-align: left;
+}
+
+/* Theme-class based separator colors for dynamic switching */
+.theme-light #input_header {
+    border-top: solid #eaeef2;
+}
+
+.theme-dark #input_header {
+    border-top: solid #30363d;
+}
+
+/* Input hint text - right panel second line (CWD/context/help) */
 #input_hint {
-    dock: right;
     height: 1;
     width: auto;
-    color: $primary-lighten-1;  /* Darker than $text-muted for shadow effect */
+    min-width: 0;
+    max-width: 100%;
+    color: $text-muted;
     text-style: italic;
-    padding: 0 1;
+    padding: 0;
     background: $background;
+    margin-left: 0;
 }
 
-/* Vim mode indicator - hidden by default */
+/* Vim mode indicator - right panel first line */
 #vim_indicator {
-    display: none;
+    display: block;
     height: 1;
     width: auto;
-    min-width: 10;
+    min-width: 0;
+    padding: 0;
+    margin-left: 0;
+    background: transparent;
+    color: $text-muted;
+    text-style: none;
 }
 
-/* Vim mode indicator - shown when active (use !important to override display: none) */
+/* Vim mode indicator states */
 #input_header #vim_indicator.vim-normal-indicator {
-    display: block !important;
     height: 1;
-    width: 10;
-    padding: 0 1;
+    width: auto;
+    min-width: 1;
+    padding: 0;
     text-style: bold;
-    content-align: center middle;
-    background: $warning;
-    color: $background;
+    background: transparent;
+    color: $warning;
 }
 
 #input_header #vim_indicator.vim-insert-indicator {
-    display: block !important;
     height: 1;
-    width: 10;
-    padding: 0 1;
+    width: auto;
+    min-width: 1;
+    padding: 0;
     text-style: bold;
-    content-align: center middle;
-    background: $primary;
-    color: white;
+    background: transparent;
+    color: $primary;
 }
 
 /* Vim normal mode - input border */
@@ -2198,10 +2394,11 @@ TaskPlanModal .close-button {
 
 /* === Keyboard Shortcuts Modal === */
 #shortcuts_modal_container {
-    width: auto;
+    width: 94%;
     min-width: 80;
     max-width: 150;
-    height: auto;
+    height: 78%;
+    max-height: 36;
     background: $background 90%;
     border: solid $primary;
     padding: 1 2;
@@ -2220,21 +2417,210 @@ TaskPlanModal .close-button {
 
 #shortcuts_columns {
     layout: horizontal;
-    height: auto;
+    height: 1fr;
     width: 100%;
+    margin-bottom: 1;
 }
 
 .shortcuts-column {
     width: 1fr;
-    height: auto;
+    height: 1fr;
     background: $panel;
     padding: 1;
     margin: 0 1 0 0;
     border: solid $surface-lighten-1;
+    overflow-y: auto;
 }
 
 #shortcuts_col_right {
     margin-right: 0;
+}
+
+#shortcuts_modal_container #close_shortcuts_button {
+    dock: bottom;
+    width: 100%;
+}
+
+/* === Skills Modal === */
+#skills_modal_container {
+    width: 96%;
+    min-width: 96;
+    max-width: 170;
+    height: 90%;
+    max-height: 62;
+    background: $background 90%;
+    border: solid $primary;
+    padding: 1 1;
+    layout: vertical;
+}
+
+#skills_modal_header {
+    color: $primary;
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+#skills_modal_summary {
+    color: $text-muted;
+    margin-bottom: 1;
+}
+
+#include_previous_skills_checkbox {
+    margin: 0 1 1 1;
+}
+
+#skills_modal_scroll {
+    width: 100%;
+    height: 1fr;
+    border: solid $surface-lighten-1;
+    background: $panel;
+    padding: 1 1;
+    margin-bottom: 1;
+    overflow-y: auto;
+}
+
+#skills_modal_scroll .modal-section-header {
+    color: $primary;
+    text-style: bold;
+    margin: 1 0 0 0;
+}
+
+#skills_modal_scroll .modal-list-item {
+    color: $text-muted;
+    margin: 0 0 1 2;
+}
+
+#skills_modal_actions {
+    width: 100%;
+    height: auto;
+    dock: bottom;
+    align: left middle;
+}
+
+#skills_modal_actions Button {
+    margin-right: 1;
+    min-width: 14;
+}
+
+#skills_modal_actions #apply_skills_btn {
+    width: 16;
+}
+
+#skill_confirm_container {
+    width: 92%;
+    max-width: 140;
+    height: 84%;
+    max-height: 55;
+    background: $background 90%;
+    border: solid $primary;
+    padding: 1 2;
+    layout: vertical;
+}
+
+#skill_confirm_header {
+    color: $primary;
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+#skill_confirm_body {
+    width: 100%;
+    height: 1fr;
+    margin: 1 0;
+}
+
+#skill_confirm_actions {
+    width: 100%;
+    height: auto;
+    dock: bottom;
+    align: left middle;
+}
+
+#skill_confirm_actions Button {
+    margin-right: 1;
+}
+
+/* Decomposition subtasks modal */
+#subtasks_modal_container {
+    width: 92%;
+    max-width: 140;
+    height: 80%;
+    background: $background 90%;
+    border: solid $primary;
+    padding: 1 2;
+}
+
+#subtasks_scroll {
+    height: 1fr;
+    border: solid $surface-lighten-1;
+    padding: 1;
+    margin-top: 1;
+    margin-bottom: 1;
+}
+
+#subtasks_modal_container .subtask_row {
+    height: auto;
+    margin-bottom: 1;
+}
+
+#subtasks_modal_container .subtask_agent_label {
+    width: 24;
+    color: $text-muted;
+}
+
+#subtasks_modal_container .subtask_row Input {
+    width: 1fr;
+}
+
+/* Runtime decomposition generation modal */
+#decomposition_generation_container {
+    width: 90%;
+    max-width: 120;
+    height: auto;
+    max-height: 75%;
+    background: $background 90%;
+    border: solid $primary;
+    padding: 1 2;
+}
+
+#decomposition_generation_status {
+    color: $primary;
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+#decomposition_generation_detail {
+    color: $text-muted;
+    margin-bottom: 1;
+}
+
+#decomposition_generation_results {
+    height: auto;
+    max-height: 18;
+    border: solid $surface-lighten-1;
+    padding: 1;
+    margin-bottom: 1;
+}
+
+#decomposition_generation_results_content {
+    width: 100%;
+    height: auto;
+    color: $text;
+}
+
+/* Chunk advance modal */
+#chunk_advance_container {
+    width: 64;
+    max-width: 84;
+}
+
+#chunk_advance_next {
+    color: $success;
+    text-style: bold;
+}
+
+#chunk_advance_countdown {
+    color: $warning;
 }
 
 #shortcuts_content {
@@ -2527,7 +2913,7 @@ ToolCallCard.type-subagent.expanded {
 /* Minimalist emphasis: left accent bar only, muted colors */
 ToolCallCard.terminal-tool {
     border: none;
-    border-left: tall $surface-lighten-1;
+    border-left: tall $tool-card-border;
     background: transparent;
     min-height: 3;
     max-height: 12;
@@ -2537,7 +2923,7 @@ ToolCallCard.terminal-tool {
 
 ToolCallCard.terminal-tool.status-running {
     border: none;
-    border-left: tall $surface-lighten-1;
+    border-left: tall $tool-card-border;
     background: transparent;
 }
 
@@ -3117,6 +3503,17 @@ StatusBar > Static {
     width: auto;
     color: $success;
     margin-right: 2;
+}
+
+#status_tools {
+    width: auto;
+    color: $warning;
+    margin-right: 2;
+}
+
+#status_tools.clickable:hover {
+    color: $text;
+    text-style: underline;
 }
 
 /* Spacer to push right-side elements to the edge */
@@ -4707,15 +5104,15 @@ AgentStatusRibbon #round_selector.final-answer-view:hover {
 /* Dropdown overlay for plan mode configuration */
 PlanOptionsPopover {
     layer: overlay;
-    dock: bottom;
-    width: auto;
-    min-width: 35;
-    max-width: 50;
+    dock: left;
+    width: 84;
+    min-width: 64;
+    max-width: 92;
     height: auto;
-    max-height: 25;
+    max-height: 44;
     background: $surface;
     border: solid $primary;
-    padding: 1;
+    padding: 1 2;
     margin-bottom: 3;
     margin-left: 1;
     display: none;
@@ -4734,6 +5131,9 @@ PlanOptionsPopover #popover_title {
 PlanOptionsPopover #popover_content {
     width: 100%;
     height: auto;
+    max-height: 34;
+    overflow-y: auto;
+    padding-right: 1;
 }
 
 PlanOptionsPopover .section-label {
@@ -4746,6 +5146,33 @@ PlanOptionsPopover .section-label {
 PlanOptionsPopover Select {
     width: 100%;
     margin-bottom: 1;
+}
+
+PlanOptionsPopover #plan_details {
+    background: $surface-darken-1;
+    border: solid $primary-darken-2;
+    padding: 1;
+    margin: 1 0;
+    height: auto;
+    max-height: 14;
+    text-wrap: wrap;
+}
+
+PlanOptionsPopover #analysis_target_meta {
+    color: $text-muted;
+    margin: 0 0 1 0;
+    text-wrap: wrap;
+}
+
+PlanOptionsPopover #analysis_preview {
+    background: $surface-darken-1;
+    border: solid $primary-darken-2;
+    padding: 1;
+    margin: 1 0;
+    height: auto;
+    max-height: 14;
+    text-wrap: wrap;
+    color: $text-muted;
 }
 
 PlanOptionsPopover #close_btn {
@@ -4781,6 +5208,47 @@ PlanOptionsPopover #close_btn:hover {
     display: none;
 }
 
+/* Mode help button in mode bar */
+#mode_help_btn {
+    width: auto;
+    height: 2;
+    min-width: 3;
+    background: transparent;
+    color: $text-muted;
+    border: none;
+    border-bottom: tall $surface-lighten-2;
+    padding: 0 1;
+    margin-left: 1;
+}
+
+#mode_help_btn:hover {
+    background: transparent;
+    color: $primary;
+    border-bottom: tall $primary;
+}
+
+#subtasks_btn {
+    width: auto;
+    height: 2;
+    min-width: 10;
+    background: transparent;
+    color: $text-muted;
+    border: none;
+    border-bottom: tall $surface-lighten-2;
+    padding: 0 1;
+    margin-left: 0;
+}
+
+#subtasks_btn:hover {
+    background: transparent;
+    color: $warning;
+    border-bottom: tall $warning;
+}
+
+#subtasks_btn.hidden {
+    display: none;
+}
+
 /* Plan status label in mode bar */
 #plan_status {
     color: $text-muted;
@@ -4795,22 +5263,52 @@ PlanOptionsPopover #close_btn:hover {
 /* === Toast Notifications === */
 ToastRack {
     margin-bottom: 8;  /* Push up above tab bar and input */
+    padding-left: 0;
+    padding-right: 1;
+    align: right bottom;
 }
 
+ToastHolder {
+    align-horizontal: right;
+}
+
+/* Base toast styling - theme-class-based for dynamic switching */
+/* Keep toast visually distinct from timeline backgrounds in all themes. */
+Toast {
+    width: auto;
+    min-width: 40;
+    max-width: 74;
+    height: auto;
+    background: $toast-bg;
+    border: none;
+    border-left: wide $primary;
+    color: $text;
+    padding: 1 2;
+    margin-top: 1;
+    margin-right: 1;
+    text-wrap: wrap;
+    overflow: hidden;
+}
+
+/* Severity-specific accents with subtle tinting. */
 Toast.-information {
-    border-left: thick $secondary;
+    background: $secondary 10%;
+    border-left: wide $secondary;
 }
 
 Toast.-warning {
-    border-left: thick $warning;
+    background: $warning 12%;
+    border-left: wide $warning;
 }
 
 Toast.-error {
-    border-left: thick $error;
+    background: $error 12%;
+    border-left: wide $error;
 }
 
 Toast.-success {
-    border-left: thick $success;
+    background: $success 12%;
+    border-left: wide $success;
 }
 
 /* ============================================================
@@ -4923,13 +5421,13 @@ SubagentPanel TimelineSection {
 /* Tab bar in subagent screen */
 SubagentScreen AgentTabBar,
 SubagentView AgentTabBar {
-    border-bottom: solid $surface-lighten-1;
+    border-bottom: solid $separator-border;
 }
 
 /* Status ribbon in subagent screen */
 SubagentScreen AgentStatusRibbon,
 SubagentView AgentStatusRibbon {
-    border-top: solid $surface-lighten-1;
+    border-top: solid $separator-border;
 }
 
 /* ============================================
@@ -5057,13 +5555,19 @@ PlanApprovalModal {
 }
 
 PlanApprovalModal > Container {
-    width: 80%;
-    max-width: 100;
+    width: 92%;
+    max-width: 120;
     height: auto;
-    max-height: 70%;
+    max-height: 82%;
     background: $panel;
     border: solid $secondary;
     padding: 1 2;
+}
+
+PlanApprovalModal > Container.expanded {
+    width: 98%;
+    max-width: 160;
+    max-height: 94%;
 }
 
 PlanApprovalModal .modal-header {
@@ -5093,6 +5597,11 @@ PlanApprovalModal .modal-close {
     color: $text-muted;
 }
 
+PlanApprovalModal .modal-expand {
+    width: auto;
+    margin-right: 1;
+}
+
 PlanApprovalModal .modal-close:hover {
     color: $text;
 }
@@ -5113,9 +5622,21 @@ PlanApprovalModal .stat-item {
 
 PlanApprovalModal .modal-body {
     height: 1fr;
-    max-height: 30;
+    max-height: 34;
     overflow-y: auto;
     padding: 0 1;
+}
+
+PlanApprovalModal .modal-body.expanded-body {
+    max-height: 50;
+}
+
+PlanApprovalModal .plan-chunk-header {
+    height: auto;
+    width: 100%;
+    margin-top: 1;
+    margin-bottom: 0;
+    color: $secondary;
 }
 
 PlanApprovalModal .task-row {
@@ -5129,22 +5650,200 @@ PlanApprovalModal .task-row:hover {
     background: $surface;
 }
 
+PlanApprovalModal .plan-json-actions {
+    height: auto;
+    width: 100%;
+    margin-top: 1;
+    padding-top: 1;
+    border-top: solid $surface-lighten-1;
+}
+
+PlanApprovalModal .edit-plan-json-button {
+    width: auto;
+}
+
+PlanApprovalModal .plan-json-edit-status {
+    height: auto;
+    width: 100%;
+    margin-top: 1;
+    color: $secondary;
+}
+
+PlanApprovalModal .plan-feedback {
+    height: auto;
+    width: 100%;
+    margin-top: 1;
+    padding-top: 1;
+    border-top: solid $surface-lighten-1;
+}
+
+PlanApprovalModal .plan-feedback-label {
+    height: auto;
+    color: $text-muted;
+    margin-bottom: 1;
+}
+
+PlanApprovalModal #planning_feedback_input {
+    width: 100%;
+}
+
 PlanApprovalModal .modal-footer {
     height: auto;
     width: 100%;
-    align: center middle;
+    align: left middle;
     margin-top: 1;
     padding-top: 1;
     border-top: solid $surface-lighten-1;
 }
 
 PlanApprovalModal .footer-buttons {
-    width: auto;
+    width: 100%;
     height: auto;
+    layout: horizontal;
+}
+
+PlanApprovalModal .continue-button {
+    margin-right: 1;
 }
 
 PlanApprovalModal .execute-button {
-    margin-right: 2;
+    margin-left: 1;
+    margin-right: 1;
+    text-style: bold;
+}
+
+PlanApprovalModal .plan-action-status {
+    margin-top: 1;
+    color: $warning;
+}
+
+/* === Shared Rework Controls (used by PlanApprovalModal and ReviewModal) === */
+.rework-controls {
+    height: auto;
+    width: 100%;
+    padding: 1 2;
+    background: $bg-surface;
+    border-top: solid $border-muted;
+}
+
+.rework-input-section {
+    height: auto;
+    width: 100%;
+    padding: 1 2;
+    background: $bg-surface;
+    border-top: solid $border-muted;
+}
+
+.rework-feedback-label {
+    height: auto;
+    color: $fg-secondary;
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+.rework-feedback-input {
+    width: 100%;
+}
+
+/* Inline variant: input sits in the footer row, takes remaining space */
+.rework-feedback-input-inline {
+    width: 1fr;
+    min-width: 20;
+    height: 3;
+    margin: 0 1 0 0;
+}
+
+.rework-button-row {
+    width: 100%;
+    height: auto;
+    layout: horizontal;
+    margin-top: 1;
+}
+
+.rework-continue-btn {
+    margin-right: 1;
+    background: $accent-warning;
+    color: $fg-on-accent;
+    border: solid $accent-warning;
+}
+
+.rework-continue-btn:hover {
+    opacity: 0.85;
+}
+
+.rework-quick-edit-btn {
+    margin-right: 1;
+    color: $fg-secondary;
+}
+
+/* === Plan JSON Editor Modal === */
+PlanJsonEditorModal {
+    align: center middle;
+}
+
+PlanJsonEditorModal > Container {
+    width: 98%;
+    max-width: 180;
+    height: 96%;
+    background: $panel;
+    border: solid $secondary;
+    padding: 1 2;
+}
+
+PlanJsonEditorModal .modal-header {
+    height: auto;
+    width: 100%;
+    margin-bottom: 1;
+}
+
+PlanJsonEditorModal .header-row {
+    height: auto;
+    width: 100%;
+    layout: horizontal;
+}
+
+PlanJsonEditorModal .modal-title {
+    text-style: bold;
+    width: 1fr;
+    color: $secondary;
+}
+
+PlanJsonEditorModal .modal-close {
+    width: auto;
+    min-width: 3;
+    background: transparent;
+    border: none;
+    color: $text-muted;
+}
+
+PlanJsonEditorModal .modal-close:hover {
+    color: $text;
+}
+
+PlanJsonEditorModal .modal-body {
+    height: 1fr;
+    width: 100%;
+    overflow-y: auto;
+}
+
+PlanJsonEditorModal #plan_json_editor {
+    width: 100%;
+    height: 1fr;
+    border: solid $surface-lighten-1;
+}
+
+PlanJsonEditorModal .modal-footer {
+    height: auto;
+    width: 100%;
+    margin-top: 1;
+    padding-top: 1;
+    border-top: solid $surface-lighten-1;
+}
+
+PlanJsonEditorModal .footer-buttons {
+    width: 100%;
+    height: auto;
+    layout: horizontal;
 }
 
 /* === Queued Input Banner === */
@@ -5514,11 +6213,13 @@ BackgroundTaskDetailModal .modal-close:hover {
 
 BackgroundTaskDetailModal .info-section {
     height: auto;
+    max-height: 16;
     width: 100%;
     padding: 1;
     margin-bottom: 1;
     background: $background;
     border-left: solid $warning;
+    overflow-y: auto;
 }
 
 BackgroundTaskDetailModal .output-header {
@@ -5819,54 +6520,9 @@ TimelineSection .hidden {
     display: none;
 }
 
-/* Answer lock mode: final card fills the space */
-TimelineSection.answer-locked {
-    overflow-y: hidden;
-    padding: 0;
-}
-
-/* Hidden class for non-locked items */
-TimelineSection .answer-lock-hidden {
-    display: none;
-}
-
 /* ARCH-001: Viewport culling - hide items outside visible area */
 TimelineSection .viewport-culled {
     display: none;
-}
-
-/* Locked final card fills available space */
-TimelineSection FinalPresentationCard.final-card-locked {
-    height: 1fr;
-    margin: 0;
-    min-height: 10;
-}
-
-TimelineSection FinalPresentationCard.final-card-locked #final_card_body {
-    height: 1fr;
-    max-height: 999;
-}
-
-TimelineSection FinalPresentationCard.final-card-locked #final_card_content {
-    height: 1fr;
-    max-height: 999;
-    overflow-y: auto;
-}
-
-/* Compact mode for small terminals */
-TimelineSection FinalPresentationCard.final-card-compact {
-    height: 3;
-    min-height: 3;
-    max-height: 3;
-    margin: 0;
-}
-
-TimelineSection FinalPresentationCard.final-card-compact #final_card_content {
-    display: none;
-}
-
-TimelineSection FinalPresentationCard.final-card-compact #final_card_header {
-    height: 1;
 }
 
 /* Winner hint - separator line style */
@@ -6057,23 +6713,35 @@ FinalPresentationCard.streaming {
 }
 
 FinalPresentationCard.completed {
-    border: solid $success;
+    border: none;
+    border-top: solid $success;
+    margin: 1 0 0 0;
     background: transparent;
 }
 
-/* Hide post_eval and context_paths in completed mode when they have hidden class */
-FinalPresentationCard.completed #final_card_post_eval.hidden,
-FinalPresentationCard.completed #final_card_context_paths.hidden {
+/* Compact completed card: hide detail sections, constrain content to preview */
+FinalPresentationCard.completed #final_card_body {
+    max-height: 14;
+}
+
+FinalPresentationCard.completed #final_card_content {
+    max-height: 14;
+    overflow-y: hidden;
+}
+
+FinalPresentationCard.completed #file_explorer_panel {
     display: none;
-    height: 0;
-    padding: 0;
-    margin: 0;
+}
+
+FinalPresentationCard.completed #final_card_post_eval,
+FinalPresentationCard.completed #final_card_context_paths {
+    display: none;
 }
 
 FinalPresentationCard #final_card_header {
     width: 100%;
     height: auto;
-    padding: 0 1;
+    padding: 1 1 0 1;
     background: transparent;
 }
 
@@ -6090,12 +6758,25 @@ FinalPresentationCard.completed #final_card_title {
     color: $success;
 }
 
+FinalPresentationCard #final_card_winner {
+    color: $success;
+    text-style: bold;
+    height: auto;
+}
+
 FinalPresentationCard #final_card_votes {
     color: $text-muted;
-    height: 1;
+    height: auto;
     border-bottom: solid $surface-lighten-1;
     padding-bottom: 1;
     margin-bottom: 1;
+}
+
+FinalPresentationCard #final_card_header_compact {
+    display: none;
+    width: 100%;
+    height: auto;
+    color: $text;
 }
 
 FinalPresentationCard #final_card_body {
@@ -6113,6 +6794,14 @@ FinalPresentationCard #final_card_content {
     padding: 1 2 0 2;
     background: transparent;
     overflow-y: auto;
+}
+
+FinalPresentationCard #final_card_stream {
+    width: 100%;
+    height: auto;
+    background: transparent;
+    color: $text;
+    margin: 0 1;
 }
 
 FinalPresentationCard #final_card_text {
@@ -6226,7 +6915,8 @@ FinalPresentationCard .context-path-modified {
 FinalPresentationCard #final_card_footer {
     width: 100%;
     height: auto;
-    padding: 1 2;
+    padding: 1 1 0 1;
+    border-top: dashed $surface-lighten-1;
     background: transparent;
 }
 
@@ -6253,6 +6943,21 @@ FinalPresentationCard .footer-link:hover {
     text-style: bold underline;
 }
 
+/* Review status indicator - shown after approve/reject decision */
+FinalPresentationCard .review-status-indicator {
+    width: auto;
+    height: 1;
+    padding: 0 1;
+}
+
+FinalPresentationCard .review-status-indicator.status-approved {
+    color: $primary;
+}
+
+FinalPresentationCard .review-status-indicator.status-rejected {
+    color: $error;
+}
+
 /* Verified indicator - faded, non-clickable, hidden by default */
 FinalPresentationCard .verified-indicator {
     display: none;
@@ -6264,6 +6969,30 @@ FinalPresentationCard .verified-indicator {
 
 FinalPresentationCard #continue_message {
     display: none;
+}
+
+/* View Full Answer button - prominent action to open modal */
+FinalPresentationCard #final_card_view_btn {
+    color: $accent;
+    text-style: bold;
+    padding: 0 0;
+    height: 1;
+    width: auto;
+}
+
+FinalPresentationCard #final_card_view_btn:hover {
+    color: $accent-lighten-1;
+    text-style: bold underline;
+}
+
+FinalPresentationCard.completed #final_card_votes {
+    padding-bottom: 0;
+    margin-bottom: 1;
+    border-bottom: dashed $surface-lighten-1;
+}
+
+FinalPresentationCard.completed #final_card_content {
+    padding: 0 2;
 }
 
 /* Full-width mode - fills available vertical space */
@@ -6328,25 +7057,6 @@ FinalPresentationCard.completion-only #final_card_footer {
     padding: 1 2;
 }
 
-/* Spacer to push unlock button to the right in footer */
-FinalPresentationCard #final_card_button_spacer {
-    width: 1fr;
-    height: 1;
-}
-
-FinalPresentationCard.locked-mode #final_card_body {
-    height: 1fr;
-    max-height: 999;
-}
-
-FinalPresentationCard.locked-mode #final_card_content {
-    height: 1fr;
-    max-height: 999;
-}
-
-FinalPresentationCard.locked-mode {
-    height: 1fr;
-}
 
 /* =============================================================================
    Injection Toggle (from tool_card.py)
@@ -6456,9 +7166,9 @@ ExecutionStatusLine.hidden {
 
 SubagentColumn {
     width: 1fr;
-    min-width: 32;
+    min-width: 33;
     height: auto;
-    padding: 0 1 0 1;
+    padding: 0 1;
     border-right: solid $surface-darken-1;
 }
 
@@ -6468,13 +7178,13 @@ SubagentColumn:last-of-type {
 }
 
 SubagentColumn:hover {
-    background: $panel;
+    background: $surface-lighten-1;
 }
 
 SubagentColumn:focus {
     background: $panel;
-    border-left: thick $secondary;
-    padding-left: 0;
+    border-left: none;
+    padding-left: 1;
 }
 
 SubagentColumn .agent-header {
@@ -6495,7 +7205,7 @@ SubagentColumn .summary-line {
 }
 
 SubagentColumn .tool-current {
-    color: $secondary;
+    color: $primary;
     text-style: bold;
 }
 
@@ -6510,20 +7220,22 @@ SubagentColumn .tool-recent {
 SubagentCard {
     width: 100%;
     height: auto;
-    min-height: 5;
-    padding: 0 1 0 2;
+    min-height: 6;
+    padding: 1 1 1 2;
     margin: 0 0 1 1;
     background: $surface;
     border-left: tall $secondary;
     border-top: solid $surface-darken-1;
-    border-bottom: solid $background;
+    border-right: solid $surface-darken-2;
+    border-bottom: solid $surface-darken-2;
 }
 
 SubagentCard.all-completed {
     border-left: tall $success;
-    background: $success 30%;
-    border-top: solid $success 50%;
-    border-bottom: solid $background;
+    background: $success 20%;
+    border-top: solid $success 30%;
+    border-right: solid $success 20%;
+    border-bottom: solid $success 20%;
 }
 
 SubagentCard:hover {
@@ -6531,11 +7243,12 @@ SubagentCard:hover {
 }
 
 SubagentCard.all-completed:hover {
-    background: $success 50%;
+    background: $success 30%;
 }
 
 SubagentCard:focus-within {
     background: $panel;
+    border-left: tall $primary;
 }
 
 SubagentCard.appearing {
@@ -6548,7 +7261,7 @@ SubagentCard.appeared {
 
 SubagentCard #subagent-card-title {
     height: 1;
-    margin-bottom: 1;
+    margin-bottom: 0;
     padding: 0 1;
 }
 
@@ -6565,6 +7278,33 @@ SubagentCard #subagent-columns {
     layout: horizontal;
     height: auto;
     width: 100%;
+}
+
+/* Option A: Refined Compact */
+SubagentCard.variant-a {
+    border-left: solid $secondary;
+    padding-top: 0;
+    padding-bottom: 0;
+}
+
+SubagentCard.variant-a:focus-within {
+    border-left: solid $primary;
+}
+
+SubagentCard.variant-a.all-completed {
+    border-left: solid $success;
+}
+
+SubagentCard.variant-a #subagent-card-title {
+    margin-bottom: 0;
+}
+
+SubagentCard.variant-a SubagentColumn {
+    min-width: 32;
+}
+
+SubagentCard.variant-a SubagentColumn .is-empty {
+    display: none;
 }
 
 /* =============================================================================
@@ -7017,4 +7757,645 @@ SubagentModal #nav-text {
     width: auto;
     text-align: center;
     color: $text-muted;
+}
+
+/* =============================================================================
+ * Review Modal Styles - Git diff review for isolated changes
+ * Two-panel layout: file list (left) + diff viewer (right)
+ * =============================================================================
+ */
+
+/* --- Modal container --- */
+.review-modal {
+    width: 100%;
+    max-width: 100%;
+    height: 100%;
+    max-height: 100%;
+    padding: 0;
+    border: none;
+}
+
+/* --- Header --- */
+.review-modal .modal-header {
+    height: auto;
+    width: 100%;
+    padding: 0 1;
+    margin-bottom: 0;
+    background: $bg-surface;
+    border-bottom: solid $border-muted;
+}
+
+.review-modal .modal-close-btn {
+    height: 1;
+    min-height: 1;
+    border: none;
+    background: transparent;
+    color: $fg-muted;
+}
+
+/* --- Summary line --- */
+.review-modal .modal-summary {
+    padding: 0 1;
+    margin: 0;
+    background: $bg-surface;
+}
+
+/* --- Instructions hint --- */
+.review-modal .modal-instructions {
+    padding: 0 1;
+    margin: 0;
+    color: $fg-subtle;
+    height: 1;
+    max-height: 1;
+    overflow: hidden;
+    background: $bg-surface;
+    border-bottom: solid $border-muted;
+}
+
+/* --- Two-panel content area --- */
+.review-modal .review-content,
+.final-answer-modal .review-content {
+    height: 1fr;
+    width: 100%;
+    margin-top: 0;
+}
+
+/* ===== Left panel: file list ===== */
+
+.review-modal .review-file-list,
+.final-answer-modal .review-file-list {
+    width: 20%;
+    min-width: 16;
+    max-width: 28;
+    border-right: solid $border-muted;
+    height: 100%;
+    background: $bg-surface;
+}
+
+/* File list header row with Select All / Deselect All buttons */
+.review-modal .review-file-list-header,
+.final-answer-modal .review-file-list-header {
+    height: auto;
+    align: left middle;
+    padding: 0 0 0 1;
+    margin-bottom: 0;
+    border-bottom: solid $border-muted;
+}
+
+.review-modal .review-file-list-title,
+.final-answer-modal .review-file-list-title {
+    width: 1fr;
+    color: $fg-secondary;
+    text-style: bold;
+}
+
+.review-modal .review-toggle-btn,
+.final-answer-modal .review-toggle-btn {
+    width: auto;
+    min-width: 5;
+    height: 1;
+    margin: 0 0 0 1;
+    border: none;
+    background: transparent;
+    color: $fg-muted;
+    text-style: underline;
+}
+
+.review-modal .review-toggle-btn:hover,
+.final-answer-modal .review-toggle-btn:hover {
+    color: $accent-primary;
+}
+
+.review-modal .review-file-list #file_list_scroll,
+.final-answer-modal .review-file-list #file_list_scroll {
+    height: 1fr;
+    scrollbar-gutter: stable;
+}
+
+/* Context header: project name divider (multi-context only) */
+.review-modal .review-context-header,
+.final-answer-modal .review-context-header {
+    padding: 0 0 0 1;
+    margin-top: 1;
+    color: $fg-muted;
+}
+
+/* File row: holds toggle indicator + filename */
+.review-modal .review-file-row,
+.final-answer-modal .review-file-row {
+    height: auto;
+    width: 100%;
+    align: left middle;
+    padding: 0 0 0 1;
+}
+
+.review-modal .review-file-row:hover,
+.final-answer-modal .review-file-row:hover {
+    background: $bg-surface-2;
+}
+
+/* Selected / active file row highlight */
+.review-modal .review-file-selected,
+.final-answer-modal .review-file-selected {
+    background: $bg-surface-2;
+    border-left: tall $accent-primary;
+}
+
+/* Approval toggle indicator: ✓ or ○ */
+.review-modal .review-toggle-indicator,
+.final-answer-modal .review-toggle-indicator {
+    width: 3;
+    min-width: 3;
+    height: auto;
+    color: $fg-subtle;
+    padding: 0;
+    text-align: center;
+}
+
+.review-modal .review-toggle-indicator:hover,
+.final-answer-modal .review-toggle-indicator:hover {
+    color: $accent-primary;
+    text-style: bold;
+}
+
+.review-modal .review-approved,
+.final-answer-modal .review-approved {
+    color: $accent-success;
+    text-style: bold;
+}
+
+/* Clickable file name */
+.review-modal .review-file-entry,
+.final-answer-modal .review-file-entry {
+    width: 1fr;
+    height: auto;
+    padding: 0;
+    color: $fg-secondary;
+}
+
+.review-modal .review-file-entry:hover,
+.final-answer-modal .review-file-entry:hover {
+    color: $accent-primary;
+}
+
+/* ===== Right panel: diff viewer ===== */
+
+.review-modal .review-diff-panel,
+.final-answer-modal .review-diff-panel {
+    width: 1fr;
+    padding-left: 0;
+    height: 100%;
+}
+
+/* Diff panel header showing selected file path */
+.review-modal .review-diff-header,
+.final-answer-modal .review-diff-header {
+    height: auto;
+    padding: 0 0 0 1;
+    color: $fg-secondary;
+    border-bottom: solid $border-muted;
+}
+
+/* Scrollable diff content area */
+.review-modal #diff_scroll,
+.final-answer-modal #diff_scroll {
+    height: 1fr;
+    background: $modal-content-bg;
+    border: solid $border-muted;
+    padding: 0 1;
+    scrollbar-gutter: stable;
+}
+
+/* Diff text content: auto-height so it scrolls naturally */
+.review-modal .review-diff-content,
+.final-answer-modal .review-diff-content {
+    width: 100%;
+    height: auto;
+    color: $modal-content-text;
+}
+
+/* --- Summary and instructions (dual scope) --- */
+.final-answer-modal .modal-summary {
+    padding: 0 1;
+    margin: 0;
+    height: auto;
+    min-height: 1;
+    background: $bg-surface;
+}
+
+.final-answer-modal .modal-instructions {
+    padding: 0 1;
+    margin: 0;
+    color: $fg-subtle;
+    height: auto;
+    min-height: 1;
+    max-height: 2;
+    overflow: hidden;
+    background: $bg-surface;
+    border-bottom: solid $border-muted;
+}
+
+/* --- Footer button refinements --- */
+.review-modal .modal-footer,
+.final-answer-modal .modal-footer {
+    padding-top: 0;
+    margin-top: 0;
+    border-top: solid $border-muted;
+    background: $bg-surface;
+}
+
+.review-modal .modal-footer Button,
+.final-answer-modal .modal-footer Button {
+    margin-left: 1;
+    min-width: 12;
+    height: 3;
+}
+
+.review-modal #approve_selected_btn,
+.final-answer-modal #approve_selected_btn {
+    background: $primary;
+    border: solid $primary;
+    color: $fg-on-accent;
+    text-style: bold;
+}
+
+.review-modal #approve_selected_btn:hover,
+.final-answer-modal #approve_selected_btn:hover {
+    background: $primary-lighten-1;
+    border: solid $primary-lighten-1;
+}
+
+.review-modal #reject_all_btn,
+.final-answer-modal #reject_all_btn {
+    background: $btn-danger-bg;
+    border: solid $btn-danger-bg;
+    color: $fg-on-accent;
+}
+
+.review-modal #reject_all_btn:hover,
+.final-answer-modal #reject_all_btn:hover {
+    background: $btn-danger-bg-hover;
+    border: solid $btn-danger-bg-hover;
+}
+
+.review-modal #cancel_btn,
+.final-answer-modal #cancel_btn {
+    color: $fg-muted;
+}
+
+.review-modal #edit_file_btn,
+.final-answer-modal #edit_file_btn {
+    color: $fg-secondary;
+}
+
+/* === File Editor Modal (for editing files from review modal) === */
+FileEditorModal {
+    align: center middle;
+}
+
+FileEditorModal #file_editor_container {
+    width: 98%;
+    max-width: 180;
+    height: 96%;
+    background: $panel;
+    border: solid $secondary;
+    padding: 1 2;
+}
+
+FileEditorModal .modal-header {
+    height: auto;
+    width: 100%;
+    margin-bottom: 1;
+}
+
+FileEditorModal .header-row {
+    height: auto;
+    width: 100%;
+    layout: horizontal;
+}
+
+FileEditorModal .modal-title {
+    text-style: bold;
+    width: 1fr;
+    color: $secondary;
+}
+
+FileEditorModal .modal-close {
+    width: auto;
+    min-width: 3;
+    background: transparent;
+    border: none;
+    color: $text-muted;
+}
+
+FileEditorModal .modal-close:hover {
+    color: $text;
+}
+
+FileEditorModal .modal-body {
+    height: 1fr;
+    width: 100%;
+    overflow-y: auto;
+}
+
+FileEditorModal #file_editor_textarea {
+    width: 100%;
+    height: 1fr;
+    border: solid $surface-lighten-1;
+}
+
+FileEditorModal .modal-footer {
+    height: auto;
+    width: 100%;
+    margin-top: 1;
+    padding-top: 1;
+    border-top: solid $surface-lighten-1;
+}
+
+FileEditorModal .footer-buttons {
+    width: 100%;
+    height: auto;
+    layout: horizontal;
+}
+
+/* =============================================================================
+ * Final Answer Modal
+ * =============================================================================
+ * Tabbed modal showing the winning answer + optional Review Changes tab.
+ * Reuses .review-* CSS classes for the Review tab via ReviewChangesPanel.
+ * ============================================================================= */
+
+.final-answer-modal {
+    width: 100%;
+    max-width: 100%;
+    height: 100%;
+    max-height: 100%;
+    padding: 0;
+    border: none;
+}
+
+.final-answer-modal .modal-header {
+    height: auto;
+    width: 100%;
+    padding: 0 1;
+    margin-bottom: 0;
+    background: $bg-surface;
+    border-bottom: solid $border-muted;
+}
+
+.final-answer-modal .modal-close-btn {
+    height: 1;
+    min-height: 1;
+    border: none;
+    background: transparent;
+    color: $fg-muted;
+}
+
+/* --- Tabbed content --- */
+.final-answer-modal TabbedContent {
+    height: 1fr;
+}
+
+.final-answer-modal Tabs {
+    background: $bg-surface;
+    dock: top;
+}
+
+.final-answer-modal Tab {
+    color: $fg-secondary;
+}
+
+.final-answer-modal Tab.-active {
+    color: $accent-success;
+    text-style: bold;
+}
+
+.final-answer-modal Underline {
+    color: $accent-success;
+}
+
+.final-answer-modal TabPane {
+    height: 1fr;
+    padding: 0;
+    layout: vertical;
+}
+
+/* Answer tab content fills space above footer */
+.final-answer-modal #answer_content {
+    height: 1fr;
+}
+
+/* --- Answer tab --- */
+#answer_content_scroll {
+    height: 1fr;
+    padding: 1 2;
+}
+
+#answer_markdown {
+    padding: 0 1;
+}
+
+/* Post-evaluation section */
+.answer-post-eval {
+    height: auto;
+    max-height: 20;
+    padding: 0 2;
+    border-top: solid $border-muted;
+}
+
+.answer-post-eval-label {
+    color: $accent-success;
+    text-style: bold;
+    padding: 1 0 0 0;
+}
+
+.answer-post-eval-scroll {
+    height: auto;
+    max-height: 15;
+    padding: 0 1;
+}
+
+/* --- Answer bottom bar: context paths (left) + buttons (right) --- */
+.answer-bottom-bar {
+    height: auto;
+    width: 100%;
+    layout: horizontal;
+    align: left middle;
+    padding: 0 2;
+    margin-bottom: 1;
+    border-top: solid $border-muted;
+    background: $bg-surface;
+}
+
+/* Context paths section (left side of bottom bar) */
+.answer-context-paths {
+    width: 1fr;
+    height: auto;
+    max-height: 10;
+    padding: 0;
+}
+
+#answer_paths_header {
+    color: $fg-secondary;
+    text-style: bold;
+    padding: 1 0 0 0;
+}
+
+.answer-paths-scroll {
+    height: auto;
+    max-height: 7;
+    scrollbar-gutter: stable;
+}
+
+.context-path-new {
+    color: $accent-success;
+}
+
+.context-path-modified {
+    color: $warning;
+}
+
+.context-path-overflow {
+    color: $fg-muted;
+}
+
+/* Action buttons (right side of bottom bar) */
+.answer-action-buttons {
+    width: auto;
+    height: auto;
+    align: right middle;
+    padding: 1 0;
+}
+
+.answer-action-btn {
+    margin-left: 1;
+    min-width: 16;
+    height: 3;
+}
+
+/* Approve All Changes button — green success */
+#approve_all_answer_btn {
+    background: $accent-success;
+    border: solid $accent-success;
+    color: $fg-on-accent;
+    text-style: bold;
+}
+
+#approve_all_answer_btn:hover {
+    opacity: 0.85;
+}
+
+/* Review Changes button — subtle accent border */
+#review_changes_btn {
+    border: solid $accent-primary;
+    color: $accent-primary;
+}
+
+#review_changes_btn:hover {
+    background: $accent-primary;
+    color: $fg-on-accent;
+}
+
+/* Also style Apply All in both modals with success green */
+.review-modal #approve_all_btn,
+.final-answer-modal #approve_all_btn {
+    background: $accent-success;
+    border: solid $accent-success;
+    color: $fg-on-accent;
+}
+
+.review-modal #approve_all_btn:hover,
+.final-answer-modal #approve_all_btn:hover {
+    opacity: 0.85;
+}
+
+/* Review panel inside final answer modal needs full height */
+.final-answer-modal #final_review_panel {
+    height: 1fr;
+}
+
+/* Banner shown at top of review tab when changes were already approved */
+.final-answer-modal #review_approved_banner {
+    width: 100%;
+    height: auto;
+    padding: 0 2;
+    color: $success;
+    text-style: bold;
+    background: $surface;
+}
+
+/* Dim the review panel when already approved */
+.final-answer-modal .review-approved-dim {
+    opacity: 50%;
+}
+
+/* The answer content area when there are no tabs (answer-only mode) */
+.final-answer-modal > #answer_content {
+    height: 1fr;
+    padding: 0;
+}
+
+/* === Workspace Tab in Final Answer Modal === */
+#workspace_tab_split {
+    height: 1fr;
+    margin-bottom: 1;
+}
+
+#workspace_tab_file_list_container {
+    width: 35%;
+    height: 100%;
+    border: solid $primary;
+    padding: 1;
+}
+
+#workspace_tab_file_list_header {
+    color: $primary;
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+#workspace_tab_file_list {
+    height: 1fr;
+    background: $surface;
+}
+
+/* Higher contrast for file tree items */
+#workspace_tab_file_list .workspace-file-item {
+    color: $text;
+    padding: 0 1;
+    margin: 0;
+}
+
+#workspace_tab_file_list .workspace-file-item:hover {
+    background: $surface-lighten-2;
+}
+
+#workspace_tab_preview_container {
+    width: 65%;
+    height: 100%;
+    border: solid $primary;
+    padding: 1;
+    margin-left: 1;
+}
+
+#workspace_tab_preview_header {
+    color: $primary;
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+#workspace_tab_preview {
+    height: 1fr;
+    background: $surface;
+}
+
+#workspace_tab_footer {
+    height: auto;
+    min-height: 3;
+    align: center middle;
+}
+
+#open_workspace_filesystem_btn {
+    width: auto;
+    min-width: 24;
 }

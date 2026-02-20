@@ -11,7 +11,7 @@ The main TextualTerminalDisplay class is still in the parent directory
 """
 
 # Re-export widgets for convenience
-from .widgets import (  # Base classes; Browser modals; Status modals; Coordination modals; Content modals; Input modals; Shortcuts modal; Workspace modals; Agent output modal
+from .widgets import (  # Base classes; Browser modals; Status modals; Coordination modals; Content modals; Input modals; Review modal; Shortcuts modal; Workspace modals; Agent output modal
     MODAL_BASE_CSS,
     AgentOutputModal,
     AgentSelectorModal,
@@ -20,15 +20,20 @@ from .widgets import (  # Base classes; Browser modals; Status modals; Coordinat
     BaseModal,
     BroadcastPromptModal,
     BrowserTabsModal,
+    ChunkAdvanceModal,
     ContextModal,
     ConversationHistoryModal,
     CoordinationTableModal,
     CostBreakdownModal,
+    DecompositionGenerationModal,
+    DecompositionSubtasksModal,
     FileInspectionModal,
+    GitDiffReviewModal,
     KeyboardShortcutsModal,
     MCPStatusModal,
     MetricsModal,
     OrchestratorEventsModal,
+    SkillsModal,
     StructuredBroadcastPromptModal,
     SystemStatusModal,
     TextContentModal,
@@ -65,9 +70,16 @@ __all__ = [
     "TurnDetailModal",
     # Input modals
     "BroadcastPromptModal",
+    "ChunkAdvanceModal",
+    "DecompositionGenerationModal",
+    "DecompositionSubtasksModal",
     "StructuredBroadcastPromptModal",
+    # Review modal
+    "GitDiffReviewModal",
     # Shortcuts modal
     "KeyboardShortcutsModal",
+    # Skills modals
+    "SkillsModal",
     # Workspace modals
     "FileInspectionModal",
     # Agent output modal

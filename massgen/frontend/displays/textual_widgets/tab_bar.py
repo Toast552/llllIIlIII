@@ -32,33 +32,33 @@ class AgentTabChanged(Message):
 class SessionInfoClicked(Message):
     """Message emitted when session info is clicked to show full prompt."""
 
-    def __init__(self, turn: int, question: str) -> None:
+    def __init__(
+        self,
+        turn: int,
+        question: str,
+        subtask: Optional[str] = None,
+        assignment_kind: str = "Subtask",
+    ) -> None:
         """Initialize the message.
 
         Args:
             turn: Current turn number.
             question: Full question text.
+            subtask: Optional subtask for the active agent.
+            assignment_kind: Label for the assignment (e.g., "Subtask", "Persona").
         """
         self.turn = turn
         self.question = question
+        self.subtask = subtask
+        self.assignment_kind = assignment_kind
         super().__init__()
 
 
 def _tab_log(msg: str) -> None:
     """Log to TUI debug file."""
-    try:
-        import logging
+    from massgen.frontend.displays.shared.tui_debug import tui_log
 
-        log = logging.getLogger("massgen.tui.debug")
-        if not log.handlers:
-            handler = logging.FileHandler("/tmp/massgen_tui_debug.log", mode="a")
-            handler.setFormatter(logging.Formatter("%(asctime)s [TAB] %(message)s", datefmt="%H:%M:%S"))
-            log.addHandler(handler)
-            log.setLevel(logging.DEBUG)
-            log.propagate = False
-        log.debug(msg)
-    except Exception:
-        pass
+    tui_log(f"[TAB] {msg}")
 
 
 class SessionInfoWidget(Static):
@@ -77,12 +77,21 @@ class SessionInfoWidget(Static):
         super().__init__(id=id, classes=classes)
         self._turn = turn
         self._question = question
+        self._assignment: Optional[str] = None
+        self._assignment_kind: str = "Subtask"
 
     def render(self) -> Text:
         """Render the session info."""
         text = Text()
 
-        # Line 1: Turn number with icon prefix (blue for distinction)
+        # Line 1: Assignment label (if present) + Turn number
+        if self._assignment:
+            st = self._assignment.replace("\n", " ").strip()
+            if len(st) > 30:
+                st = st[:27] + "…"
+            text.append(st, style="bold #d2a8ff")
+            text.append("  ", style="")
+
         text.append("◈ ", style="#58a6ff")
         text.append(f"Turn {self._turn}", style="#58a6ff")
 
@@ -102,9 +111,26 @@ class SessionInfoWidget(Static):
         self._question = question
         self.refresh()
 
+    def update_subtask(self, subtask: Optional[str]) -> None:
+        """Update the displayed subtask label."""
+        self.update_assignment(subtask, kind="Subtask")
+
+    def update_assignment(self, assignment: Optional[str], kind: str = "Subtask") -> None:
+        """Update the displayed agent assignment label."""
+        self._assignment = assignment
+        self._assignment_kind = kind
+        self.refresh()
+
     async def on_click(self) -> None:
         """Handle click to show full prompt."""
-        self.post_message(SessionInfoClicked(self._turn, self._question))
+        self.post_message(
+            SessionInfoClicked(
+                self._turn,
+                self._question,
+                self._assignment,
+                assignment_kind=self._assignment_kind,
+            ),
+        )
 
 
 class AgentTab(Static):
@@ -122,6 +148,7 @@ class AgentTab(Static):
         "waiting": "○",  # Empty dot - idle/waiting
         "working": "◉",  # Filled dot - active
         "voted": "✓",  # Green check - voted (waiting for consensus)
+        "stopped": "✓",  # Green check - stopped in decomposition mode (subtask done)
         "done": "✓",  # Dim check - final presentation in progress
         "error": "✗",  # X mark - error
         "cancelled": "✗",  # X mark - cancelled (yellow when rendered)
@@ -143,6 +170,7 @@ class AgentTab(Static):
         "custom_tool_response": "working",
         "voting": "working",
         "voted": "voted",  # Green checkmark - agent voted
+        "stopped": "stopped",  # Green checkmark - agent stopped (decomposition mode)
         "waiting": "voted",  # Waiting for others after voting
         "complete": "voted",  # Finished, waiting for consensus
         "completed": "voted",
@@ -216,6 +244,7 @@ class AgentTab(Static):
             "status-waiting",
             "status-working",
             "status-voted",
+            "status-stopped",
             "status-done",
             "status-error",
             "status-cancelled",
@@ -333,6 +362,8 @@ class AgentTabBar(Widget):
         self._question = question
         self._tab_id_prefix = tab_id_prefix
         self._session_info_widget: Optional[SessionInfoWidget] = None
+        self._agent_assignments: Dict[str, str] = {}
+        self._assignment_kind: str = "Subtask"
 
     def compose(self) -> ComposeResult:
         """Create agent tabs and session info."""
@@ -406,6 +437,36 @@ class AgentTabBar(Widget):
         # Activate the selected tab
         self._tabs[agent_id].set_active(True)
         self.active_agent = agent_id
+
+        # Update assignment display for the newly active agent
+        if self._session_info_widget and self._agent_assignments:
+            self._session_info_widget.update_assignment(
+                self._agent_assignments.get(agent_id),
+                kind=self._assignment_kind,
+            )
+
+    def set_agent_subtasks(self, subtasks: Dict[str, str]) -> None:
+        """Set per-agent subtask assignments for decomposition mode.
+
+        Args:
+            subtasks: Mapping of agent_id to subtask description.
+        """
+        self._set_agent_assignments(subtasks, kind="Subtask")
+
+    def set_agent_personas(self, personas: Dict[str, str]) -> None:
+        """Set per-agent persona assignments for parallel mode."""
+        self._set_agent_assignments(personas, kind="Persona")
+
+    def _set_agent_assignments(self, assignments: Dict[str, str], kind: str) -> None:
+        """Set and render per-agent assignment labels."""
+        self._agent_assignments = assignments
+        self._assignment_kind = kind
+        # Update display for currently active agent
+        if self._session_info_widget and self.active_agent:
+            self._session_info_widget.update_assignment(
+                assignments.get(self.active_agent),
+                kind=kind,
+            )
 
     def update_agent_status(self, agent_id: str, status: str) -> None:
         """Update the status badge for an agent.
