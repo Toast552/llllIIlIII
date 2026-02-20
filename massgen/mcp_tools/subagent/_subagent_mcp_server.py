@@ -810,6 +810,63 @@ async def create_server() -> fastmcp.FastMCP:
                 "error": str(e),
             }
 
+    @mcp.tool()
+    def send_message_to_subagent(
+        subagent_id: str,
+        message: str,
+        target_agents: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Send a runtime message to a currently running background subagent.
+
+        Unlike continue_subagent (which resumes finished subagents), this delivers
+        a message to a subagent that is CURRENTLY RUNNING. The message is injected
+        into the subagent's next tool call or enforcement checkpoint.
+
+        Use this to steer a background subagent's direction without waiting for it
+        to finish — e.g., "focus on performance metrics" or "skip the CSS audit".
+
+        Args:
+            subagent_id: ID of the running subagent
+            message: Message content to deliver
+            target_agents: Optional list of inner agent IDs to target.
+                None broadcasts to all inner agents within the subagent.
+        """
+        try:
+            manager = _get_manager()
+
+            if not subagent_id or not subagent_id.strip():
+                return {
+                    "success": False,
+                    "operation": "send_message",
+                    "error": "Missing required 'subagent_id' parameter",
+                }
+
+            if not message or not message.strip():
+                return {
+                    "success": False,
+                    "operation": "send_message",
+                    "error": "Missing required 'message' parameter",
+                }
+
+            success = manager.send_message_to_subagent(
+                subagent_id,
+                message,
+                target_agents=target_agents,
+            )
+            return {
+                "success": success,
+                "subagent_id": subagent_id,
+                "operation": "send_message",
+            }
+
+        except Exception as e:
+            logger.error(f"[SubagentMCP] Error sending message to subagent: {e}")
+            return {
+                "success": False,
+                "operation": "send_message",
+                "error": str(e),
+            }
+
     return mcp
 
 

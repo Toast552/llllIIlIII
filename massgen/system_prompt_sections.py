@@ -2132,7 +2132,7 @@ class CommandExecutionSection(SystemPromptSection):
         if self.docker_mode:
             parts.append("**IMPORTANT: Docker Execution Environment**")
             parts.append("- You are running in a Linux Docker container (Debian-based)")
-            parts.append("- Base image: Python 3.12-slim with Node.js 20.x LTS")
+            parts.append("- Base image: Python 3.11-slim with Node.js 20.x LTS")
             parts.append(
                 "- Pre-installed packages:\n"
                 "  - System: git, curl, build-essential, ripgrep, gh (GitHub CLI)\n"
@@ -3640,7 +3640,8 @@ quality and priorities, since you have the full context and the subagent may run
    - Use specific paths for least-privilege access (recommended when possible)
    - `context_files` remains optional for copying files into subagent workspace
 4. **No Nesting**: Subagents cannot spawn their own subagents
-5. **No Human Broadcast**: Subagents cannot ask the human or request human input
+5. **No Human Broadcast**: Subagents cannot ask the human or request human input,
+   but they CAN receive runtime messages from you via `send_message_to_subagent`
 
 ## Waiting for Subagents (CRITICAL)
 
@@ -3738,20 +3739,26 @@ spawn_subagents(
 **background parameter (async mode):**
 - `background=True`: Spawn in background and continue working asynchronously. Results are
   often auto-injected on a later tool call.
-- If auto-injection is unavailable (or you need explicit control), use the standardized
-  background lifecycle tools:
-  - `custom_tool__get_background_tool_status(job_id)`
-  - `custom_tool__wait_for_background_tool(timeout_seconds?)`
-  - `custom_tool__get_background_tool_result(job_id)`
-  - `custom_tool__cancel_background_tool(job_id)`
-  - `custom_tool__list_background_tools(include_all=true)` to inspect all jobs
-- `list_subagents()` is a subagent discovery/index view (IDs, status, workspace, session_id);
-  do not treat it as the generic background job lifecycle manager, and do not pass `include_all` there.
+- Use `list_subagents()` to check status and discover workspace paths for running subagents.
 - `background=False` (default): Wait for results before proceeding. Use when you need outputs to continue.
 
 **refine parameter:**
 - `refine=True` (default): Multi-round refinement with voting. Higher quality, slower, more expensive. Use for complex analysis.
 - `refine=False`: Single-pass execution. Faster, cheaper. Use for simple lookups/lists.
+
+## Background Subagent Lifecycle
+
+When using `background=True`, subagents run asynchronously. Here is the full lifecycle:
+
+1. **Launch**: `spawn_subagents(tasks, background=True)` — starts running, returns immediately with subagent IDs
+2. **Monitor**: `list_subagents()` — check status (`running` / `completed` / `timeout` / `failed`), get workspace path
+3. **Steer** (while running): `send_message_to_subagent(subagent_id, message)` — inject guidance mid-execution (e.g., "focus on X", "skip Y"). Delivered at next checkpoint.
+4. **Resume** (after completion): `continue_subagent(subagent_id, message)` — start a new turn with full conversation history preserved
+
+**Monitoring a running subagent's progress:**
+Use `list_subagents()` to get the workspace path, then:
+- **Live output**: Read `{{workspace}}/.massgen/massgen_logs/log_*/turn_*/attempt_*/agent_outputs/*.txt` to see streaming text, tool calls, and thinking from each agent in the subagent process.
+- **Work products**: Read files directly in `{{workspace}}/` to see what the subagent has created so far.
 
 ## Available Tools
 
@@ -3759,6 +3766,9 @@ spawn_subagents(
   Each task must include `task` and explicit `context_paths` (can be `[]`).
 - `list_subagents()` - Discovery/index of spawned subagents (status, workspace, session_id)
 - `continue_subagent(subagent_id, message, timeout_seconds?)` - Continue an existing subagent conversation
+- `send_message_to_subagent(subagent_id, message)` - Send a message to a RUNNING background subagent.
+  Use to steer direction mid-execution without waiting for completion.
+  Only works for background subagents that are currently running (not completed/failed).
 
 ## Result Format
 

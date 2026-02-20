@@ -160,6 +160,71 @@ class SubagentManager:
             f"timeout: {default_timeout}s (min: {min_timeout}s, max: {max_timeout}s)" + (f", log_dir: {self._subagent_logs_base}" if self._subagent_logs_base else ""),
         )
 
+    # Sequence counter for runtime inbox messages
+    _message_seq: int = 0
+
+    def send_message_to_subagent(
+        self,
+        subagent_id: str,
+        content: str,
+        target_agents: list[str] | None = None,
+    ) -> bool:
+        """Write a runtime message to a running subagent's inbox.
+
+        Messages are written as JSON files to
+        {workspace}/.massgen/runtime_inbox/msg_{timestamp}_{seq}.json
+        using an atomic write pattern (write .tmp, then rename).
+
+        Args:
+            subagent_id: ID of the subagent to message
+            content: Message content to deliver
+            target_agents: Optional list of inner agent IDs to target.
+                None broadcasts to all inner agents.
+
+        Returns:
+            True if message was written, False if subagent not found or not running
+        """
+        state = self._subagents.get(subagent_id)
+        if state is None:
+            logger.warning(f"[SubagentManager] Cannot send message: subagent '{subagent_id}' not found")
+            return False
+
+        if state.status != "running":
+            logger.warning(
+                f"[SubagentManager] Cannot send message: subagent '{subagent_id}' " f"is {state.status}, not running",
+            )
+            return False
+
+        workspace = Path(state.workspace_path)
+        inbox_dir = workspace / ".massgen" / "runtime_inbox"
+        inbox_dir.mkdir(parents=True, exist_ok=True)
+
+        SubagentManager._message_seq += 1
+        timestamp = int(time.time())
+        filename = f"msg_{timestamp}_{SubagentManager._message_seq}.json"
+
+        msg_data = {
+            "content": content,
+            "source": "parent",
+            "timestamp": datetime.now().isoformat(),
+            "target_agents": target_agents,
+        }
+
+        # Atomic write: write to .tmp then rename
+        tmp_path = inbox_dir / f"{filename}.tmp"
+        final_path = inbox_dir / filename
+        tmp_path.write_text(json.dumps(msg_data, indent=2))
+        tmp_path.rename(final_path)
+
+        logger.info(
+            f"[SubagentManager] Sent runtime message to {subagent_id}: " f"'{content[:50]}...' -> {final_path}",
+        )
+        return True
+
+    def get_running_subagent_ids(self) -> list[str]:
+        """Return IDs of currently running subagents."""
+        return [sid for sid, state in self._subagents.items() if state.status == "running"]
+
     def _validate_runtime_configuration(self) -> None:
         """Validate runtime mode/fallback configuration."""
         valid_runtime_modes = {"isolated", "inherited"}

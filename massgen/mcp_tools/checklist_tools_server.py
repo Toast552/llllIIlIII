@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,32 @@ import fastmcp
 logger = logging.getLogger(__name__)
 
 SERVER_NAME = "massgen_checklist"
+
+
+def _resolve_hook_middleware() -> Any:
+    """Return hook middleware class in both package and file-path launch modes."""
+    try:
+        from massgen.mcp_tools.hook_middleware import MassGenHookMiddleware
+
+        return MassGenHookMiddleware
+    except ImportError:
+        pass
+
+    try:
+        from .hook_middleware import MassGenHookMiddleware
+
+        return MassGenHookMiddleware
+    except ImportError:
+        pass
+
+    # fastmcp file-path launches can drop package context; add repo root explicitly.
+    project_root = str(Path(__file__).resolve().parents[2])
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+
+    from massgen.mcp_tools.hook_middleware import MassGenHookMiddleware
+
+    return MassGenHookMiddleware
 
 
 async def create_server() -> fastmcp.FastMCP:
@@ -49,8 +76,7 @@ async def create_server() -> fastmcp.FastMCP:
 
     # Attach hook middleware for PostToolUse injection if hook_dir is configured
     if args.hook_dir:
-        from .hook_middleware import MassGenHookMiddleware
-
+        MassGenHookMiddleware = _resolve_hook_middleware()
         mcp.add_middleware(MassGenHookMiddleware(Path(args.hook_dir)))
         logger.info("Hook middleware attached (hook_dir=%s)", args.hook_dir)
     specs_path = Path(args.specs)

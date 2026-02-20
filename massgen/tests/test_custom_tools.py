@@ -1047,6 +1047,63 @@ async def test_custom_tools_create_server_sets_custom_lifespan(monkeypatch, tmp_
     assert getattr(lifespan, "__name__", "") != "default_lifespan"
 
 
+@pytest.mark.asyncio
+async def test_custom_tools_create_server_standalone_with_hook_dir(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Standalone file-path loading must support --hook-dir without import errors.
+
+    fastmcp file-path launch loads this module outside package context.
+    Hook middleware import must still work in that mode.
+    """
+    import importlib.util
+
+    server_path = Path(__file__).parent.parent / "mcp_tools" / "custom_tools_server.py"
+    assert server_path.exists(), f"Expected server file at {server_path}"
+
+    specs_path = tmp_path / "custom_tool_specs.json"
+    specs_path.write_text(
+        json.dumps(
+            {
+                "custom_tools": [],
+                "background_mcp_servers": [],
+            },
+        ),
+        encoding="utf-8",
+    )
+    hook_dir = tmp_path / "hook_ipc"
+    hook_dir.mkdir(parents=True, exist_ok=True)
+
+    spec = importlib.util.spec_from_file_location("custom_tools_server", server_path)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["custom_tools_server"] = module
+    try:
+        spec.loader.exec_module(module)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "custom_tools_server.py",
+                "--tool-specs",
+                str(specs_path),
+                "--agent-id",
+                "agent_test",
+                "--allowed-paths",
+                str(tmp_path),
+                "--hook-dir",
+                str(hook_dir),
+            ],
+        )
+        server = await module.create_server()
+    finally:
+        sys.modules.pop("custom_tools_server", None)
+
+    available_tools = {tool.name for tool in server._tool_manager._tools.values()}
+    assert "custom_tool__wait_for_background_tool" in available_tools
+
+
 # ============================================================================
 # MCP tool schema type annotation tests
 # ============================================================================

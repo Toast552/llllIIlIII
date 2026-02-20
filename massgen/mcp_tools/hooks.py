@@ -29,6 +29,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
+from pathlib import Path
 from typing import Any, Literal, Optional
 
 from ..logger_config import logger
@@ -44,6 +45,15 @@ except ImportError:
     ClientSession = object
     types = None
     ProgressFnT = None
+
+
+class InjectionDeliveryStatus(Enum):
+    """Delivery status for hookless runtime injection payloads."""
+
+    QUEUED = "queued"
+    DELIVERED = "delivered"
+    DEFERRED = "deferred"
+    FAILED = "failed"
 
 
 class HookType(Enum):
@@ -1543,6 +1553,57 @@ def convert_sessions_to_permission_sessions(sessions: list[ClientSession], permi
     return converted
 
 
+class RuntimeInboxPoller:
+    """Polls a file-based inbox for runtime messages from parent process.
+
+    Used by subagent orchestrators. Messages are JSON files in
+    {workspace}/.massgen/runtime_inbox/msg_{timestamp}_{seq}.json.
+    Each file is consumed (deleted) after reading.
+    """
+
+    def __init__(self, inbox_dir: Path, min_poll_interval: float = 2.0):
+        self._inbox_dir = Path(inbox_dir)
+        self._min_poll_interval = min_poll_interval
+        self._last_poll_time: float = 0.0
+
+    def poll(self) -> list[dict]:
+        """Poll inbox for new messages.
+
+        Returns list of dicts with 'content' and 'target_agents' keys.
+        target_agents is None for messages that don't specify a target
+        (broadcast to all inner agents).
+        """
+        now = time.time()
+        if now - self._last_poll_time < self._min_poll_interval:
+            return []
+        self._last_poll_time = now
+
+        if not self._inbox_dir.exists():
+            return []
+
+        msg_files = sorted(self._inbox_dir.glob("msg_*.json"))
+        if not msg_files:
+            return []
+
+        messages: list[dict] = []
+        for f in msg_files:
+            try:
+                data = json.loads(f.read_text())
+                messages.append(
+                    {
+                        "content": data.get("content", ""),
+                        "target_agents": data.get("target_agents"),
+                    },
+                )
+                f.unlink()
+            except (json.JSONDecodeError, KeyError):
+                logger.warning(f"[RuntimeInboxPoller] Skipping malformed message: {f}")
+            except Exception as e:
+                logger.error(f"[RuntimeInboxPoller] Error reading {f}: {e}")
+
+        return messages
+
+
 class HumanInputHook(PatternHook):
     """PostToolUse hook that injects human-provided input during agent execution.
 
@@ -1853,7 +1914,10 @@ class HumanInputHook(PatternHook):
             )
 
             # Notify TUI for this agent injection.
-            if self._on_inject_callback:
+            # Callers can suppress the callback (e.g., Codex flush path where
+            # the hook file may not be consumed immediately by the model).
+            suppress_callback = (context or {}).get("suppress_inject_callback", False)
+            if self._on_inject_callback and not suppress_callback:
                 try:
                     self._on_inject_callback(combined_content, agent_id, delivered_messages)
                 except TypeError:
@@ -1899,6 +1963,7 @@ __all__ = [
     "SubagentCompleteHook",
     "HighPriorityTaskReminderHook",
     "HumanInputHook",
+    "RuntimeInboxPoller",
     # Per-round timeout hooks
     "RoundTimeoutPostHook",
     "RoundTimeoutPreHook",

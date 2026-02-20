@@ -275,6 +275,7 @@ class TokenCostCalculator:
             "claude-3-haiku": ModelPricing(0.00025, 0.00125, 200000, 4096),
         },
         "Google": {
+            "gemini-3.1-pro-preview": ModelPricing(0.002, 0.012, 1048576, 65536),  # $2/MTok input, $12/MTok output, 1M context, 64K output
             "gemini-2.0-flash-exp": ModelPricing(0.0, 0.0, 1048576, 8192),  # Free during experimental
             "gemini-2.0-flash-thinking-exp": ModelPricing(0.0, 0.0, 32767, 8192),
             "gemini-1.5-pro": ModelPricing(0.00125, 0.005, 2097152, 8192),
@@ -994,6 +995,8 @@ class TokenCostCalculator:
             return _with_source(provider_models.get("claude-3-haiku"), "claude-3-haiku")
 
         # Gemini variants
+        elif "gemini-3.1-pro" in model_lower:
+            return _with_source(provider_models.get("gemini-3.1-pro-preview"), "gemini-3.1-pro-preview")
         elif "gemini-2" in model_lower and "flash" in model_lower:
             return _with_source(provider_models.get("gemini-2.0-flash-exp"), "gemini-2.0-flash-exp")
         elif "gemini-1.5-pro" in model_lower:

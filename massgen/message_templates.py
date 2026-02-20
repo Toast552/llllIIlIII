@@ -896,7 +896,7 @@ Based on the coordination process above, present your final answer:"""
         if docker_mode:
             parts.append("**IMPORTANT: Docker Execution Environment**")
             parts.append("- You are running in a Linux Docker container (Debian-based)")
-            parts.append("- Base image: Python 3.12-slim with Node.js 20.x")
+            parts.append("- Base image: Python 3.11-slim with Node.js 20.x")
             parts.append("- Pre-installed: git, curl, build-essential, pytest, requests, numpy, pandas")
             parts.append("- Use `apt-get` for system packages (NOT brew, dnf, yum, etc.)")
 

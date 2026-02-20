@@ -17,8 +17,10 @@ TODOs:
   * Dynamic agent selection based on task requirements and orchestrator instructions
 """
 
+import ast
 import asyncio
 import concurrent.futures
+import inspect
 import json
 import os
 import secrets
@@ -41,6 +43,7 @@ from .coordination_tracker import CoordinationTracker
 if TYPE_CHECKING:
     from .dspy_paraphraser import QuestionParaphraser
     from .filesystem_manager import IsolationContextManager
+    from .mcp_tools.hooks import RuntimeInboxPoller
     from .subagent.models import SubagentResult
 
 from .logger_config import get_log_session_dir  # Import to get log directory
@@ -333,6 +336,8 @@ class Orchestrator(ChatAgent):
         # Human input hook for injecting user input during execution
         # Shared across all agents (one per orchestration session)
         self._human_input_hook: HumanInputHook | None = None
+        # Runtime inbox poller for receiving messages from parent process (subagent mode)
+        self._runtime_inbox_poller: "RuntimeInboxPoller | None" = None
         # Background subagent completion tracking
         # Stores pending results for each parent agent until they can be injected
         # Format: {parent_agent_id: [(subagent_id, SubagentResult), ...]}
@@ -1619,6 +1624,9 @@ class Orchestrator(ChatAgent):
         for agent_id, agent in self.agents.items():
             if hasattr(agent, "backend") and hasattr(agent.backend, "set_subagent_spawn_callback"):
                 self._setup_subagent_spawn_callback(agent_id, agent)
+
+        # Share subagent message callback with TUI display
+        self._share_subagent_message_callback_with_display()
 
     def _setup_subagent_spawn_callback(self, agent_id: str, agent: Any) -> None:
         """Set up callback to notify TUI when subagent spawning starts.
@@ -5416,17 +5424,24 @@ Your answer:"""
             List of (subagent_id, SubagentResult) tuples, or empty list
         """
         try:
-            # Get the agent to access its MCP client
+            # Get the agent to access its backend MCP tool bridge.
             agent = self.agents.get(agent_id)
-            if not agent or not hasattr(agent, "mcp_client"):
+            if not agent:
                 return []
 
             # Initialize injected set for this agent if needed
             if agent_id not in self._injected_subagents:
                 self._injected_subagents[agent_id] = set()
 
-            # Poll the subagent MCP server for all subagents
-            list_result = agent.mcp_client.call_tool(f"mcp__subagent_{agent_id}__list_subagents", {})
+            # Poll the subagent MCP server for all subagents.
+            list_result = self._call_subagent_mcp_tool(
+                parent_agent_id=agent_id,
+                tool_name="list_subagents",
+                params={},
+            )
+
+            if not isinstance(list_result, dict):
+                return []
 
             if not list_result.get("success") or not list_result.get("subagents"):
                 return []
@@ -5506,6 +5521,7 @@ Your answer:"""
         # Runtime human input must work for all backends, including those that
         # don't support hook registration (hookless fallback / Codex path).
         self._ensure_runtime_human_input_hook_initialized()
+        self._ensure_runtime_inbox_poller_initialized()
 
         # Check if backend supports native hooks (e.g., Claude Code)
         if hasattr(agent.backend, "supports_native_hooks") and agent.backend.supports_native_hooks():
@@ -5829,6 +5845,9 @@ Your answer:"""
 
         injection_parts: list[str] = []
 
+        # 0. Poll runtime inbox for messages from parent (subagent mode)
+        self._poll_runtime_inbox()
+
         # 1. Check for human input
         if self._human_input_hook:
             if hasattr(self._human_input_hook, "has_pending_input_for_agent"):
@@ -5840,10 +5859,22 @@ Your answer:"""
                 # Collect human input for this agent
                 pass
 
-                ctx = {"agent_id": agent_id, "hook_type": "PostToolUse"}
+                ctx = {
+                    "agent_id": agent_id,
+                    "hook_type": "PostToolUse",
+                    # Suppress inject callback — Codex hook file may not be consumed
+                    # until a tool call or round-end carryforward. The TUI should only
+                    # show "Delivered" when content is confirmed consumed by the model.
+                    "suppress_inject_callback": True,
+                }
                 result = await self._human_input_hook.execute("_flush", "{}", ctx)
                 if result.inject and result.inject.get("content"):
                     injection_parts.append(result.inject["content"])
+                    # Track that we wrote human input with suppressed callback.
+                    # At round-end, we'll fire the callback once delivery is confirmed.
+                    if not hasattr(self, "_codex_pending_inject_confirmation"):
+                        self._codex_pending_inject_confirmation: dict[str, str] = {}
+                    self._codex_pending_inject_confirmation[agent_id] = result.inject["content"]
 
         # 2. Check for subagent completions
         if self._background_subagents_enabled and self._pending_subagent_results.get(agent_id):
@@ -5989,7 +6020,12 @@ Your answer:"""
         agent_id: str,
     ) -> list[str]:
         """Collect hook-equivalent runtime payloads for hookless backends."""
+        from massgen.mcp_tools.hooks import InjectionDeliveryStatus
+
         sections: list[str] = []
+
+        # 0) Poll runtime inbox for messages from parent (subagent mode)
+        self._poll_runtime_inbox()
 
         # 1) Human runtime input
         has_pending_for_agent = False
@@ -6008,13 +6044,22 @@ Your answer:"""
             if human_result.inject and human_result.inject.get("content"):
                 sections.append(str(human_result.inject["content"]))
                 logger.info(
-                    "[Orchestrator] Hookless runtime input delivery status=delivered (%s)",
+                    "[Orchestrator] Hookless runtime input delivery status=%s (%s)",
+                    InjectionDeliveryStatus.DELIVERED.value,
                     agent_id,
                 )
+                _emitter = get_event_emitter()
+                if _emitter:
+                    _emitter.emit_injection_received(
+                        agent_id=agent_id,
+                        source_agents=["human"],
+                        injection_type="hookless_human_input",
+                    )
 
         # 2) Background subagent completions
         pending_subagent_results: list[tuple[str, "SubagentResult"]] = []
-        local_pending = self._pending_subagent_results.pop(agent_id, [])
+        # Peek (copy) instead of pop — only clear after successful delivery.
+        local_pending = list(self._pending_subagent_results.get(agent_id, []))
         if local_pending:
             pending_subagent_results.extend(local_pending)
         polled_pending = self._get_pending_subagent_results(agent_id)
@@ -6037,14 +6082,18 @@ Your answer:"""
                 context={"agent_id": agent_id},
             )
             if subagent_result.inject and subagent_result.inject.get("content"):
+                # Delivery succeeded — now clear the source.
+                self._pending_subagent_results.pop(agent_id, None)
                 sections.append(str(subagent_result.inject["content"]))
                 logger.info(
-                    "[Orchestrator] Hookless subagent completion delivery status=delivered (%s)",
+                    "[Orchestrator] Hookless subagent completion delivery status=%s (%s)",
+                    InjectionDeliveryStatus.DELIVERED.value,
                     agent_id,
                 )
 
         # 3) Background tool completions
-        background_jobs = self._no_hook_pending_background_tool_results.pop(agent_id, [])
+        # Peek (copy) instead of pop — only clear after successful delivery.
+        background_jobs = list(self._no_hook_pending_background_tool_results.get(agent_id, []))
         agent = self.agents.get(agent_id)
         if agent is not None:
             backend = getattr(agent, "backend", None)
@@ -6068,11 +6117,21 @@ Your answer:"""
                 context={"agent_id": agent_id},
             )
             if background_result.inject and background_result.inject.get("content"):
+                # Delivery succeeded — now clear the source.
+                self._no_hook_pending_background_tool_results.pop(agent_id, None)
                 sections.append(str(background_result.inject["content"]))
                 logger.info(
-                    "[Orchestrator] Hookless background-tool delivery status=delivered (%s)",
+                    "[Orchestrator] Hookless background-tool delivery status=%s (%s)",
+                    InjectionDeliveryStatus.DELIVERED.value,
                     agent_id,
                 )
+                _emitter = get_event_emitter()
+                if _emitter:
+                    _emitter.emit_injection_received(
+                        agent_id=agent_id,
+                        source_agents=[],
+                        injection_type="hookless_bg_tool",
+                    )
 
         return sections
 
@@ -6273,6 +6332,355 @@ Your answer:"""
 
         self._configure_human_input_hook_callbacks()
 
+    def _ensure_runtime_inbox_poller_initialized(self) -> None:
+        """Initialize the runtime inbox poller for subagent mode.
+
+        When running as a subagent, a file-based inbox allows the parent to
+        send runtime messages. Messages are polled and fed into the human
+        input hook for injection into the agent's context.
+        """
+        if self._runtime_inbox_poller is not None:
+            return
+
+        workspace_path: Path | None = None
+
+        # Prefer orchestrator workspace root derived from temp workspace.
+        # In subagent runs, backend cwd may point to per-agent subfolders
+        # (e.g., workspace/agent_1_xxx), while parent-injected runtime inbox
+        # messages are written under the orchestrator workspace root
+        # (e.g., workspace/.massgen/runtime_inbox).
+        if self._agent_temporary_workspace:
+            temp_workspace = Path(self._agent_temporary_workspace)
+            if temp_workspace.name == "temp" and temp_workspace.parent:
+                workspace_path = temp_workspace.parent
+            else:
+                workspace_path = temp_workspace
+
+        # Fallback: use agent backend workspace when temp-root metadata is unavailable.
+        if workspace_path is None:
+            for agent in self.agents.values():
+                backend = getattr(agent, "backend", None)
+                filesystem_manager = getattr(backend, "filesystem_manager", None) if backend else None
+                if not filesystem_manager:
+                    continue
+
+                get_workspace = getattr(filesystem_manager, "get_current_workspace", None)
+                if callable(get_workspace):
+                    resolved = get_workspace()
+                    if resolved:
+                        workspace_path = Path(resolved)
+                        break
+
+                cwd = getattr(filesystem_manager, "cwd", None)
+                if cwd:
+                    workspace_path = Path(cwd)
+                    break
+
+        if workspace_path is None:
+            return
+
+        from massgen.mcp_tools.hooks import RuntimeInboxPoller
+
+        inbox_dir = workspace_path / ".massgen" / "runtime_inbox"
+        self._runtime_inbox_poller = RuntimeInboxPoller(inbox_dir=inbox_dir)
+        logger.info(
+            f"[Orchestrator] Initialized runtime inbox poller: {inbox_dir}",
+        )
+
+    def _poll_runtime_inbox(self) -> None:
+        """Poll runtime inbox and feed messages into human input hook."""
+        if not self._runtime_inbox_poller:
+            return
+
+        messages = self._runtime_inbox_poller.poll()
+        if not messages:
+            return
+
+        self._ensure_runtime_human_input_hook_initialized()
+        for msg in messages:
+            content = msg["content"] if isinstance(msg, dict) else msg
+            target_agents = msg.get("target_agents") if isinstance(msg, dict) else None
+            logger.info(
+                "[Orchestrator] Injecting runtime inbox message: '%s' (target=%s)",
+                content[:80],
+                target_agents,
+            )
+            if self._human_input_hook:
+                self._human_input_hook.set_pending_input(content, target_agents=target_agents)
+
+    @staticmethod
+    def _try_parse_json_dict_from_text(raw_text: str | None) -> dict[str, Any] | None:
+        """Best-effort parse of a JSON object payload from text."""
+        if not isinstance(raw_text, str):
+            return None
+        payload = raw_text.strip()
+        if not payload:
+            return None
+        try:
+            parsed = json.loads(payload)
+        except Exception:
+            try:
+                parsed = ast.literal_eval(payload)
+            except Exception:
+                return None
+        return parsed if isinstance(parsed, dict) else None
+
+    @staticmethod
+    def _extract_text_from_mcp_content_payload(content: Any) -> str | None:
+        """Extract text blocks from MCP-style content payloads."""
+        if content is None:
+            return None
+
+        if isinstance(content, str):
+            return content
+
+        if isinstance(content, dict):
+            if "text" in content:
+                return str(content["text"])
+            nested = content.get("content")
+            return Orchestrator._extract_text_from_mcp_content_payload(nested)
+
+        if isinstance(content, list):
+            text_parts: list[str] = []
+            for item in content:
+                if isinstance(item, str):
+                    text_parts.append(item)
+                    continue
+                if hasattr(item, "text"):
+                    text_parts.append(str(item.text))
+                    continue
+                if isinstance(item, dict):
+                    if "text" in item:
+                        text_parts.append(str(item["text"]))
+                        continue
+                    nested = Orchestrator._extract_text_from_mcp_content_payload(item)
+                    if nested:
+                        text_parts.append(nested)
+            return "\n".join(part for part in text_parts if part) or None
+
+        return None
+
+    @classmethod
+    def _normalize_subagent_mcp_result(cls, raw_result: Any) -> dict[str, Any] | None:
+        """Normalize backend/MCP tool call return values to dict payloads."""
+        if raw_result is None:
+            return None
+
+        # Common backend path: (result_str, result_obj)
+        if isinstance(raw_result, tuple) and len(raw_result) >= 2:
+            tuple_obj = raw_result[1]
+            if isinstance(tuple_obj, dict):
+                return tuple_obj
+            parsed_from_str = cls._try_parse_json_dict_from_text(
+                raw_result[0] if isinstance(raw_result[0], str) else None,
+            )
+            if parsed_from_str is not None:
+                return parsed_from_str
+            raw_result = tuple_obj
+
+        if isinstance(raw_result, dict):
+            # Some MCP wrappers return {'content': [...]} instead of parsed JSON.
+            if "success" not in raw_result and "content" in raw_result:
+                content_text = cls._extract_text_from_mcp_content_payload(
+                    raw_result.get("content"),
+                )
+                parsed_content = cls._try_parse_json_dict_from_text(content_text)
+                if parsed_content is not None:
+                    return parsed_content
+            return raw_result
+
+        if isinstance(raw_result, str):
+            return cls._try_parse_json_dict_from_text(raw_result)
+
+        # MCP CallToolResult-like object.
+        if hasattr(raw_result, "content"):
+            content_text = cls._extract_text_from_mcp_content_payload(
+                getattr(raw_result, "content", None),
+            )
+            parsed_content = cls._try_parse_json_dict_from_text(content_text)
+            if parsed_content is not None:
+                return parsed_content
+            is_error = bool(getattr(raw_result, "isError", False))
+            if content_text:
+                return {"success": not is_error, "output": content_text}
+            return {"success": not is_error}
+
+        return None
+
+    def _call_subagent_mcp_tool(
+        self,
+        parent_agent_id: str,
+        tool_name: str,
+        params: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Call a subagent MCP tool for a parent agent across backend implementations."""
+        agent = self.agents.get(parent_agent_id)
+        if not agent:
+            return None
+
+        full_tool_name = f"mcp__subagent_{parent_agent_id}__{tool_name}"
+        backend = getattr(agent, "backend", None)
+
+        # Preferred path for OpenAI-compatible/Claude/Gemini/Grok style backends.
+        mcp_executor = getattr(backend, "_execute_mcp_function_with_retry", None)
+        if callable(mcp_executor):
+            try:
+                from .utils import run_async_safely
+
+                raw_result = run_async_safely(
+                    mcp_executor(full_tool_name, json.dumps(params)),
+                )
+                normalized = self._normalize_subagent_mcp_result(raw_result)
+                if normalized is not None:
+                    return normalized
+            except Exception as exc:
+                logger.debug(
+                    "[Orchestrator] Backend MCP executor call failed for %s (%s): %s",
+                    full_tool_name,
+                    parent_agent_id,
+                    exc,
+                )
+
+        # Claude Code backend path uses a lazily initialized background MCP client.
+        background_client_getter = getattr(backend, "_get_background_mcp_client", None)
+        if callable(background_client_getter):
+            try:
+                from .utils import run_async_safely
+
+                async def _call_with_background_client() -> Any:
+                    client = await background_client_getter()
+                    if not client:
+                        return None
+                    return await client.call_tool(
+                        name=full_tool_name,
+                        arguments=params,
+                    )
+
+                raw_result = run_async_safely(_call_with_background_client())
+                normalized = self._normalize_subagent_mcp_result(raw_result)
+                if normalized is not None:
+                    return normalized
+            except Exception as exc:
+                logger.debug(
+                    "[Orchestrator] Background MCP client call failed for %s (%s): %s",
+                    full_tool_name,
+                    parent_agent_id,
+                    exc,
+                )
+
+        # Legacy/fallback path used by tests and older adapters.
+        mcp_client = getattr(agent, "mcp_client", None)
+        if mcp_client and hasattr(mcp_client, "call_tool"):
+            try:
+                call_result = mcp_client.call_tool(full_tool_name, params)
+                if inspect.isawaitable(call_result):
+                    from .utils import run_async_safely
+
+                    call_result = run_async_safely(call_result)
+                normalized = self._normalize_subagent_mcp_result(call_result)
+                if normalized is not None:
+                    return normalized
+            except Exception as exc:
+                logger.debug(
+                    "[Orchestrator] Legacy MCP client call failed for %s (%s): %s",
+                    full_tool_name,
+                    parent_agent_id,
+                    exc,
+                )
+
+        return None
+
+    def _send_runtime_message_via_direct_inbox_write(
+        self,
+        parent_agent_id: str,
+        subagent_id: str,
+        content: str,
+        target_agents: list[str] | None = None,
+    ) -> bool:
+        """Fallback: write runtime message directly to subagent workspace inbox.
+
+        This bypasses MCP request/response delivery and is useful when the
+        subagent MCP server is busy handling a blocking spawn call.
+        """
+        agent = self.agents.get(parent_agent_id)
+        backend = getattr(agent, "backend", None) if agent else None
+        filesystem_manager = getattr(backend, "filesystem_manager", None)
+        get_workspace = getattr(filesystem_manager, "get_current_workspace", None) if filesystem_manager else None
+        if not callable(get_workspace):
+            return False
+
+        workspace = get_workspace()
+        if not workspace:
+            return False
+
+        parent_workspace = Path(workspace)
+        if not parent_workspace.exists():
+            return False
+
+        subagent_workspace = parent_workspace / "subagents" / subagent_id / "workspace"
+        if not subagent_workspace.exists() or not subagent_workspace.is_dir():
+            return False
+
+        inbox_dir = subagent_workspace / ".massgen" / "runtime_inbox"
+        inbox_dir.mkdir(parents=True, exist_ok=True)
+
+        msg_data = {
+            "content": content,
+            "source": "parent",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "target_agents": target_agents,
+        }
+        file_stem = f"msg_{int(time.time())}_{secrets.token_hex(4)}"
+        tmp_path = inbox_dir / f"{file_stem}.json.tmp"
+        final_path = inbox_dir / f"{file_stem}.json"
+        tmp_path.write_text(json.dumps(msg_data, indent=2))
+        tmp_path.rename(final_path)
+
+        logger.info(
+            f"[Orchestrator] Runtime message delivered via direct inbox fallback for subagent {subagent_id} " f"(parent={parent_agent_id}, target={target_agents})",
+        )
+        return True
+
+    def send_runtime_message_to_subagent(
+        self,
+        subagent_id: str,
+        content: str,
+        target_agents: list[str] | None = None,
+    ) -> bool:
+        """Route a runtime message to a running subagent via MCP tool call."""
+        params: dict[str, Any] = {
+            "subagent_id": subagent_id,
+            "message": content,
+        }
+        if target_agents is not None:
+            params["target_agents"] = target_agents
+
+        for parent_agent_id in self.agents:
+            result = self._call_subagent_mcp_tool(
+                parent_agent_id=parent_agent_id,
+                tool_name="send_message_to_subagent",
+                params=params,
+            )
+            if isinstance(result, dict) and result.get("success"):
+                logger.info(
+                    f"[Orchestrator] Runtime message delivered to subagent {subagent_id} via {parent_agent_id} " f"(target={target_agents})",
+                )
+                return True
+            if self._send_runtime_message_via_direct_inbox_write(
+                parent_agent_id=parent_agent_id,
+                subagent_id=subagent_id,
+                content=content,
+                target_agents=target_agents,
+            ):
+                return True
+            logger.debug(
+                f"[Orchestrator] Runtime message delivery attempt via {parent_agent_id} " f"failed for subagent {subagent_id} (result={result})",
+            )
+        logger.warning(
+            f"[Orchestrator] Failed to deliver runtime message to subagent {subagent_id} " f"after trying {len(self.agents)} parent agent route(s)",
+        )
+        return False
+
     def _configure_human_input_hook_callbacks(self) -> None:
         """Configure queue callbacks for runtime-input-aware wait interruption."""
         if not self._human_input_hook:
@@ -6389,6 +6797,18 @@ Your answer:"""
             logger.info("[Orchestrator] Shared human input hook with TUI display")
         else:
             logger.debug("[Orchestrator] Display does not support human input hook")
+
+    def _share_subagent_message_callback_with_display(self) -> None:
+        """Share the subagent message callback with the TUI display.
+
+        Called from setup_subagent_spawn_callbacks() when coordination_ui is available.
+        """
+        display = None
+        if hasattr(self, "coordination_ui") and self.coordination_ui:
+            display = getattr(self.coordination_ui, "display", None)
+        if display and hasattr(display, "set_subagent_message_callback"):
+            display.set_subagent_message_callback(self.send_runtime_message_to_subagent)
+            logger.info("[Orchestrator] Shared subagent message callback with TUI display")
 
     def _register_round_timeout_hooks(
         self,
@@ -7908,6 +8328,8 @@ Your answer:"""
             If restart_pending is True, agent gracefully terminates with "done" signal.
             restart_pending is cleared at the beginning of execution.
         """
+        from massgen.mcp_tools.hooks import InjectionDeliveryStatus
+
         agent = self.agents[agent_id]
 
         # Get backend name for logging
@@ -8427,6 +8849,26 @@ Your answer:"""
                 agent_id,
             )
 
+            # Inject unconsumed MCP hook content from previous round
+            # (e.g., human input written to hook file but model only used native tools)
+            unconsumed = getattr(self, "_unconsumed_mcp_injections", {}).pop(agent_id, None)
+            if unconsumed:
+                conversation_messages[1]["content"] += (
+                    "\n\n[IMPORTANT — Runtime update from user that arrived during your previous round" " but could not be delivered mid-stream. You MUST address this now.]\n" + unconsumed
+                )
+                logger.info(
+                    "[Orchestrator] Injected %d chars of unconsumed MCP hook content into user message for %s",
+                    len(unconsumed),
+                    agent_id,
+                )
+                # Now that unconsumed content is truly delivered to the model,
+                # fire the inject callback so TUI shows "Delivered".
+                if self._human_input_hook and self._human_input_hook._on_inject_callback:
+                    try:
+                        self._human_input_hook._on_inject_callback(unconsumed, agent_id)
+                    except Exception:
+                        pass  # Best-effort TUI notification
+
             enforcement_msg = self.message_templates.enforcement_message()
 
             # Update agent status to STREAMING
@@ -8452,6 +8894,9 @@ Your answer:"""
 
                 has_hook_delivery = self._backend_supports_midstream_hook_injection(agent)
                 if not has_hook_delivery and not is_first_real_attempt and not self._check_restart_pending(agent_id):
+                    # Poll runtime inbox for messages from parent (subagent mode)
+                    self._poll_runtime_inbox()
+
                     has_pending_runtime_updates = False
 
                     has_pending_runtime_input = False
@@ -8464,21 +8909,24 @@ Your answer:"""
                     if has_pending_runtime_input:
                         has_pending_runtime_updates = True
                         logger.info(
-                            "[Orchestrator] Hookless runtime input delivery status=queued (%s)",
+                            "[Orchestrator] Hookless runtime input delivery status=%s (%s)",
+                            InjectionDeliveryStatus.QUEUED.value,
                             agent_id,
                         )
 
                     if self._background_subagents_enabled and self._pending_subagent_results.get(agent_id):
                         has_pending_runtime_updates = True
                         logger.info(
-                            "[Orchestrator] Hookless subagent completion delivery status=queued (%s)",
+                            "[Orchestrator] Hookless subagent completion delivery status=%s (%s)",
+                            InjectionDeliveryStatus.QUEUED.value,
                             agent_id,
                         )
 
                     if self._poll_no_hook_background_tool_updates(agent_id, agent):
                         has_pending_runtime_updates = True
                         logger.info(
-                            "[Orchestrator] Hookless background-tool delivery status=queued (%s)",
+                            "[Orchestrator] Hookless background-tool delivery status=%s (%s)",
+                            InjectionDeliveryStatus.QUEUED.value,
                             agent_id,
                         )
 
@@ -9064,6 +9512,31 @@ Your answer:"""
                         )
                         yield ("done", None)
                         return
+
+                # After streaming ends, check for unconsumed MCP hook content.
+                # If the hook file still exists, the middleware never delivered it
+                # (e.g., Codex only used native tools). Carry it forward.
+                if hasattr(agent.backend, "read_unconsumed_hook_content"):
+                    leftover = agent.backend.read_unconsumed_hook_content()
+                    if leftover:
+                        if not hasattr(self, "_unconsumed_mcp_injections"):
+                            self._unconsumed_mcp_injections: dict[str, str] = {}
+                        self._unconsumed_mcp_injections[agent_id] = leftover
+                        logger.info(
+                            "[Orchestrator] Unconsumed MCP hook content for %s (%d chars) — will include in next round",
+                            agent_id,
+                            len(leftover),
+                        )
+                    else:
+                        # Hook file was consumed by MCP middleware (model saw it
+                        # during a tool call). Fire the suppressed inject callback
+                        # so TUI shows "Delivered".
+                        pending_content = getattr(self, "_codex_pending_inject_confirmation", {}).pop(agent_id, None)
+                        if pending_content and self._human_input_hook and self._human_input_hook._on_inject_callback:
+                            try:
+                                self._human_input_hook._on_inject_callback(pending_content, agent_id)
+                            except Exception:
+                                pass  # Best-effort TUI notification
 
                 # Handle multiple vote calls - take the last vote (agent's final decision)
                 vote_calls = [tc for tc in tool_calls if agent.backend.extract_tool_name(tc) == "vote"]

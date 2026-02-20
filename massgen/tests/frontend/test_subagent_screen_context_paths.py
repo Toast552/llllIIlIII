@@ -46,5 +46,6 @@ async def test_subagent_header_context_paths_are_clickable() -> None:
         context_buttons = [button for button in app.query(Button) if button.has_class("context-path-btn")]
         assert len(context_buttons) == 2
 
-        await pilot.click("#context_path_btn_0")
+        # Generation counter starts at 1 after first mount
+        await pilot.click(f"#{context_buttons[0].id}")
         assert app.clicked_paths == ["docs/brief.md"]

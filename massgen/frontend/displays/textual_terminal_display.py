@@ -783,6 +783,11 @@ class TextualTerminalDisplay(TerminalDisplay):
         else:
             logger.warning(f"[Display] Cannot forward hook: _app={self._app}, has method={hasattr(self._app, 'set_human_input_hook') if self._app else 'N/A'}")
 
+    def set_subagent_message_callback(self, callback) -> None:
+        """Set the callback for sending messages to running subagents."""
+        if self._app and hasattr(self._app, "set_subagent_message_callback"):
+            self._app.set_subagent_message_callback(callback)
+
     def initialize(self, question: str, log_filename: str | None = None):
         """Initialize display with file output."""
         self.question = question
@@ -3444,6 +3449,7 @@ if TEXTUAL_AVAILABLE:
             # Human input during execution state
             self._queued_human_input: str | None = None
             self._human_input_hook = None  # Set by orchestrator via set_human_input_hook()
+            self._subagent_message_callback = None  # Set by orchestrator via set_subagent_message_callback()
             self._queued_input_banner: QueuedInputBanner | None = None
             self._queued_input_region: Container | None = None
             self._queued_input_row: Horizontal | None = None
@@ -4990,6 +4996,10 @@ if TEXTUAL_AVAILABLE:
             self._sync_queued_input_banner_from_hook()
             tui_log(f"[HumanInput] Set human input hook: {hook}")
 
+        def set_subagent_message_callback(self, callback) -> None:
+            """Set the callback for sending messages to running subagents."""
+            self._subagent_message_callback = callback
+
         def _submit_question(
             self,
             submitted_text: str | None = None,
@@ -5895,6 +5905,7 @@ Type your question and press Enter to ask the agents.
                 all_subagents=[subagent],
                 status_callback=self._get_decomposition_runtime_subagent,
                 auto_return_on_completion=auto_return_on_completion,
+                send_message_callback=self._subagent_message_callback,
             )
             self.push_screen(screen)
             return True
@@ -6058,6 +6069,7 @@ Type your question and press Enter to ask the agents.
                 all_subagents=[subagent],
                 status_callback=self._get_persona_runtime_subagent,
                 auto_return_on_completion=auto_return_on_completion,
+                send_message_callback=self._subagent_message_callback,
             )
             self.push_screen(screen)
             return True
@@ -7789,6 +7801,7 @@ Type your question and press Enter to ask the agents.
                                     subagent=running[0],
                                     all_subagents=card.subagents,
                                     status_callback=self._build_subagent_status_callback(card),
+                                    send_message_callback=self._subagent_message_callback,
                                 )
                                 self.push_screen(screen)
                                 return
@@ -7797,6 +7810,7 @@ Type your question and press Enter to ask the agents.
                                 subagent=card.subagents[0],
                                 all_subagents=card.subagents,
                                 status_callback=self._build_subagent_status_callback(card),
+                                send_message_callback=self._subagent_message_callback,
                             )
                             self.push_screen(screen)
                             return
@@ -9583,6 +9597,7 @@ Type your question and press Enter to ask the agents.
                 subagent=event.subagent,
                 all_subagents=event.all_subagents,
                 status_callback=status_callback,
+                send_message_callback=self._subagent_message_callback,
             )
             self.push_screen(screen, _on_screen_dismiss)
             event.stop()

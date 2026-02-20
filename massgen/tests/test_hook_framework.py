@@ -22,6 +22,7 @@ from massgen.mcp_tools.hooks import (
     HookResult,
     HookType,
     HumanInputHook,
+    InjectionDeliveryStatus,
     MidStreamInjectionHook,
     PatternHook,
     PythonCallableHook,
@@ -1632,3 +1633,181 @@ class TestBackgroundToolCompleteHook:
         assert "bgtool_2" in result.inject["content"]
         assert "custom_tool__generate_media" in result.inject["content"]
         assert "mcp__command_line__execute_command" in result.inject["content"]
+
+
+# =============================================================================
+# InjectionDeliveryStatus Tests
+# =============================================================================
+
+
+class TestInjectionDeliveryStatus:
+    """Tests for the InjectionDeliveryStatus enum."""
+
+    def test_has_required_members(self):
+        assert InjectionDeliveryStatus.QUEUED.value == "queued"
+        assert InjectionDeliveryStatus.DELIVERED.value == "delivered"
+        assert InjectionDeliveryStatus.DEFERRED.value == "deferred"
+        assert InjectionDeliveryStatus.FAILED.value == "failed"
+
+    def test_has_exactly_four_members(self):
+        assert len(InjectionDeliveryStatus) == 4
+
+
+# =============================================================================
+# HumanInputHook suppress_inject_callback Tests
+# =============================================================================
+
+
+class TestHumanInputHookSuppressCallback:
+    """Codex flush path suppresses the inject callback so TUI doesn't show
+    'Delivered' before the model actually consumes the hook file."""
+
+    @pytest.mark.asyncio
+    async def test_suppress_inject_callback_prevents_callback(self):
+        hook = HumanInputHook()
+        hook.set_pending_input("test message")
+
+        callback_fired = []
+        hook.set_inject_callback(lambda content, agent_id, *a: callback_fired.append(agent_id))
+
+        result = await hook.execute(
+            "_flush",
+            "{}",
+            context={"agent_id": "agent_a", "suppress_inject_callback": True},
+        )
+
+        assert result.inject is not None
+        assert "test message" in result.inject["content"]
+        assert callback_fired == [], "Callback must NOT fire when suppress_inject_callback=True"
+
+    @pytest.mark.asyncio
+    async def test_callback_fires_without_suppress_flag(self):
+        hook = HumanInputHook()
+        hook.set_pending_input("test message")
+
+        callback_fired = []
+        hook.set_inject_callback(lambda content, agent_id, *a: callback_fired.append(agent_id))
+
+        result = await hook.execute(
+            "some_tool",
+            "{}",
+            context={"agent_id": "agent_a"},
+        )
+
+        assert result.inject is not None
+        assert callback_fired == ["agent_a"], "Callback must fire without suppress flag"
+
+
+# =============================================================================
+# RuntimeInboxPoller Tests
+# =============================================================================
+
+
+class TestRuntimeInboxPoller:
+    """Tests for RuntimeInboxPoller file-based inbox polling."""
+
+    def test_poll_returns_messages_in_order(self, tmp_path):
+        """Write 3 message files, verify poll returns them sorted by timestamp."""
+        from massgen.mcp_tools.hooks import RuntimeInboxPoller
+
+        inbox = tmp_path / "inbox"
+        inbox.mkdir()
+
+        # Create 3 messages with different timestamps in name
+        for i, ts in enumerate(["1740000001", "1740000003", "1740000002"]):
+            msg = {"content": f"message {ts}", "source": "parent", "timestamp": "2025-01-01T00:00:00Z"}
+            (inbox / f"msg_{ts}_{i}.json").write_text(json.dumps(msg))
+
+        poller = RuntimeInboxPoller(inbox_dir=inbox, min_poll_interval=0.0)
+        messages = poller.poll()
+
+        assert len(messages) == 3
+        assert messages[0]["content"] == "message 1740000001"
+        assert messages[1]["content"] == "message 1740000002"
+        assert messages[2]["content"] == "message 1740000003"
+
+    def test_poll_deletes_consumed_files(self, tmp_path):
+        """Verify files are removed after reading."""
+        from massgen.mcp_tools.hooks import RuntimeInboxPoller
+
+        inbox = tmp_path / "inbox"
+        inbox.mkdir()
+
+        msg = {"content": "delete me", "source": "parent", "timestamp": "2025-01-01T00:00:00Z"}
+        (inbox / "msg_1740000000_0.json").write_text(json.dumps(msg))
+
+        poller = RuntimeInboxPoller(inbox_dir=inbox, min_poll_interval=0.0)
+        messages = poller.poll()
+
+        assert len(messages) == 1
+        assert messages[0]["content"] == "delete me"
+        assert not list(inbox.glob("msg_*.json")), "Consumed files should be deleted"
+
+    def test_poll_returns_empty_when_no_directory(self, tmp_path):
+        """Inbox dir doesn't exist → empty list."""
+        from massgen.mcp_tools.hooks import RuntimeInboxPoller
+
+        poller = RuntimeInboxPoller(inbox_dir=tmp_path / "nonexistent", min_poll_interval=0.0)
+        messages = poller.poll()
+
+        assert messages == []
+
+    def test_poll_rate_limited(self, tmp_path):
+        """Two rapid polls, second returns empty list."""
+        from massgen.mcp_tools.hooks import RuntimeInboxPoller
+
+        inbox = tmp_path / "inbox"
+        inbox.mkdir()
+
+        msg = {"content": "first", "source": "parent", "timestamp": "2025-01-01T00:00:00Z"}
+        (inbox / "msg_1740000000_0.json").write_text(json.dumps(msg))
+
+        poller = RuntimeInboxPoller(inbox_dir=inbox, min_poll_interval=10.0)
+        first = poller.poll()
+        assert len(first) == 1
+
+        # Write another message
+        msg2 = {"content": "second", "source": "parent", "timestamp": "2025-01-01T00:00:01Z"}
+        (inbox / "msg_1740000001_0.json").write_text(json.dumps(msg2))
+
+        second = poller.poll()
+        assert second == [], "Second poll within min_poll_interval should return empty"
+
+    def test_poll_skips_malformed_json(self, tmp_path):
+        """Bad JSON file is skipped (not consumed), valid ones returned."""
+        from massgen.mcp_tools.hooks import RuntimeInboxPoller
+
+        inbox = tmp_path / "inbox"
+        inbox.mkdir()
+
+        # Valid message
+        msg = {"content": "valid", "source": "parent", "timestamp": "2025-01-01T00:00:00Z"}
+        (inbox / "msg_1740000001_0.json").write_text(json.dumps(msg))
+
+        # Malformed message
+        (inbox / "msg_1740000002_0.json").write_text("not json{{{")
+
+        poller = RuntimeInboxPoller(inbox_dir=inbox, min_poll_interval=0.0)
+        messages = poller.poll()
+
+        assert len(messages) == 1
+        assert messages[0]["content"] == "valid"
+        # Malformed file should still exist (not consumed)
+        assert (inbox / "msg_1740000002_0.json").exists()
+
+    def test_poll_idempotent(self, tmp_path):
+        """Consumed files not re-read on subsequent polls."""
+        from massgen.mcp_tools.hooks import RuntimeInboxPoller
+
+        inbox = tmp_path / "inbox"
+        inbox.mkdir()
+
+        msg = {"content": "once only", "source": "parent", "timestamp": "2025-01-01T00:00:00Z"}
+        (inbox / "msg_1740000000_0.json").write_text(json.dumps(msg))
+
+        poller = RuntimeInboxPoller(inbox_dir=inbox, min_poll_interval=0.0)
+        first = poller.poll()
+        assert len(first) == 1
+
+        second = poller.poll()
+        assert second == [], "Already consumed messages should not reappear"

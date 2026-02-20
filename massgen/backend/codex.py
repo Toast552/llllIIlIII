@@ -377,6 +377,32 @@ class CodexBackend(NativeToolBackendMixin, LLMBackend):
             len(content),
         )
 
+    def read_unconsumed_hook_content(self) -> str | None:
+        """Read and remove any unconsumed hook payload.
+
+        Called after a streaming round ends. If the hook file still exists,
+        the MCP middleware never consumed it. Returns the injection content
+        so the orchestrator can carry it forward to the next round.
+        """
+        hook_file = self.get_hook_dir() / "hook_post_tool_use.json"
+        try:
+            data = json.loads(hook_file.read_text(encoding="utf-8"))
+            hook_file.unlink(missing_ok=True)
+            inject = data.get("inject", {})
+            content = inject.get("content")
+            if content:
+                logger.info(
+                    "Read unconsumed hook content (%d chars) — carrying forward",
+                    len(content),
+                )
+            return content
+        except FileNotFoundError:
+            return None
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning("Failed reading unconsumed hook file: %s", e)
+            hook_file.unlink(missing_ok=True)
+            return None
+
     def clear_hook_files(self) -> None:
         """Remove stale hook files. Called at start of each turn."""
         hook_dir = self.get_hook_dir()
@@ -673,11 +699,17 @@ class CodexBackend(NativeToolBackendMixin, LLMBackend):
                 mcp_servers.extend(config_mcp)
         # Merge in self.mcp_servers (custom tools etc.) avoiding duplicates by name
         existing_names = {s.get("name") for s in mcp_servers if isinstance(s, dict)}
+        logger.info(
+            "Codex config merge: from orchestrator config=%s, from self.mcp_servers=%s",
+            [s.get("name", "?") for s in mcp_servers if isinstance(s, dict)],
+            [s.get("name", "?") for s in self.mcp_servers if isinstance(s, dict)],
+        )
         for s in self.mcp_servers:
             if isinstance(s, dict) and s.get("name") not in existing_names:
                 mcp_servers.append(s)
         if mcp_servers:
-            logger.info(f"Codex workspace config: writing {len(mcp_servers)} MCP server(s)")
+            server_names = [s.get("name", "?") for s in mcp_servers if isinstance(s, dict)]
+            logger.info(f"Codex workspace config: writing {len(mcp_servers)} MCP server(s): {server_names}")
         if mcp_servers:
             mcp_section: dict[str, Any] = {}
 
@@ -726,6 +758,11 @@ class CodexBackend(NativeToolBackendMixin, LLMBackend):
 
             if mcp_section:
                 config["mcp_servers"] = mcp_section
+                logger.info(f"Codex config.toml MCP servers written: {list(mcp_section.keys())}")
+                for sname, sconf in mcp_section.items():
+                    cmd = sconf.get("command", "?")
+                    args_preview = str(sconf.get("args", []))[:120]
+                    logger.info(f"  MCP [{sname}]: command={cmd}, args={args_preview}")
 
         # Mirror skills into CODEX_HOME/skills so Codex skill discovery can find
         # project/merged skills under the same scoped home directory.
@@ -793,6 +830,13 @@ class CodexBackend(NativeToolBackendMixin, LLMBackend):
             self._write_toml_fallback(config, config_path)
 
         self._workspace_config_written = True
+        # Debug: read back and log the written config
+        try:
+            written = config_path.read_text()
+            # Log first 500 chars to see MCP section
+            logger.info(f"Codex config.toml written ({len(written)} chars): {written[:800]}")
+        except Exception:
+            pass
 
     @staticmethod
     def _toml_value(v: Any) -> str:

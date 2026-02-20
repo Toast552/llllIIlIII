@@ -11,7 +11,7 @@ Example:
 """
 
 import os
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 
 from prompt_toolkit.completion import (
@@ -45,7 +45,7 @@ class AtPathCompleter(Completer):
         base_path: Path | None = None,
         only_directories: bool = False,
         expanduser: bool = True,
-        file_filter: callable | None = None,
+        file_filter: Callable | None = None,
     ):
         """Initialize AtPathCompleter.
 

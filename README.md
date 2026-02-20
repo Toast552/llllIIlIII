@@ -11,7 +11,7 @@
 [![PyPI](https://img.shields.io/pypi/v/massgen?style=flat-square&logo=pypi&logoColor=white&label=PyPI&color=3775A9)](https://pypi.org/project/massgen/)
 [![Docs](https://img.shields.io/badge/docs-massgen.ai-blue?style=flat-square&logo=readthedocs&logoColor=white)](https://docs.massgen.ai)
 [![GitHub Stars](https://img.shields.io/github/stars/Leezekun/MassGen?style=flat-square&logo=github&color=181717&logoColor=white)](https://github.com/Leezekun/MassGen)
-[![Python 3.12+](https://img.shields.io/badge/python-3.12+-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/downloads/)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
 
 </div>
@@ -40,7 +40,7 @@
   <i>Scaling AI with collaborative, continuously improving agents</i>
 </p>
 
-MassGen is a cutting-edge multi-agent system that leverages the power of collaborative AI to solve complex tasks. It assigns a task to multiple AI agents who work in parallel, observe each other's progress, and refine their approaches to converge on the best solution to deliver a comprehensive and high-quality result. The power of this "parallel study group" approach is exemplified by advanced systems like xAI's Grok Heavy and Google DeepMind's Gemini Deep Think.
+MassGen is a cutting-edge multi-agent framework that coordinates AI agents to solve complex tasks through redundancy and iterative refinement. Every agent tackles the full problem, observing, critiquing, and building on each other's work across cycles of refinement and restarts. When agents believe they have a strong enough answer, they vote, and the best collectively validated answer wins. This approach to parallel refinement and collective validation lays the groundwork for principled multi-agent scaling, where the system continuously improves its outputs by leveraging diverse agent perspectives and enforcing quality through consensus.
 
 This project started with the "threads of thought" and "iterative refinement" ideas presented in [The Myth of Reasoning](https://docs.ag2.ai/latest/docs/blog/2025/04/16/Reasoning/), and extends the classic "multi-agent conversation" idea in [AG2](https://github.com/ag2ai/ag2). Here is a [video recording](https://www.youtube.com/watch?v=xM2Uguw1UsQ) of the background context introduction presented at the Berkeley Agentic AI Summit 2025.
 
@@ -233,7 +233,7 @@ This collaborative approach ensures that the final output leverages collective i
 
 ### 1. 📥 Installation
 
-**Method 1: PyPI Installation** (Recommended - Python 3.12+):
+**Method 1: PyPI Installation** (Recommended - Python 3.11+):
 
 ```bash
 # Install MassGen via pip

@@ -476,3 +476,290 @@ async def test_stream_coordination_surfaces_external_tool_calls_and_stops(mock_o
     assert tool_chunks[0].tool_calls[0]["name"] == "external_lookup"
     assert chunks[-1].type == "done"
     assert votes == {}
+
+
+# =============================================================================
+# Hookless delivery silent-drop prevention (MAS-308)
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_hookless_bg_tool_delivery_failure_does_not_silently_drop(mock_orchestrator, monkeypatch):
+    """If background tool formatting fails inside the hook, items must not be permanently lost."""
+    from massgen.mcp_tools.hooks import BackgroundToolCompleteHook
+
+    orchestrator = mock_orchestrator(num_agents=1)
+    agent_id = "agent_a"
+
+    jobs = [
+        {"job_id": "bg1", "tool_name": "my_tool", "status": "completed", "result": "ok"},
+    ]
+    orchestrator._no_hook_pending_background_tool_results[agent_id] = list(jobs)
+
+    # Make formatting raise so the hook returns allow() with no inject
+    BackgroundToolCompleteHook._format_completed_jobs
+    monkeypatch.setattr(
+        BackgroundToolCompleteHook,
+        "_format_completed_jobs",
+        staticmethod(lambda _jobs: (_ for _ in ()).throw(RuntimeError("format exploded"))),
+    )
+
+    sections = await orchestrator._collect_no_hook_runtime_fallback_sections(agent_id)
+
+    # No content was delivered (formatting failed)
+    assert not sections or not any("bg1" in s for s in sections)
+
+    # But the items must still be available for retry
+    remaining = orchestrator._no_hook_pending_background_tool_results.get(agent_id, [])
+    assert len(remaining) >= 1, "Items must not be permanently dropped on delivery failure"
+
+
+@pytest.mark.asyncio
+async def test_hookless_subagent_delivery_failure_does_not_silently_drop(mock_orchestrator, monkeypatch):
+    """If subagent result formatting fails, items must be preserved for retry."""
+    from massgen.subagent.models import SubagentResult
+
+    orchestrator = mock_orchestrator(num_agents=1)
+    agent_id = "agent_a"
+
+    result = SubagentResult(
+        subagent_id="sub_1",
+        status="completed",
+        success=True,
+        answer="Found it",
+    )
+    orchestrator._pending_subagent_results[agent_id] = [("sub_1", result)]
+    # Suppress MCP polling
+    monkeypatch.setattr(orchestrator, "_get_pending_subagent_results", lambda _aid: [])
+
+    # Make formatting raise inside the hook's execute path
+    monkeypatch.setattr(
+        "massgen.subagent.result_formatter.format_batch_results",
+        lambda _results: (_ for _ in ()).throw(RuntimeError("format exploded")),
+    )
+
+    sections = await orchestrator._collect_no_hook_runtime_fallback_sections(agent_id)
+
+    assert not sections or not any("sub_1" in s for s in sections)
+
+    remaining = orchestrator._pending_subagent_results.get(agent_id, [])
+    assert len(remaining) >= 1, "Subagent results must not be permanently dropped on delivery failure"
+
+
+# =============================================================================
+# Hookless delivery event emissions (MAS-308)
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_hookless_human_input_delivery_emits_event(mock_orchestrator, monkeypatch):
+    """Delivering human input via hookless path should emit an injection_received event."""
+    from massgen.mcp_tools.hooks import HumanInputHook
+
+    orchestrator = mock_orchestrator(num_agents=1)
+    agent_id = "agent_a"
+
+    orchestrator._human_input_hook = HumanInputHook()
+    orchestrator._human_input_hook.set_pending_input("Prioritize accuracy.")
+
+    emitted_events = []
+
+    # Patch the event emitter at module level
+    class _FakeEmitter:
+        def emit_injection_received(self, agent_id, source_agents, injection_type):
+            emitted_events.append({"agent_id": agent_id, "injection_type": injection_type})
+
+    monkeypatch.setattr(
+        "massgen.orchestrator.get_event_emitter",
+        lambda: _FakeEmitter(),
+    )
+
+    sections = await orchestrator._collect_no_hook_runtime_fallback_sections(agent_id)
+
+    assert sections, "Human input should have been delivered"
+    assert any(e["injection_type"] == "hookless_human_input" for e in emitted_events), f"Expected hookless_human_input emission, got {emitted_events}"
+
+
+@pytest.mark.asyncio
+async def test_hookless_bg_tool_delivery_emits_event(mock_orchestrator, monkeypatch):
+    """Delivering background tool results via hookless path should emit an event."""
+    orchestrator = mock_orchestrator(num_agents=1)
+    agent_id = "agent_a"
+
+    orchestrator._no_hook_pending_background_tool_results[agent_id] = [
+        {"job_id": "bg1", "tool_name": "my_tool", "status": "completed", "result": "ok"},
+    ]
+
+    emitted_events = []
+
+    class _FakeEmitter:
+        def emit_injection_received(self, agent_id, source_agents, injection_type):
+            emitted_events.append({"agent_id": agent_id, "injection_type": injection_type})
+
+    monkeypatch.setattr(
+        "massgen.orchestrator.get_event_emitter",
+        lambda: _FakeEmitter(),
+    )
+
+    sections = await orchestrator._collect_no_hook_runtime_fallback_sections(agent_id)
+
+    assert sections, "Background tool results should have been delivered"
+    assert any(e["injection_type"] == "hookless_bg_tool" for e in emitted_events), f"Expected hookless_bg_tool emission, got {emitted_events}"
+
+
+# =============================================================================
+# Backend capability contract tests (MAS-308)
+# =============================================================================
+
+
+def test_mock_llm_backend_classified_as_hookless(mock_orchestrator):
+    """MockLLMBackend must classify as hookless so tests exercise the fallback path."""
+    orchestrator = mock_orchestrator(num_agents=1)
+    agent = orchestrator.agents["agent_a"]
+    assert orchestrator._backend_supports_midstream_hook_injection(agent) is False
+
+
+def test_backend_with_set_general_hook_manager_is_hook_capable(mock_orchestrator):
+    """Any backend implementing set_general_hook_manager() is hook-capable."""
+    orchestrator = mock_orchestrator(num_agents=1)
+
+    class _GHMBackend:
+        def set_general_hook_manager(self, m):
+            pass
+
+    class _Agent:
+        backend = _GHMBackend()
+
+    assert orchestrator._backend_supports_midstream_hook_injection(_Agent()) is True
+
+
+# =============================================================================
+# Full-round hookless integration test (MAS-308)
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_hookless_runtime_input_delivered_at_next_safe_checkpoint(mock_orchestrator, monkeypatch):
+    """Full round-trip: queue human input -> hookless enforcement -> delivered in enforcement msg."""
+    from massgen.mcp_tools.hooks import HumanInputHook
+
+    orchestrator = mock_orchestrator(num_agents=1)
+    agent_id = "agent_a"
+    state = orchestrator.agent_states[agent_id]
+    state.restart_pending = True
+    state.answer = "existing answer"
+
+    # Ensure MockLLMBackend is hookless
+    assert not orchestrator._backend_supports_midstream_hook_injection(
+        orchestrator.agents[agent_id],
+    )
+
+    # Queue human input
+    orchestrator._human_input_hook = HumanInputHook()
+    orchestrator._human_input_hook.set_pending_input(
+        "Add a section on limitations.",
+        target_agents=[agent_id],
+    )
+
+    # No peer-answer updates
+    monkeypatch.setattr(
+        orchestrator,
+        "_select_midstream_answer_updates",
+        lambda _agent_id, _answers: ({}, False),
+    )
+
+    result = await orchestrator._prepare_no_hook_midstream_enforcement(agent_id, {})
+
+    assert result is not None
+    assert "limitations" in result, "Queued human input must appear in enforcement message"
+
+
+# =============================================================================
+# Runtime inbox polling integration tests (MAS-310)
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_inbox_messages_fed_into_human_input_hook(mock_orchestrator, tmp_path, monkeypatch):
+    """Create orchestrator with inbox poller, write message file, verify it surfaces
+    in _collect_no_hook_runtime_fallback_sections()."""
+    import json
+
+    from massgen.mcp_tools.hooks import HumanInputHook, RuntimeInboxPoller
+
+    orchestrator = mock_orchestrator(num_agents=1)
+    agent_id = "agent_a"
+
+    # Set up inbox poller on the orchestrator
+    inbox_dir = tmp_path / ".massgen" / "runtime_inbox"
+    inbox_dir.mkdir(parents=True)
+    orchestrator._runtime_inbox_poller = RuntimeInboxPoller(
+        inbox_dir=inbox_dir,
+        min_poll_interval=0.0,
+    )
+
+    # Set up human input hook
+    orchestrator._human_input_hook = HumanInputHook()
+
+    # Write a message file to the inbox
+    msg = {"content": "focus on edge cases", "source": "parent", "timestamp": "2025-01-01T00:00:00Z"}
+    (inbox_dir / "msg_1740000000_1.json").write_text(json.dumps(msg))
+
+    # Poll inbox and inject into human input hook (this is what the orchestrator does)
+    messages = orchestrator._runtime_inbox_poller.poll()
+    for m in messages:
+        orchestrator._human_input_hook.set_pending_input(
+            m["content"],
+            target_agents=m.get("target_agents"),
+        )
+
+    # Stub event emitter
+    monkeypatch.setattr(
+        "massgen.orchestrator.get_event_emitter",
+        lambda: None,
+    )
+
+    # Collect sections
+    sections = await orchestrator._collect_no_hook_runtime_fallback_sections(agent_id)
+
+    assert sections, "Inbox messages should produce runtime sections"
+    combined = "\n".join(sections)
+    assert "focus on edge cases" in combined, "Inbox message content must appear in sections"
+
+
+@pytest.mark.asyncio
+async def test_inbox_polling_in_codex_path(mock_orchestrator, tmp_path, monkeypatch):
+    """Verify inbox messages appear in Codex hook file write path."""
+    import json
+
+    from massgen.mcp_tools.hooks import HumanInputHook, RuntimeInboxPoller
+
+    orchestrator = mock_orchestrator(num_agents=1)
+    agent_id = "agent_a"
+
+    # Set up inbox poller
+    inbox_dir = tmp_path / ".massgen" / "runtime_inbox"
+    inbox_dir.mkdir(parents=True)
+    orchestrator._runtime_inbox_poller = RuntimeInboxPoller(
+        inbox_dir=inbox_dir,
+        min_poll_interval=0.0,
+    )
+
+    # Set up human input hook
+    orchestrator._human_input_hook = HumanInputHook()
+
+    # Write inbox message
+    msg = {"content": "skip CSS audit", "source": "parent", "timestamp": "2025-01-01T00:00:00Z"}
+    (inbox_dir / "msg_1740000000_1.json").write_text(json.dumps(msg))
+
+    # Simulate what _poll_runtime_inbox does
+    messages = orchestrator._runtime_inbox_poller.poll()
+    for m in messages:
+        orchestrator._human_input_hook.set_pending_input(
+            m["content"],
+            target_agents=m.get("target_agents"),
+        )
+
+    # Verify it's now pending
+    assert orchestrator._human_input_hook.has_pending_input()
+    assert orchestrator._human_input_hook.has_pending_input_for_agent(agent_id)

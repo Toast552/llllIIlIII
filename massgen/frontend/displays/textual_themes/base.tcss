@@ -1233,7 +1233,8 @@ SuggestionRow.selected {
 }
 
 /* Question input - multi-line TextArea with rounded card style */
-#question_input_row {
+#question_input_row,
+.shared-question-input-row {
     layout: horizontal;
     width: 100%;
     height: auto;
@@ -1244,7 +1245,8 @@ SuggestionRow.selected {
     background: transparent;
 }
 
-#question_input {
+#question_input,
+.shared-question-input {
     background: transparent;
     border: none;
     width: 1fr;
@@ -1256,17 +1258,20 @@ SuggestionRow.selected {
     padding: 0 1 0 0;
 }
 
-#question_input:focus {
+#question_input:focus,
+.shared-question-input:focus {
     background: transparent;
     border: none;
 }
 
 /* Hide line numbers in the question input */
-#question_input .text-area--line-number-gutter {
+#question_input .text-area--line-number-gutter,
+.shared-question-input .text-area--line-number-gutter {
     display: none;
 }
 
-#question_input .text-area--placeholder {
+#question_input .text-area--placeholder,
+.shared-question-input .text-area--placeholder {
     color: $text-muted;
     text-style: italic;
 }
@@ -1337,7 +1342,8 @@ SuggestionRow.selected {
     text-align: right;
 }
 
-#inject_target_button {
+#inject_target_button,
+.shared-inject-target-button {
     height: 1;
     min-height: 1;
     width: auto;
@@ -1352,12 +1358,15 @@ SuggestionRow.selected {
 }
 
 #inject_target_button:hover,
-#inject_target_button:focus {
+#inject_target_button:focus,
+.shared-inject-target-button:hover,
+.shared-inject-target-button:focus {
     background: $surface;
     color: $text;
 }
 
-#inject_target_button.mode-current {
+#inject_target_button.mode-current,
+.shared-inject-target-button.mode-current {
     background: $primary 18%;
     color: $text;
 }
@@ -1423,11 +1432,13 @@ SuggestionRow.selected {
 }
 
 /* Vim normal mode - input border */
-#question_input.vim-normal {
+#question_input.vim-normal,
+.shared-question-input.vim-normal {
     border: solid $warning;
 }
 
-#question_input.vim-normal:focus {
+#question_input.vim-normal:focus,
+.shared-question-input.vim-normal:focus {
     border: solid $warning;
 }
 

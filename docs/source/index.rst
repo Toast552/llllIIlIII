@@ -17,7 +17,7 @@ MassGen: Multi-Agent Scaling System for GenAI
        <img src="https://img.shields.io/github/stars/Leezekun/MassGen?style=flat-square&logo=github&color=181717&logoColor=white" alt="GitHub Stars">
      </a>
      <a href="https://www.python.org/downloads/">
-       <img src="https://img.shields.io/badge/python-3.12+-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.12+">
+       <img src="https://img.shields.io/badge/python-3.11+-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.11+">
      </a>
      <a href="https://github.com/Leezekun/MassGen/blob/main/LICENSE">
        <img src="https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square" alt="License">
@@ -58,7 +58,7 @@ MassGen is a cutting-edge multi-agent system that leverages the power of collabo
 * **Share Workspaces** - When agents provide answers, their workspace is captured so others can review their work
 * **Natural Consensus** - Coordination continues until all agents vote, then the agent with most votes presents the final answer
 
-Think of it as a "parallel study group" for AI - inspired by advanced systems like **xAI's Grok Heavy** and **Google DeepMind's Gemini Deep Think**. Agents learn from each other to produce better results than any single agent could achieve alone.
+MassGen is a cutting-edge multi-agent framework that coordinates AI agents through **redundancy and iterative refinement**. Agents tackle the full problem, observe and build on each other's work across cycles of refinement and restarts, then vote — and the best collectively validated answer wins. This lays the groundwork for principled multi-agent scaling and self-improvement.
 
 .. raw:: html
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -501,3 +502,143 @@ def test_timeline_snapshot_real_tui_runtime_injection_queue_and_delivery(
         terminal_size=(150, 44),
         run_before=_seed_real_tui_runtime_injection_snapshot,
     )
+
+
+async def _seed_real_tui_subagent_input_bar_snapshot(pilot) -> None:  # noqa: ANN001 - fixture-provided type
+    app = pilot.app
+    panel = app.agent_widgets["agent_a"]
+    panel._hide_loading()
+    _stop_round_timers_if_running(app)
+
+    from massgen.frontend.displays.textual_widgets.subagent_screen import SubagentScreen
+
+    subagent = _make_snapshot_subagent(
+        "parity_input_subagent",
+        status="running",
+        task="Refine edge-case tests while parent agent continues.",
+        elapsed_seconds=38.0,
+        timeout_seconds=300.0,
+    )
+
+    def _status_callback(_subagent_id: str) -> SubagentDisplayData:
+        return subagent
+
+    app._subagent_message_callback = lambda _subagent_id, _content, target_agents=None: True
+    app.push_screen(
+        SubagentScreen(
+            subagent=subagent,
+            all_subagents=[subagent],
+            status_callback=_status_callback,
+            send_message_callback=app._subagent_message_callback,
+        ),
+    )
+
+    await pilot.pause()
+    app.set_focus(None)
+    _stop_all_tui_timers(app)
+    await pilot.pause()
+
+
+async def _seed_real_tui_subagent_runtime_queue_snapshot(pilot) -> None:  # noqa: ANN001 - fixture-provided type
+    app = pilot.app
+    panel = app.agent_widgets["agent_a"]
+    panel._hide_loading()
+    _stop_round_timers_if_running(app)
+
+    from massgen.frontend.displays.textual_widgets.subagent_screen import (
+        SubagentScreen,
+        SubagentView,
+    )
+
+    subagent = _make_snapshot_subagent(
+        "parity_queue_subagent",
+        status="running",
+        task="Refine runtime-injection handling while parent agent continues execution.",
+        elapsed_seconds=71.0,
+        timeout_seconds=300.0,
+    )
+
+    def _status_callback(_subagent_id: str) -> SubagentDisplayData:
+        return subagent
+
+    app._subagent_message_callback = lambda _subagent_id, _content, target_agents=None: True
+    app.push_screen(
+        SubagentScreen(
+            subagent=subagent,
+            all_subagents=[subagent],
+            status_callback=_status_callback,
+            send_message_callback=app._subagent_message_callback,
+        ),
+    )
+
+    await pilot.pause()
+    view = app.screen.query_one("#subagent-view", SubagentView)
+
+    # Mirror main runtime queue semantics: multiple queued messages with mixed
+    # delivery state so the compact "N messages queued" summary renders.
+    view._inner_agents = ["agent_a", "agent_b"]
+    view._queue_runtime_message(
+        "Please add one adversarial test case for malformed runtime payloads.",
+        target="all",
+    )
+    view._queue_runtime_message(
+        "Also include an edge-case around empty tool-call arguments.",
+        target="all",
+    )
+    # First message delivered to agent_a; second remains pending for both.
+    view._mark_runtime_messages_delivered_for_agent(
+        "agent_a",
+        injection_content="[Human Input]: Please add one adversarial test case for malformed runtime payloads.",
+    )
+    assert len(view._queued_runtime_messages) == 2
+    assert view._queued_runtime_banner is not None
+    assert view._queued_runtime_region is not None
+    assert "visible" in view._queued_runtime_region.classes
+
+    app.set_focus(None)
+    _stop_all_tui_timers(app)
+    await pilot.pause()
+
+
+def test_timeline_snapshot_real_tui_subagent_input_bar(
+    snap_compare,
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Snapshot of SubagentScreen runtime input bar using main-app styling contract."""
+    _configure_real_tui_snapshot_environment(monkeypatch)
+    assert snap_compare(
+        _build_real_tui_snapshot_app(tmp_path),
+        terminal_size=(150, 44),
+        run_before=_seed_real_tui_subagent_input_bar_snapshot,
+    )
+
+
+def test_timeline_snapshot_real_tui_subagent_runtime_injection_queue(
+    snap_compare,
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Snapshot of SubagentScreen queued runtime-injection banner + input bar."""
+    _configure_real_tui_snapshot_environment(monkeypatch)
+    assert snap_compare(
+        _build_real_tui_snapshot_app(tmp_path),
+        terminal_size=(150, 44),
+        run_before=_seed_real_tui_subagent_runtime_queue_snapshot,
+    )
+    snapshot_path = Path(__file__).parent / "__snapshots__" / "test_timeline_snapshot_scaffold" / "test_timeline_snapshot_real_tui_subagent_runtime_injection_queue.svg"
+    snapshot_text = snapshot_path.read_text(encoding="utf-8")
+    assert "2&#160;messages&#160;queued" in snapshot_text
+    assert "Cancel&#160;latest" in snapshot_text
+    assert "Clear&#160;queue" in snapshot_text
+    queue_y_match = re.search(
+        r'<text[^>]* y="([0-9.]+)"[^>]*>2&#160;messages&#160;queued</text>',
+        snapshot_text,
+    )
+    running_y_match = re.search(
+        r'<text[^>]* y="([0-9.]+)"[^>]*>Running&#160;\(0s\)&#160;&#160;</text>',
+        snapshot_text,
+    )
+    assert queue_y_match is not None
+    assert running_y_match is not None
+    assert float(queue_y_match.group(1)) < float(running_y_match.group(1))

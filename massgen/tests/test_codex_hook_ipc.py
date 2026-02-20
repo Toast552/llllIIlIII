@@ -97,3 +97,42 @@ class TestClearHookFiles:
         backend = _make_codex_backend(tmp_path)
         # Should not raise
         backend.clear_hook_files()
+
+
+class TestReadUnconsumedHookContent:
+    def test_returns_content_when_file_exists(self, tmp_path: Path) -> None:
+        backend = _make_codex_backend(tmp_path)
+        backend.write_post_tool_use_hook("unconsumed human input")
+
+        result = backend.read_unconsumed_hook_content()
+        assert result == "unconsumed human input"
+
+    def test_deletes_file_after_read(self, tmp_path: Path) -> None:
+        backend = _make_codex_backend(tmp_path)
+        backend.write_post_tool_use_hook("content")
+
+        backend.read_unconsumed_hook_content()
+        hook_file = backend.get_hook_dir() / "hook_post_tool_use.json"
+        assert not hook_file.exists()
+
+    def test_returns_none_when_no_file(self, tmp_path: Path) -> None:
+        backend = _make_codex_backend(tmp_path)
+        assert backend.read_unconsumed_hook_content() is None
+
+    def test_consumed_hook_returns_none_on_second_read(self, tmp_path: Path) -> None:
+        """Once consumed, a second call returns None (idempotent)."""
+        backend = _make_codex_backend(tmp_path)
+        backend.write_post_tool_use_hook("some content")
+        first = backend.read_unconsumed_hook_content()
+        assert first is not None
+        assert backend.read_unconsumed_hook_content() is None
+
+    def test_returns_none_for_malformed_json(self, tmp_path: Path) -> None:
+        backend = _make_codex_backend(tmp_path)
+        hook_dir = backend.get_hook_dir()
+        hook_dir.mkdir(parents=True, exist_ok=True)
+        (hook_dir / "hook_post_tool_use.json").write_text("not json")
+
+        assert backend.read_unconsumed_hook_content() is None
+        # File should be cleaned up
+        assert not (hook_dir / "hook_post_tool_use.json").exists()

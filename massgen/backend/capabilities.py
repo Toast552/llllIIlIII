@@ -308,6 +308,7 @@ BACKEND_CAPABILITIES: dict[str, BackendCapabilities] = {
         builtin_tools=["google_search_retrieval", "code_execution"],
         filesystem_support="mcp",
         models=[
+            "gemini-3.1-pro-preview",
             "gemini-3-flash-preview",
             "gemini-3-pro-preview",
             "gemini-2.5-flash",
@@ -317,6 +318,7 @@ BACKEND_CAPABILITIES: dict[str, BackendCapabilities] = {
         env_var="GEMINI_API_KEY",
         notes="Google Search Retrieval provides web search. Image understanding. Image generation via Imagen 3. Video generation via Veo 2.",
         model_release_dates={
+            "gemini-3.1-pro-preview": "2026-02",
             "gemini-3-flash-preview": "2025-12",
             "gemini-3-pro-preview": "2025-11",
             "gemini-2.5-flash": "2025-06",
