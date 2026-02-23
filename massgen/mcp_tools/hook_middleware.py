@@ -37,6 +37,40 @@ try:
 except ImportError:
     _HAS_MCP_TYPES = False
 
+try:
+    from fastmcp.tools.tool import ToolResult as FastMCPToolResult
+
+    _HAS_FASTMCP_TOOL_RESULT = True
+except ImportError:
+    FastMCPToolResult = None  # type: ignore[assignment]
+    _HAS_FASTMCP_TOOL_RESULT = False
+
+
+class _CompatToolResult:
+    """Compatibility ToolResult for runtimes without fastmcp.tools.tool.ToolResult."""
+
+    def __init__(
+        self,
+        *,
+        content: list[Any],
+        structured_content: dict[str, Any] | None = None,
+        meta: dict[str, Any] | None = None,
+    ) -> None:
+        self.content = content
+        self.structured_content = structured_content
+        self.meta = meta
+
+    def to_mcp_result(self) -> Any:
+        if self.meta is not None and _HAS_MCP_TYPES:
+            return mcp_types.CallToolResult(
+                structuredContent=self.structured_content,
+                content=self.content,
+                _meta=self.meta,
+            )
+        if self.structured_content is None:
+            return self.content
+        return self.content, self.structured_content
+
 
 class MassGenHookMiddleware(Middleware):
     """FastMCP middleware that injects hook content into MCP tool results.
@@ -45,6 +79,10 @@ class MassGenHookMiddleware(Middleware):
     appends injection content to the tool result before returning to the caller.
     Uses file-based IPC: orchestrator writes, middleware reads and consumes.
     """
+
+    _RUNTIME_INPUT_MARKER = "[Human Input]:"
+    _RUNTIME_INPUT_KEY = "massgen_runtime_input"
+    _RUNTIME_INPUT_PRIORITY_KEY = "massgen_runtime_input_priority"
 
     def __init__(self, hook_dir: Path) -> None:
         self._hook_dir = hook_dir
@@ -170,6 +208,33 @@ class MassGenHookMiddleware(Middleware):
         )
         return content
 
+    @classmethod
+    def _extract_runtime_input_line(cls, injection: str) -> str | None:
+        """Extract a normalized runtime-input line from injected text, if present."""
+        if cls._RUNTIME_INPUT_MARKER not in injection:
+            return None
+        _, _, tail = injection.partition(cls._RUNTIME_INPUT_MARKER)
+        normalized_tail = tail.strip()
+        if not normalized_tail:
+            return None
+        return f"{cls._RUNTIME_INPUT_MARKER} {normalized_tail}"
+
+    @classmethod
+    def _augment_structured_content(
+        cls,
+        structured_content: dict[str, Any] | None,
+        injection: str,
+    ) -> dict[str, Any] | None:
+        """Mirror human runtime input into structured_content for better salience."""
+        runtime_line = cls._extract_runtime_input_line(injection)
+        if runtime_line is None:
+            return structured_content
+
+        merged: dict[str, Any] = dict(structured_content or {})
+        merged[cls._RUNTIME_INPUT_KEY] = runtime_line
+        merged[cls._RUNTIME_INPUT_PRIORITY_KEY] = "high"
+        return merged
+
     @staticmethod
     def _append_to_result(result: Any, injection: str) -> Any:
         """Append injection text to the tool result.
@@ -187,16 +252,60 @@ class MassGenHookMiddleware(Middleware):
             # Fallback: use a simple string
             injection_item = f"\n{injection}"
 
-        # Handle different result types
-        if isinstance(result, list):
-            return [*result, injection_item]
-        elif isinstance(result, str):
-            # Convert string result to list format
+        # FastMCP middleware expects a ToolResult-like object from on_call_tool.
+        # Returning raw lists causes downstream failures when FastMCP calls
+        # result.to_mcp_result().
+        def _build_tool_result(
+            *,
+            content: list[Any],
+            structured_content: dict[str, Any] | None = None,
+            meta: dict[str, Any] | None = None,
+        ) -> Any:
+            if _HAS_FASTMCP_TOOL_RESULT and FastMCPToolResult is not None:
+                return FastMCPToolResult(
+                    content=content,
+                    structured_content=structured_content,
+                    meta=meta,
+                )
+            return _CompatToolResult(
+                content=content,
+                structured_content=structured_content,
+                meta=meta,
+            )
+
+        def _with_runtime_structured_content(structured_content: dict[str, Any] | None) -> dict[str, Any] | None:
+            return MassGenHookMiddleware._augment_structured_content(
+                structured_content,
+                injection,
+            )
+
+        # Generic ToolResult-like handling (works across FastMCP versions/layouts)
+        if hasattr(result, "to_mcp_result") and hasattr(result, "content"):
+            return _build_tool_result(
+                content=[*list(result.content), injection_item],  # type: ignore[arg-type]
+                structured_content=_with_runtime_structured_content(
+                    getattr(result, "structured_content", None),
+                ),
+                meta=getattr(result, "meta", None),
+            )
+
+        if isinstance(result, str):
             if _HAS_MCP_TYPES:
                 original_item = mcp_types.TextContent(type="text", text=result)
-                return [original_item, injection_item]
-            else:
-                return [result, injection_item]
-        else:
-            # Unknown type — try to wrap
-            return [result, injection_item]
+                return _build_tool_result(
+                    content=[original_item, injection_item],
+                    structured_content=_with_runtime_structured_content(None),
+                )
+            return _build_tool_result(
+                content=[result, injection_item],
+                structured_content=_with_runtime_structured_content(None),
+            )
+        if isinstance(result, list):
+            return _build_tool_result(
+                content=[*result, injection_item],
+                structured_content=_with_runtime_structured_content(None),
+            )
+        return _build_tool_result(
+            content=[result, injection_item],
+            structured_content=_with_runtime_structured_content(None),
+        )
