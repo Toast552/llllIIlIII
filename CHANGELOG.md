@@ -40,7 +40,7 @@ Background tool execution for non-blocking long-running work. Planning task veri
   - `max_frames` cost guardrail (default 30, max 60)
   - Config: `multimodal_config.video`
 
-- **Remotion Skill in Quickstart** ([#938](https://github.com/massgen/MassGen/pull/938)): Video generation/editing skill auto-installed during quickstart
+- **Remotion Skill in Quickstart** ([#938](https://github.com/massgen/MassGen/pull/938)): Video generation/editing skill installed when selected during quickstart
 
 ### Changed
 - **Checklist System Update** ([#938](https://github.com/massgen/MassGen/pull/938)): T-prefix to E-prefix naming, 0-100 to 0-10 score scale, `item_categories` for core/stretch, convergence off-ramp when all core items pass

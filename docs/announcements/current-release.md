@@ -50,7 +50,7 @@ We're excited to release MassGen v0.1.55, adding Specialized Subagent Types & Dy
 
 **Also in this release:**
 - Configurable Video Frame Extraction: Scene-based (PySceneDetect) or uniform extraction with `max_frames` cost guardrail
-- Remotion Skill in Quickstart: Video generation/editing skill auto-installed during quickstart
+- Remotion Skill in Quickstart: Video generation/editing skill installed when selected during quickstart
 - Checklist System Update: T-prefix to E-prefix naming, 0-100 to 0-10 score scale, core/stretch item categories
 - Unified Pre-Collaboration: Persona generation, decomposition, and eval criteria generation unified as composable primitives
 

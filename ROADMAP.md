@@ -339,7 +339,7 @@ Want to contribute or collaborate on a specific track? Reach out to the track ow
 
 **5. Remotion Skill in Quickstart** (@ncrispino)
 - PR: [#938](https://github.com/massgen/MassGen/pull/938)
-- Video generation/editing skill auto-installed during quickstart
+- Video generation/editing skill installed when selected during quickstart
 - **Use Case**: Video creation capabilities available out of the box
 
 **6. Composition Documentation** (@ncrispino)

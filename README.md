@@ -171,7 +171,7 @@ This project started with the "threads of thought" and "iterative refinement" id
 pip install --upgrade massgen
 
 # Multi-agent coordination with specialized subagents
-uv run massgen --config @examples/features/test_subagent_orchestrator_code_mode.yaml "Use subagents to research Bob Dylan"
+uv run massgen --config massgen/configs/features/background_subagent_example.yaml --cwd-context ro "Use an explorer subagent to analyze this repo"
 ```
 
 → [See full release history and examples](massgen/configs/README.md#release-history--examples)
@@ -1252,7 +1252,7 @@ MassGen is currently in its foundational stage, with a focus on parallel, asynch
 
 #### Also in this release
 - **Configurable Video Frame Extraction**: Scene-based (PySceneDetect) or uniform extraction with `max_frames` cost guardrail
-- **Remotion Skill in Quickstart**: Video generation/editing skill auto-installed during quickstart
+- **Remotion Skill in Quickstart**: Video generation/editing skill installed when selected during quickstart
 - **Checklist System Update**: T-prefix to E-prefix naming, 0-100 to 0-10 score scale, core/stretch item categories
 - **Unified Pre-Collaboration**: Persona generation, decomposition, and eval criteria generation unified as composable primitives
 

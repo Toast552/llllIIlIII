@@ -235,7 +235,7 @@ Most configurations use environment variables for API keys:so
 - **Dynamic Evaluation Criteria**: GEPA-inspired task-specific evaluation criteria with domain presets and core/stretch categorization
 - **Native Backend Image Routing**: `understand_image` routes to agent's own backend (Claude, Gemini, Grok, Claude Code, Codex) with OpenAI fallback
 - **Configurable Video Frame Extraction**: Scene-based (PySceneDetect) or uniform extraction with `max_frames` cost guardrail
-- **Remotion Skill in Quickstart**: Video generation/editing skill auto-installed during quickstart
+- **Remotion Skill in Quickstart**: Video generation/editing skill installed when selected during quickstart
 - **Unified Pre-Collaboration**: Persona generation, decomposition, and eval criteria generation unified as composable primitives
 
 **Try It:**
@@ -244,7 +244,7 @@ Most configurations use environment variables for API keys:so
 pip install --upgrade massgen
 
 # Multi-agent coordination with specialized subagents
-uv run massgen --config @examples/features/test_subagent_orchestrator_code_mode.yaml "Use subagents to research Bob Dylan"
+uv run massgen --config massgen/configs/features/background_subagent_example.yaml --cwd-context ro "Use an explorer subagent to analyze this repo"
 ```
 
 ### v0.1.54
