@@ -237,6 +237,30 @@ class TestOnCallTool:
         assert any("plain string result" in text for text in texts)
         assert any("injected" in text for text in texts)
 
+    @pytest.mark.asyncio
+    async def test_human_input_injection_mirrors_into_structured_content(self, tmp_path: Path) -> None:
+        from fastmcp.tools.tool import ToolResult
+
+        from massgen.mcp_tools.hook_middleware import MassGenHookMiddleware
+
+        _write_hook_file(tmp_path, _make_payload(content="[Human Input]: also include bob dylan"))
+
+        mw = MassGenHookMiddleware(hook_dir=tmp_path)
+        mock_context = MagicMock()
+        mock_context.message.name = "some_tool"
+
+        original_result = ToolResult(content="Original output", structured_content={"success": True})
+
+        async def mock_call_next(ctx):
+            return original_result
+
+        result = await mw.on_call_tool(mock_context, mock_call_next)
+        assert isinstance(result, ToolResult)
+        assert result.structured_content is not None
+        assert result.structured_content["success"] is True
+        assert result.structured_content["massgen_runtime_input"] == "[Human Input]: also include bob dylan"
+        assert result.structured_content["massgen_runtime_input_priority"] == "high"
+
 
 class TestToolResultCompatibilityFallback:
     """Ensure fallback path still returns ToolResult-like objects."""

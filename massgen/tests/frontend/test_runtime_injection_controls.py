@@ -552,3 +552,51 @@ def test_notify_phase_idle_skips_once_fallback_submit_after_restart():
     assert set_timer_calls == []
     assert clear_calls == []
     assert app._skip_queued_fallback_once_after_restart is False
+
+
+def test_update_execution_status_reconciles_queue_when_pending_drains_without_callback():
+    hook = _HookStub()
+    hook.set_pending_input("also research bob dylan", target_agents=["agent_a"])
+    banner = _BannerStub()
+    tab_bar = _TabBarStub()
+    status_updates: list[str] = []
+
+    app = SimpleNamespace(
+        _execution_status=SimpleNamespace(update=lambda text: status_updates.append(text)),
+        _status_bar=None,
+        _human_input_hook=hook,
+        _queued_input_banner=banner,
+        _queued_input_region=_RegionStub(),
+        _tab_bar=tab_bar,
+        _queued_human_input="also research bob dylan",
+        _queued_human_input_pending_by_agent={},
+        coordination_display=SimpleNamespace(agent_ids=["agent_a"]),
+    )
+
+    def _set_visible(visible: bool) -> None:
+        if visible:
+            app._queued_input_region.add_class("visible")
+        else:
+            app._queued_input_region.remove_class("visible")
+
+    app._set_queued_input_region_visible = _set_visible
+    app._refresh_human_input_pending_state = lambda: textual_display_module.TextualApp._refresh_human_input_pending_state(app)
+    app._sync_queued_input_banner_from_hook = lambda: textual_display_module.TextualApp._sync_queued_input_banner_from_hook(app)
+
+    # Initial queued state is visible in tab counts/banner metadata.
+    textual_display_module.TextualApp._refresh_human_input_pending_state(app)
+    textual_display_module.TextualApp._sync_queued_input_banner_from_hook(app)
+    assert tab_bar.last_counts == {"agent_a": 1}
+    assert "visible" in app._queued_input_region.classes
+    assert banner.replaced_messages
+
+    # Simulate Codex flush path draining pending input without firing inject callback.
+    hook.pending_messages.clear()
+    hook._recompute_counts()
+
+    textual_display_module.TextualApp._update_execution_status(app)
+
+    assert status_updates == ["Working..."]
+    assert tab_bar.last_counts == {"agent_a": 0}
+    assert "visible" not in app._queued_input_region.classes
+    assert banner.replaced_messages == []

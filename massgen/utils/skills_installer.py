@@ -186,7 +186,7 @@ def _apply_remotion_install_setup_section(skill_text: str) -> str:
             suffix = "".join(lines[insert_at:]).lstrip("\n")
             return f"{prefix}\n{setup_block}{suffix}"
 
-    return f"{setup_block}{skill_text.lstrip('\n')}"
+    return setup_block + skill_text.lstrip("\n")
 
 
 def _ensure_remotion_install_setup_section() -> bool:

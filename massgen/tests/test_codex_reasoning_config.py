@@ -71,8 +71,22 @@ def test_codex_writes_instructions_file_under_codex_home(tmp_path: Path):
     config = _read_workspace_codex_config(tmp_path)
     instructions_path = tmp_path / ".codex" / "AGENTS.md"
     assert config["model_instructions_file"] == str(instructions_path)
-    assert instructions_path.read_text() == "system instructions"
+    content = instructions_path.read_text()
+    assert content.startswith("system instructions")
+    assert "[Human Input]:" in content
     assert not (tmp_path / "AGENTS.md").exists()
+
+
+def test_codex_appends_runtime_input_priority_guidance(tmp_path: Path):
+    backend = CodexBackend(cwd=str(tmp_path))
+    backend.system_prompt = "system instructions"
+    backend._write_workspace_config()
+
+    instructions_path = tmp_path / ".codex" / "AGENTS.md"
+    content = instructions_path.read_text()
+    assert "system instructions" in content
+    assert "[Human Input]:" in content
+    assert "high-priority runtime instruction" in content
 
 
 def test_codex_mirrors_local_skills_into_codex_home(tmp_path: Path):

@@ -102,6 +102,15 @@ class CodexBackend(StreamingBufferMixin, NativeToolBackendMixin, LLMBackend):
         "item.completed": "content",  # wrapper: check nested item.type
         "error": "error",
     }
+    RUNTIME_INPUT_PRIORITY_GUIDANCE = (
+        "## Runtime Input Priority\n"
+        "When a tool result contains a line starting with `[Human Input]:`, "
+        "treat it as a high-priority runtime instruction from the user.\n"
+        "Apply that instruction before continuing your previous plan.\n"
+        "In your next response, explicitly state how you incorporated it.\n"
+        "If you cannot apply it safely, briefly explain why and continue with "
+        "the best valid alternative."
+    )
 
     def __init__(self, api_key: str | None = None, **kwargs):
         """Initialize CodexBackend.
@@ -776,6 +785,8 @@ class CodexBackend(StreamingBufferMixin, NativeToolBackendMixin, LLMBackend):
         if pending:
             full_prompt = (full_prompt + "\n" + pending) if full_prompt else pending
         if full_prompt:
+            if self.RUNTIME_INPUT_PRIORITY_GUIDANCE not in full_prompt:
+                full_prompt = f"{full_prompt}\n\n{self.RUNTIME_INPUT_PRIORITY_GUIDANCE}"
             agents_md_path = config_dir / "AGENTS.md"
             agents_md_path.write_text(full_prompt)
             config["model_instructions_file"] = str(agents_md_path)

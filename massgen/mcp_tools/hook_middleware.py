@@ -80,6 +80,10 @@ class MassGenHookMiddleware(Middleware):
     Uses file-based IPC: orchestrator writes, middleware reads and consumes.
     """
 
+    _RUNTIME_INPUT_MARKER = "[Human Input]:"
+    _RUNTIME_INPUT_KEY = "massgen_runtime_input"
+    _RUNTIME_INPUT_PRIORITY_KEY = "massgen_runtime_input_priority"
+
     def __init__(self, hook_dir: Path) -> None:
         self._hook_dir = hook_dir
         self._last_post_sequence: int = -1
@@ -204,6 +208,33 @@ class MassGenHookMiddleware(Middleware):
         )
         return content
 
+    @classmethod
+    def _extract_runtime_input_line(cls, injection: str) -> str | None:
+        """Extract a normalized runtime-input line from injected text, if present."""
+        if cls._RUNTIME_INPUT_MARKER not in injection:
+            return None
+        _, _, tail = injection.partition(cls._RUNTIME_INPUT_MARKER)
+        normalized_tail = tail.strip()
+        if not normalized_tail:
+            return None
+        return f"{cls._RUNTIME_INPUT_MARKER} {normalized_tail}"
+
+    @classmethod
+    def _augment_structured_content(
+        cls,
+        structured_content: dict[str, Any] | None,
+        injection: str,
+    ) -> dict[str, Any] | None:
+        """Mirror human runtime input into structured_content for better salience."""
+        runtime_line = cls._extract_runtime_input_line(injection)
+        if runtime_line is None:
+            return structured_content
+
+        merged: dict[str, Any] = dict(structured_content or {})
+        merged[cls._RUNTIME_INPUT_KEY] = runtime_line
+        merged[cls._RUNTIME_INPUT_PRIORITY_KEY] = "high"
+        return merged
+
     @staticmethod
     def _append_to_result(result: Any, injection: str) -> Any:
         """Append injection text to the tool result.
@@ -242,19 +273,39 @@ class MassGenHookMiddleware(Middleware):
                 meta=meta,
             )
 
+        def _with_runtime_structured_content(structured_content: dict[str, Any] | None) -> dict[str, Any] | None:
+            return MassGenHookMiddleware._augment_structured_content(
+                structured_content,
+                injection,
+            )
+
         # Generic ToolResult-like handling (works across FastMCP versions/layouts)
         if hasattr(result, "to_mcp_result") and hasattr(result, "content"):
             return _build_tool_result(
                 content=[*list(result.content), injection_item],  # type: ignore[arg-type]
-                structured_content=getattr(result, "structured_content", None),
+                structured_content=_with_runtime_structured_content(
+                    getattr(result, "structured_content", None),
+                ),
                 meta=getattr(result, "meta", None),
             )
 
         if isinstance(result, str):
             if _HAS_MCP_TYPES:
                 original_item = mcp_types.TextContent(type="text", text=result)
-                return _build_tool_result(content=[original_item, injection_item])
-            return _build_tool_result(content=[result, injection_item])
+                return _build_tool_result(
+                    content=[original_item, injection_item],
+                    structured_content=_with_runtime_structured_content(None),
+                )
+            return _build_tool_result(
+                content=[result, injection_item],
+                structured_content=_with_runtime_structured_content(None),
+            )
         if isinstance(result, list):
-            return _build_tool_result(content=[*result, injection_item])
-        return _build_tool_result(content=[result, injection_item])
+            return _build_tool_result(
+                content=[*result, injection_item],
+                structured_content=_with_runtime_structured_content(None),
+            )
+        return _build_tool_result(
+            content=[result, injection_item],
+            structured_content=_with_runtime_structured_content(None),
+        )

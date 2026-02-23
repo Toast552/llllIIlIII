@@ -11055,6 +11055,16 @@ Type your question and press Enter to ask the agents.
             Format: A: 2 ans, 3 votes 💭  |  B: 1 ans, 2 votes 🔧  |  ⏱ 16s
             """
             try:
+                # Keep runtime-injection queue UI in sync even when hook callbacks
+                # are suppressed (e.g., Codex _flush path).
+                queue_counts = getattr(self, "_queued_human_input_pending_by_agent", {}) or {}
+                queue_has_pending = any((count or 0) > 0 for count in queue_counts.values())
+                queue_region = getattr(self, "_queued_input_region", None)
+                queue_visible = bool(queue_region and "visible" in getattr(queue_region, "classes", set()))
+                if getattr(self, "_human_input_hook", None) and (queue_has_pending or queue_visible):
+                    self._refresh_human_input_pending_state()
+                    self._sync_queued_input_banner_from_hook()
+
                 if hasattr(self, "_execution_status"):
                     # Build status text
                     parts = []
