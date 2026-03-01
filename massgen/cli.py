@@ -67,7 +67,7 @@ from .backend.inference import InferenceBackend
 from .backend.lmstudio import LMStudioBackend
 from .backend.response import ResponseBackend
 from .chat_agent import ConfigurableAgent, SingleAgent
-from .config_builder import ConfigBuilder
+from .config_builder import ConfigBuilder, normalize_quickstart_config_filename
 from .dspy_paraphraser import (
     QuestionParaphraser,
     create_dspy_lm_from_backend_config,
@@ -152,6 +152,18 @@ def _ensure_quickstart_skills_ready(
     except Exception as e:
         logger.warning(f"[Quickstart] Skill setup failed: {e}")
         return False
+
+
+def _quickstart_filename_from_config_arg(config_path_arg: str | None) -> str | None:
+    """Extract quickstart filename override from --config when --quickstart is used."""
+    if not config_path_arg:
+        return None
+
+    value = config_path_arg.strip()
+    if not value:
+        return None
+
+    return normalize_quickstart_config_filename(value)
 
 
 def _setup_logfire_observability() -> bool:
@@ -10087,7 +10099,7 @@ Environment Variables:
     config_group.add_argument(
         "--config",
         type=str,
-        help="Path to YAML/JSON configuration file or @examples/NAME",
+        help="Path to YAML/JSON configuration file or @examples/NAME. With --quickstart, this is used as the output filename under .massgen/",
     )
     config_group.add_argument(
         "--select",
@@ -10573,7 +10585,9 @@ Environment Variables:
         logger.info("Debug mode enabled")
         logger.debug(f"Command line arguments: {vars(args)}")
 
-    def _run_quickstart_wizard_tui():
+    quickstart_config_filename = _quickstart_filename_from_config_arg(args.config) if args.quickstart else None
+
+    def _run_quickstart_wizard_tui(config_filename: str | None = None):
         """Launch quickstart wizard TUI. Returns result dict or None."""
         try:
             from textual.app import App as _QApp
@@ -10586,15 +10600,17 @@ Environment Variables:
 
             class _QuickstartWizardApp(_QApp):
                 CSS_PATH = Path(__file__).parent / "frontend" / "displays" / "textual_themes" / "dark.tcss"
-                SCREENS = {"wizard": QuickstartWizard}
                 BINDINGS = [("ctrl+c", "quit", "Quit")]
 
-                def __init__(self):
+                def __init__(self, quickstart_config_filename: str | None = None):
                     super().__init__(css_path=str(self.CSS_PATH))
                     self._wizard_result = None
+                    self._quickstart_config_filename = quickstart_config_filename
 
                 def on_mount(self):
-                    self.push_screen("wizard")
+                    self.push_screen(
+                        QuickstartWizard(config_filename=self._quickstart_config_filename),
+                    )
 
                 def on_wizard_completed(self, message: WizardCompleted) -> None:
                     self._wizard_result = message.result
@@ -10610,7 +10626,9 @@ Environment Variables:
                     if event.key == "escape" and len(self.screen_stack) <= 1:
                         self.exit(None)
 
-            app = _QuickstartWizardApp()
+            app = _QuickstartWizardApp(
+                quickstart_config_filename=config_filename,
+            )
             return app.run()
         except ImportError as e:
             logger.warning(f"TUI not available for quickstart wizard: {e}")
@@ -10943,7 +10961,7 @@ Environment Variables:
     if args.quickstart and not args.web:
         # Launch TUI Quickstart Wizard
         try:
-            result = _run_quickstart_wizard_tui()
+            result = _run_quickstart_wizard_tui(quickstart_config_filename)
             if _handle_quickstart_result(result):
                 return
             # Terminal launch - fall through to normal flow
@@ -10952,7 +10970,9 @@ Environment Variables:
             logger.warning(f"TUI not available, falling back to CLI quickstart: {e}")
             # Fallback to CLI-based quickstart
             builder = ConfigBuilder()
-            result = builder.run_quickstart()
+            result = builder.run_quickstart(
+                quickstart_config_filename=quickstart_config_filename,
+            )
 
             if result and len(result) >= 2:
                 filepath = result[0]
@@ -11140,7 +11160,9 @@ Environment Variables:
                     print(f"{BRIGHT_GREEN}✅ API keys detected{RESET}\n")
 
                 print()
-                result = builder.run_quickstart()
+                result = builder.run_quickstart(
+                    quickstart_config_filename=quickstart_config_filename,
+                )
 
                 if result and len(result) >= 2:
                     filepath = result[0]
