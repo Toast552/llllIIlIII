@@ -9,16 +9,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Recent Releases
 
+**v0.1.60 (March 6, 2026)** - Multimodal Tools, Subagent Enhancements & GPT-5.4
+Rewritten read_media with clearer schema and MediaCallLedgerHook for media call tracking. Subagent enhancements: inherit_spawning_agent_backend, final_answer_strategy, per-agent subagent_agents. GPT-5.4 as default OpenAI flagship. Decomp mode cooperates with checklist workflow. Codex prompt caching calculation fix for pricing accuracy.
+
+**v0.1.59 (March 4, 2026)** - Quality Round Improvements
+Planning improvements with auto-added improvements to task plan and plan review enhancements. Checklist and evaluation enhancements with better eval gen config and Gemini tool name normalization. Subagent behavior adjustments and media generation fixes.
+
 **v0.1.58 (March 2, 2026)** - Multimodal Revamp, Nvidia NIM Backend & Quality Rethinking
 Comprehensive multimodal revamp with ElevenLabs TTS/STT, Nano Banana 2 image generation, and Grok multimedia. Nvidia NIM backend for NVIDIA Inference Microservices. Quality rethinking subagent for per-element craft improvements. Smarter checklists with improve/preserve listings. Logging architecture refactor and CLI mode flags.
 
 **v0.1.57 (February 27, 2026)** - Delegated Subagent Protocol & Builder Subagent
 File-based delegation protocol for container-to-host subagent spawning. New builder subagent type for large artifact generation with fresh context. Claude Code reasoning parameters for updated SDK. Smarter convergence with substantiveness tracking and diagnostic report gating.
 
-**v0.1.56 (February 25, 2026)** - Spec Plan Mode & Targeted Messaging
-Spec plan mode for formal requirements specification before execution with TUI spec mode support. Targeted agent-to-agent messaging. Critic subagent for quality assessment. Media conversation continuity. Codex OAuth login fix.
-
 ---
+
+## [0.1.60] - 2026-03-06
+
+### Added
+- **read_media Rewrite** ([#978](https://github.com/massgen/MassGen/pull/978)): Rewritten with clearer schema, better error handling, and improved naming
+- **MediaCallLedgerHook** ([#978](https://github.com/massgen/MassGen/pull/978)): New `MediaCallLedgerHook` for tracking read/generate media tool calls via the hook framework
+- **GPT-5.4 Support** ([#978](https://github.com/massgen/MassGen/pull/978)): New default OpenAI flagship model added to the model registry
+- **Subagent Backend Inheritance** ([#978](https://github.com/massgen/MassGen/pull/978)): New `inherit_spawning_agent_backend` option — subagents automatically inherit the spawning agent's backend
+- **Subagent Final Answer Strategy** ([#978](https://github.com/massgen/MassGen/pull/978)): New `final_answer_strategy` option for child orchestrator final-answer policy (winner_reuse, winner_present, synthesize)
+- **Per-Agent Subagent Agents** ([#978](https://github.com/massgen/MassGen/pull/978)): Per-agent `subagent_agents` override and orchestrator config file support with robust JSON parsing
+
+### Changed
+- **Decomp Mode Cooperates with Checklist** ([#978](https://github.com/massgen/MassGen/pull/978)): Decomposition mode now cooperates with the checklist workflow for unified quality-gated subtask iteration
+- **System Prompt Focus** ([#978](https://github.com/massgen/MassGen/pull/978)): Refocused system prompt on evaluating entire output quality
+- **Verification Prompts** ([#978](https://github.com/massgen/MassGen/pull/978)): Improved verification_latest prompts for faster verification rounds
+
+### Fixed
+- **Checklist & Proposal Injections** ([#978](https://github.com/massgen/MassGen/pull/978)): Fixed proposal injection improvements for more reliable checklist behavior
+- **Task Plan Refresh** ([#978](https://github.com/massgen/MassGen/pull/978)): Fixed task plan refresh during quality rounds
+- **Codex Prompt Caching** ([#978](https://github.com/massgen/MassGen/pull/978)): Fixed prompt caching calculation for pricing accuracy
+- **Skill Prefix Handling** ([#978](https://github.com/massgen/MassGen/pull/978)): Fixed skill prefix handling edge cases
+
+### Technical Details
+- **Major Focus**: Multimodal tools, subagent enhancements, GPT-5.4, decomp+checklist cooperation
+- **PRs Merged**: [#978](https://github.com/massgen/MassGen/pull/978) (improve_verification_time)
+- **Contributors**: @ncrispino (6 commits), @HenryQi (1 commit)
+
+## [0.1.59] - 2026-03-04
+
+### Added
+- **Planning Improvements** ([#969](https://github.com/massgen/MassGen/pull/969)): Smarter quality rounds with improved planning
+  - Auto-add improvements to task plan for better iteration tracking
+  - Plan review enhancements for more thorough quality evaluation
+
+- **Checklist & Evaluation Enhancements** ([#969](https://github.com/massgen/MassGen/pull/969)): More reliable evaluation pipeline
+  - Better eval gen config for more accurate quality assessments
+  - Checklist fixes for consistent behavior across rounds
+  - Gemini tool name normalization for MCP compatibility (ease for MCP)
+
+### Changed
+- **Subagent Behavior** ([#969](https://github.com/massgen/MassGen/pull/969)): Adjusted subagent behavior and manager enhancements
+  - Improved subagent coordination and task delegation
+  - Docker skill write access fixes for containerized execution
+- **Video Generation Skills** ([#969](https://github.com/massgen/MassGen/pull/969)): Adjusted video gen skill behavior
+  - No fallback to animated on errors — fail cleanly instead
+  - Video understanding criticality improvements
+  - Impact metric restoration for quality assessment
+
+### Fixed
+- **Answer Anonymization** ([#969](https://github.com/massgen/MassGen/pull/969)): Fixed answer anonymization during evaluation
+- **Quickstart & Tests** ([#969](https://github.com/massgen/MassGen/pull/969)): Updated quickstart flow and test suite
+- **Plan & Docker Fixes** ([#969](https://github.com/massgen/MassGen/pull/969)): Small fixes for plan mode and Docker execution
+
+### Technical Details
+- **Major Focus**: Quality round improvements — planning, evaluation, subagents, media fixes
+- **PRs Merged**: [#969](https://github.com/massgen/MassGen/pull/969) (improve_quality_rounds)
+- **Contributors**: @ncrispino (7 commits), @HenryQi (1 commit)
 
 ## [0.1.58] - 2026-03-02
 

@@ -227,7 +227,35 @@ Most configurations use environment variables for API keys:so
 
 ## Release History & Examples
 
-### v0.1.58 - Latest
+### v0.1.60 - Latest
+**New Features:** Multimodal Tools, Subagent Enhancements & GPT-5.4
+
+**Key Features:**
+- **Multimodal Tool Improvements**: Rewritten `read_media` with clearer schema; new `MediaCallLedgerHook` for media call tracking
+- **Subagent Enhancements**: `inherit_spawning_agent_backend` for automatic backend inheritance, `final_answer_strategy` for child orchestrator policy, per-agent `subagent_agents` override
+- **GPT-5.4 Support**: New default OpenAI flagship model
+- **Decomp + Checklist Cooperation**: Decomposition mode works with checklist workflow for quality-gated subtask iteration
+- **Fixes**: Codex prompt caching calculation fix, checklist/proposal injection improvements, task plan refresh
+
+**Try It:**
+```bash
+# Install or upgrade to v0.1.60
+pip install --upgrade massgen
+
+# Choose backend 'openai' with model 'gpt-5.4' in the setup wizard to start using GPT-5.4
+uv run massgen --quickstart
+```
+
+### v0.1.59
+**New Features:** Quality Round Improvements — Planning, Evaluation, Subagents, Media Fixes
+
+**Key Features:**
+- **Planning Improvements**: Auto-add improvements to task plan, plan review enhancements
+- **Checklist & Evaluation**: Better eval gen config, checklist fixes, Gemini tool name normalization for MCP
+- **Subagent Improvements**: Adjusted subagent behavior, subagent manager enhancements, Docker skill write access fixes
+- **Media Generation Fixes**: Video gen skill adjustments, video understanding criticality, impact metric restoration
+
+### v0.1.58
 **New Features:** Multimodal Revamp, Nvidia NIM Backend, Quality Rethinking Subagent, Checklist Improvements
 
 **Key Features:**

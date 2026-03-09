@@ -1,4 +1,4 @@
-# MassGen v0.1.58 Release Announcement
+# MassGen v0.1.60 Release Announcement
 
 <!--
 This is the current release announcement. Copy this + feature-highlights.md to LinkedIn/X.
@@ -7,17 +7,17 @@ After posting, update the social links below.
 
 ## Release Summary
 
-We're excited to release MassGen v0.1.58 — a Comprehensive Multimodal Revamp! 🚀 Three new media providers for comprehensive set (OpenAI GPT Image/Sora, Google Nano Banana 2/Veo 3.1, Grok Imagine, ElevenLabs) give agents more choices for voice, image, and video generation. New image, video, and audio generation skills provide reusable workflows, and multi-turn image editing lets agents iteratively refine visuals across rounds. Plus: Nvidia NIM backend, quality rethinking subagent, and new CLI mode flags.
+We're excited to release MassGen v0.1.60 — Multimodal Tools, Subagent Enhancements & GPT-5.4! 🚀 Rewritten `read_media` tool with clearer schema and new `MediaCallLedgerHook` for tracking media calls. Subagents gain `inherit_spawning_agent_backend` and `final_answer_strategy` options. GPT-5.4 added as the default OpenAI flagship. Plus: decomp mode cooperates with checklist workflow, Codex prompt caching calculation fix for pricing accuracy, and checklist/prompt injection fixes.
 
 ## Install
 
 ```bash
-pip install massgen==0.1.58
+pip install massgen==0.1.60
 ```
 
 ## Links
 
-- **Release notes:** https://github.com/massgen/MassGen/releases/tag/v0.1.58
+- **Release notes:** https://github.com/massgen/MassGen/releases/tag/v0.1.60
 - **X post:** [TO BE ADDED AFTER POSTING]
 - **LinkedIn post:** [TO BE ADDED AFTER POSTING]
 
@@ -29,27 +29,41 @@ Copy everything below this line, then append content from `feature-highlights.md
 
 ---
 
-We're excited to release MassGen v0.1.58 — a Comprehensive Multimodal Revamp! 🚀 Three new media providers for comprehensive set (OpenAI GPT Image/Sora, Google Nano Banana 2/Veo 3.1, Grok Imagine, ElevenLabs) give agents more choices for voice, image, and video generation. New image, video, and audio generation skills provide reusable workflows, and multi-turn image editing lets agents iteratively refine visuals across rounds. Plus: Nvidia NIM backend, quality rethinking subagent, and new CLI mode flags.
+We're excited to release MassGen v0.1.60 — Multimodal Tools, Subagent Enhancements & GPT-5.4! 🚀 Rewritten `read_media` tool with clearer schema and new `MediaCallLedgerHook` for tracking media calls. Subagents gain `inherit_spawning_agent_backend` and `final_answer_strategy` options. GPT-5.4 added as the default OpenAI flagship. Plus: decomp mode cooperates with checklist workflow, Codex prompt caching calculation fix for pricing accuracy, and checklist/prompt injection fixes.
 
-**Key Feature: Comprehensive Multimodal Revamp**
+**Key Improvements:**
 
-MassGen agents can now generate and understand a much wider range of media:
+🛠️ **Multimodal Tool Improvements** - Clearer, more reliable media tools:
+- Rewritten `read_media` tool with clearer schema and better error handling
+- New `MediaCallLedgerHook` for tracking read/generate media calls via the hook framework
 
-- **ElevenLabs TTS & STT** (#942): High-quality voice synthesis and transcription integrated with `generate_media` and `read_media` tools — agents can now speak and listen via ElevenLabs
-- **Nano Banana 2** (#951): New default image generation model with significantly higher quality output
-- **Grok Image/Video Generation**: Native Grok multimedia generation via xAI API — images and videos from Grok Imagine
-- **Media Generation Skills**: New reusable skills for image, video, and audio generation workflows
-- **Multi-Turn Image Editing**: Continuation IDs enable iterative image editing sessions — agents can refine images across multiple turns
+🤖 **Subagent Enhancements** - More flexible subagent configuration:
+- `inherit_spawning_agent_backend` — subagents automatically inherit the spawning agent's backend
+- `final_answer_strategy` — configurable child orchestrator final-answer policy (winner_reuse, winner_present, synthesize)
+- Per-agent `subagent_agents` override and robust orchestrator config file support
 
-**Also in this release:**
-- Nvidia NIM Backend (#962): First-class provider integration for NVIDIA Inference Microservices
-- Quality Rethinking Subagent (#964): New `quality_rethinking` type for targeted per-element craft improvements
-- Smarter Checklists: Explicit improve/preserve listings, better label refresh ordering, evaluation criteria defaults
-- CLI Mode Flags: `--quick`, `--single-agent`, `--coordination-mode`, `--personas` mirroring TUI toggles
-- Logging Architecture Refactor: Fixed concurrent logging with LoggingSession isolation
-- Subagent Hardening: Better '@' parsing, error handling, clearer context
+🧠 **GPT-5.4 Support** - New default OpenAI flagship model:
+- GPT-5.4 added to the model registry for immediate use across all coordination modes
 
-Release notes: https://github.com/massgen/MassGen/releases/tag/v0.1.58
+🔄 **Decomposition + Checklist Cooperation** - Unified quality workflow:
+- Decomp mode now cooperates with the checklist workflow for quality-gated subtask iteration
+- Improved verification round time with better verification_latest prompts
+
+✅ **Fixes** - Quality and accuracy improvements:
+- Checklist & proposal injection improvements for more reliable behavior
+- System prompt refocused on evaluating entire output quality
+- Codex prompt caching calculation fix for pricing accuracy
+- Task plan refresh fix and skill prefix handling fixes
+
+**Getting Started:**
+
+```bash
+pip install massgen==0.1.60
+# Choose backend 'openai' with model 'gpt-5.4' in the setup wizard to start using GPT-5.4
+uv run massgen --quickstart
+```
+
+Release notes: https://github.com/massgen/MassGen/releases/tag/v0.1.60
 
 Feature highlights:
 

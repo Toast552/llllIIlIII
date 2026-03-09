@@ -1,10 +1,10 @@
-# MassGen v0.1.59 Roadmap
+# MassGen v0.1.61 Roadmap
 
-**Target Release:** March 4, 2026
+**Target Release:** March 9, 2026
 
 ## Overview
 
-Version 0.1.59 focuses on improving skill use and exploration — local execution, hierarchical registry, and consolidation workflows.
+Version 0.1.61 focuses on improving skill use and exploration — local execution, hierarchical registry, and consolidation workflows. This was originally planned for v0.1.60 but rolled forward as v0.1.60 delivered verification & decomposition improvements instead.
 
 ---
 
@@ -31,6 +31,6 @@ Version 0.1.59 focuses on improving skill use and exploration — local executio
 
 ## Related Tracks
 
-- **v0.1.58**: Multimodal Revamp (ElevenLabs TTS/STT, Nano Banana 2, Grok Imagine, audio skills), Nvidia NIM Backend, Quality Rethinking Subagent
-- **v0.1.60**: Image/Video Edit Capabilities ([#959](https://github.com/massgen/MassGen/issues/959))
-- **v0.1.61**: OpenAI Audio API ([#960](https://github.com/massgen/MassGen/issues/960))
+- **v0.1.60**: Multimodal Tools, Subagent Enhancements & GPT-5.4 — read_media rewrite, MediaCallLedgerHook, subagent backend inheritance, GPT-5.4, decomp+checklist cooperation ([#978](https://github.com/massgen/MassGen/pull/978))
+- **v0.1.62**: Image/Video Edit Capabilities ([#959](https://github.com/massgen/MassGen/issues/959))
+- **v0.1.63**: OpenAI Audio API ([#960](https://github.com/massgen/MassGen/issues/960))

@@ -69,7 +69,7 @@ This project started with the "threads of thought" and "iterative refinement" id
 <details open>
 <summary><h3>🆕 Latest Features</h3></summary>
 
-- [v0.1.58 Features](#-latest-features-v0158)
+- [v0.1.59 Features](#-latest-features-v0159)
 </details>
 
 <details open>
@@ -122,15 +122,15 @@ This project started with the "threads of thought" and "iterative refinement" id
 <details open>
 <summary><h3>🗺️ Roadmap</h3></summary>
 
-- [Recent Achievements (v0.1.58)](#recent-achievements-v0158)
-- [Previous Achievements (v0.0.3 - v0.1.57)](#previous-achievements-v003---v0157)
+- [Recent Achievements (v0.1.59)](#recent-achievements-v0159)
+- [Previous Achievements (v0.0.3 - v0.1.58)](#previous-achievements-v003---v0158)
 - [Key Future Enhancements](#key-future-enhancements)
   - Bug Fixes & Backend Improvements
   - Advanced Agent Collaboration
   - Expanded Model, Tool & Agent Integrations
   - Improved Performance & Scalability
   - Enhanced Developer Experience
-- [v0.1.59 Roadmap](#v0159-roadmap)
+- [v0.1.60 Roadmap](#v0160-roadmap)
 </details>
 
 <details open>
@@ -155,24 +155,23 @@ This project started with the "threads of thought" and "iterative refinement" id
 
 ---
 
-## 🆕 Latest Features (v0.1.58)
+## 🆕 Latest Features (v0.1.60)
 
-**🎉 Released: March 2, 2026**
+**🎉 Released: March 6, 2026**
 
-**What's New in v0.1.58:**
-- **🎨 Comprehensive Multimodal Revamp** - ElevenLabs TTS/STT, Nano Banana 2 image generation, Grok image/video generation, media generation skills, and multi-turn image editing with continuation IDs.
-- **🟢 Nvidia NIM Backend** - First-class provider integration for NVIDIA Inference Microservices, enabling access to NVIDIA-hosted models.
-- **🔍 Quality Rethinking Subagent** - New `quality_rethinking` subagent type for targeted per-element craft improvements with explicit improve/preserve listings.
-- **✅ Smarter Checklists** - Explicit improve/preserve listings, better label refresh ordering, evaluation criteria defaults, and hardened subagent parsing.
+**What's New in v0.1.60:**
+- **🛠️ Multimodal Tool Improvements** - Rewritten `read_media` with clearer schema and `MediaCallLedgerHook` for tracking media calls.
+- **🤖 Subagent Enhancements** - `inherit_spawning_agent_backend` for automatic backend inheritance, `final_answer_strategy` for child orchestrator policy, per-agent `subagent_agents` override.
+- **🧠 GPT-5.4** - New default OpenAI flagship model across all coordination modes.
+- **🔄 Decomp + Checklist Cooperation** - Decomp mode works with checklist workflow for quality-gated subtask iteration.
 
-**Try v0.1.58 Features:**
+**Try v0.1.60 Features:**
 ```bash
 # Install or upgrade
 pip install --upgrade massgen
 
-# Try checklist-driven refinement with quality rethinking
-uv run massgen --config @examples/features/subagent_checklist.yaml \
-  "Create a website for an AI company selling a creative sci-fi style product. Ensure polished visuals and cool interactive elements"
+# Choose backend 'openai' with model 'gpt-5.4' in the setup wizard to start using GPT-5.4
+uv run massgen --quickstart
 ```
 
 → [See full release history and examples](massgen/configs/README.md#release-history--examples)
@@ -1234,37 +1233,35 @@ MassGen is currently in its foundational stage, with a focus on parallel, asynch
 
 ⚠️ **Early Stage Notice:** As MassGen is in active development, please expect upcoming breaking architecture changes as we continue to refine and improve the system.
 
-### Recent Achievements (v0.1.58)
+### Recent Achievements (v0.1.60)
 
-**🎉 Released: March 2, 2026**
+**🎉 Released: March 6, 2026**
 
-#### Comprehensive Multimodal Revamp
-- **ElevenLabs TTS & STT** ([#942](https://github.com/massgen/MassGen/issues/942)): High-quality voice synthesis and transcription via ElevenLabs API integrated with `generate_media` and `read_media` tools
-- **Nano Banana 2 Image Generation** ([#951](https://github.com/massgen/MassGen/issues/951)): New default image generation model with higher quality output
-- **Grok Image/Video Generation**: Grok multimedia generation support via xAI API
-- **Media Generation Skills**: New reusable skills for image, video, and audio generation workflows
-- **Multi-Turn Image Editing**: Continuation IDs for iterative image editing sessions
+#### Multimodal Tools
+- **Rewritten `read_media` Tool** ([#978](https://github.com/massgen/MassGen/pull/978)): Clearer schema, better error handling, and improved naming
+- **`MediaCallLedgerHook`**: New hook for tracking `read_media` and `generate_media` tool calls
 
-#### Nvidia NIM Backend
-- **NVIDIA Inference Microservices** ([#962](https://github.com/massgen/MassGen/pull/962)): First-class provider integration for NVIDIA-hosted models via NIM API
+#### Subagent Enhancements
+- **`inherit_spawning_agent_backend`** ([#978](https://github.com/massgen/MassGen/pull/978)): Subagents automatically inherit the spawning agent's backend configuration
+- **`final_answer_strategy`**: Configurable child orchestrator final-answer policy (winner_reuse, winner_present, synthesize)
+- **Per-Agent `subagent_agents`**: Per-agent override for subagent agent configs; orchestrator config file support with robust JSON parsing
 
-#### Quality & Checklist Improvements
-- **Quality Rethinking Subagent** ([#964](https://github.com/massgen/MassGen/pull/964)): New `quality_rethinking` subagent type for targeted per-element craft improvements
-- **Explicit Improve/Preserve Listings**: Checklists now specify what to improve and what to preserve separately
-- **Better Label Refresh Ordering**: Improved ordering of checklist label refreshes
-- **Evaluation Criteria Defaults**: Sensible defaults for evaluation criteria
+#### Model & Coordination
+- **GPT-5.4 Support** ([#978](https://github.com/massgen/MassGen/pull/978)): New default OpenAI flagship model added to the model registry
+- **Decomp + Checklist Cooperation**: Decomposition mode works with the checklist workflow for quality-gated subtask iteration
+- **Improved Verification Round Time**: Better `verification_latest` prompts for faster verification rounds
 
-#### Logging & CLI
-- **Logging Architecture Refactor**: Fixed concurrent logging for parallel multi-agent execution with `LoggingSession` isolation
-- **CLI Mode Flags**: `--quick`, `--single-agent`, `--coordination-mode`, `--personas` flags mirroring TUI toggles
-- **Plan Mode CLI**: Plan mode accessible from command line
+#### Fixes
+- **Checklist & Proposal Injections**: More reliable checklist behavior with improved proposal injection
+- **Codex Prompt Caching**: Fixed prompt caching calculation for pricing accuracy
+- **Task Plan Refresh**: Fixed task plan refresh during quality rounds
+- **Skill Prefix Handling**: Fixed edge cases in skill prefix resolution
 
-#### Bug Fixes
-- Hardened subagent '@' parsing and error handling for multiple `submit_checklist` calls
-- Clearer subagent context and improved error messages
-- Fixed pre-collaboration checklist and evaluation criteria defaults
+### Previous Achievements (v0.0.3 - v0.1.59)
 
-### Previous Achievements (v0.0.3 - v0.1.57)
+✅ **Quality Round Improvements (v0.1.59)**: Auto-add improvements to task plan, plan review enhancements. Better eval gen config, checklist fixes, Gemini tool name normalization for MCP. Subagent behavior adjustments, Docker skill write access fixes. Video gen skill adjustments and impact metric restoration.
+
+✅ **Comprehensive Multimodal Revamp (v0.1.58)**: ElevenLabs TTS/STT, Nano Banana 2 image generation, Grok multimedia generation, media generation skills, and multi-turn image editing. Nvidia NIM backend. Quality rethinking subagent. Smarter checklists with improve/preserve listings. CLI mode flags and logging architecture refactor.
 
 ✅ **Delegated Subagent Protocol & Builder Subagent (v0.1.57)**: File-based delegation protocol for container-to-host subagent spawning. New builder subagent type for large artifact generation with fresh context. Substantiveness tracking for smarter convergence. Claude Code reasoning parameters for updated SDK.
 
@@ -1525,9 +1522,9 @@ MassGen is currently in its foundational stage, with a focus on parallel, asynch
 
 We welcome community contributions to achieve these goals.
 
-### v0.1.59 Roadmap
+### v0.1.60 Roadmap
 
-Version 0.1.59 focuses on improving skill use and exploration:
+Version 0.1.60 focuses on improving skill use and exploration:
 
 #### Planned Features
 - **Improve Skill Use and Exploration** ([#873](https://github.com/massgen/MassGen/issues/873)): Local skill execution, skill registry with hierarchical organization, and skill consolidation workflow
