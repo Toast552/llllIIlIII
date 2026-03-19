@@ -197,6 +197,70 @@ def session_logger():
     return logger
 
 
+_CONSOLE_CHAR_FALLBACKS = {
+    "→": "->",
+    "❌": "[X]",
+    "✅": "[OK]",
+    "⚠️": "[!]",
+    "⚠": "[!]",
+}
+
+
+def _normalize_console_encoding(encoding: str | None) -> str | None:
+    """Normalize a stream encoding for console safety checks."""
+    if not encoding:
+        return None
+    normalized = encoding.strip().lower()
+    if normalized in {"utf8", "utf-8", "utf_8", "utf-8-sig"}:
+        return "utf-8"
+    return normalized or None
+
+
+def _sanitize_console_text_for_encoding(text: str, encoding: str | None) -> str:
+    """Return text that is safe to write to a console sink with *encoding*."""
+    if not isinstance(text, str):
+        text = str(text)
+
+    normalized = _normalize_console_encoding(encoding)
+    if not text or normalized == "utf-8":
+        return text
+
+    if normalized:
+        try:
+            text.encode(normalized)
+            return text
+        except LookupError:
+            normalized = None
+        except UnicodeEncodeError:
+            pass
+
+    sanitized = text
+    for source, replacement in _CONSOLE_CHAR_FALLBACKS.items():
+        sanitized = sanitized.replace(source, replacement)
+
+    target_encoding = normalized or "ascii"
+    return sanitized.encode(target_encoding, errors="backslashreplace").decode(target_encoding)
+
+
+class _ConsoleSafeSink:
+    """File-like sink wrapper that protects console writes on non-UTF-8 terminals."""
+
+    def __init__(self, stream: Any) -> None:
+        self._stream = stream
+
+    def write(self, message: Any) -> None:
+        text = _sanitize_console_text_for_encoding(
+            str(message),
+            getattr(self._stream, "encoding", None),
+        )
+        self._stream.write(text)
+
+    def flush(self) -> None:
+        flush = getattr(self._stream, "flush", None)
+        if callable(flush):
+            flush()
+
+
 def _get_log_base_dir() -> Path:
     """Get the base directory that stores timestamped log sessions.
 
@@ -674,7 +738,7 @@ def setup_logging(
             )
 
         console_hid = logger.add(
-            sys.stderr,
+            _ConsoleSafeSink(sys.stderr),
             format=custom_format,
             level="DEBUG",
             colorize=True,
@@ -712,7 +776,7 @@ def setup_logging(
         console_format = "<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>"
 
         console_hid = logger.add(
-            sys.stderr,
+            _ConsoleSafeSink(sys.stderr),
             format=console_format,
             level="WARNING",  # Only show WARNING and above on console in non-debug mode
             colorize=True,
@@ -845,7 +909,7 @@ def restore_console_logging():
             )
 
         _CONSOLE_HANDLER_ID = logger.add(
-            sys.stderr,
+            _ConsoleSafeSink(sys.stderr),
             format=custom_format,
             level="DEBUG",
             colorize=True,
@@ -855,7 +919,7 @@ def restore_console_logging():
     else:
         console_format = "<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>"
         _CONSOLE_HANDLER_ID = logger.add(
-            sys.stderr,
+            _ConsoleSafeSink(sys.stderr),
             format=console_format,
             level="WARNING",
             colorize=True,
