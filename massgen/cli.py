@@ -10060,10 +10060,11 @@ async def main(args):
                     vote_reason=action_data.get("vote_reason"),
                     seen_steps=seen_steps,
                     duration_seconds=_step_duration,
+                    workspace_source=action_data.get("workspace_path"),
                 )
 
                 _automation_print(f"ACTION: {action_data['action']}")
-                _automation_print(f"STATUS: {Path(args.session_dir).resolve() / 'last_action.json'}")
+                _automation_print(f"STATUS: {Path(args.session_dir).resolve() / 'agents' / real_agent_id / 'last_action.json'}")
             else:
                 print("❌ Step mode: agent did not produce an answer or vote", file=sys.stderr)
                 sys.exit(2)

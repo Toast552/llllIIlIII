@@ -802,12 +802,14 @@ def _build_checklist_gated_decision(
     require_gap_report: bool = True,
     gap_report_mode: str = "changedoc",
     builder_enabled: bool = True,
+    regression_guard_enabled: bool = False,
     improvements_cfg: dict | None = None,
     score_current_work_only: bool = False,
     round_evaluator_before_checklist: bool = False,
     orchestrator_managed_round_evaluator: bool = False,
     round_evaluator_transformation_pressure: str = "balanced",
     specialized_subagents_available: bool = True,
+    enable_evaluator_personas: bool = False,
 ) -> str:
     """Build checklist_gated decision section (tool-gated, hidden threshold).
 
@@ -1216,8 +1218,21 @@ Inline means you execute the task yourself in the parent agent. Do not add
 delegate execution hints or try to spawn builder/evaluator helpers here.
 """
 
-            _phase1_scope += """
+            if enable_evaluator_personas:
+                _phase1_scope += """
 
+**Evaluator personas** (optional, available from round 1): Before calling \
+`new_answer` on ANY round (including your very first answer), you may call \
+`set_evaluator_personas` to configure distinct critique lenses for each \
+evaluator subagent. Each persona is an object with `label` (short name) and \
+`instructions` (the evaluation focus). The number of personas must match the \
+evaluator team size. Personas are single-use per round; if you do not re-set \
+them, the previous round's personas are reused. This is entirely optional — \
+if you never call the tool, evaluators run with their default behavior.
+
+"""
+
+            _phase1_scope += """
 **Degraded fallback**: if valid `next_tasks.json` is missing or invalid, you
 will see instructions about `submit_checklist` in the evaluator result header.
 That checklist branch is fallback behavior, not a co-equal normal workflow.
@@ -1452,6 +1467,15 @@ After all tasks complete:
    Do this by running or viewing the actual output — not just reviewing the code.
    If any criterion is not clearly improved, or anything regressed, fix it before submitting.
    A new answer that passes the checklist but is worse overall is a failed round.
+{
+        (
+            "   **Regression guard**: Spawn a `regression_guard` subagent to perform blind "
+            "comparison. Give it the evaluation criteria verbatim, label the previous and "
+            "candidate answers anonymously, and include workspace paths to both. Wait for "
+            "the verdict: `pass` → proceed to submit; `fail` → fix the regressions first; "
+            "`mixed` → use your judgment."
+        ) if regression_guard_enabled else ""
+    }
 3. Confirm you implemented the full scope of identified improvements, not just some.
    Each round is expensive — deliver everything you identified, not just the easiest item.
 4. For each verification command you run, save its output to `.massgen_scratch/verification/`
@@ -3581,11 +3605,13 @@ class EvaluationSection(SystemPromptSection):
         item_verify_by: dict[str, str] | None = None,
         has_existing_answers: bool = True,
         builder_enabled: bool = True,
+        regression_guard_enabled: bool = False,
         improvements_cfg: dict | None = None,
         round_evaluator_before_checklist: bool = False,
         orchestrator_managed_round_evaluator: bool = False,
         round_evaluator_transformation_pressure: str = "balanced",
         specialized_subagents_available: bool = True,
+        enable_evaluator_personas: bool = False,
     ):
         super().__init__(
             title="MassGen Coordination",
@@ -3607,11 +3633,13 @@ class EvaluationSection(SystemPromptSection):
         self.item_verify_by = item_verify_by
         self.has_existing_answers = has_existing_answers
         self.builder_enabled = builder_enabled
+        self.regression_guard_enabled = regression_guard_enabled
         self.improvements_cfg = improvements_cfg
         self.round_evaluator_before_checklist = round_evaluator_before_checklist
         self.orchestrator_managed_round_evaluator = orchestrator_managed_round_evaluator
         self.round_evaluator_transformation_pressure = round_evaluator_transformation_pressure
         self.specialized_subagents_available = specialized_subagents_available
+        self.enable_evaluator_personas = enable_evaluator_personas
 
     def build_content(self) -> str:
         # Vote-only mode: agent has exhausted their answer limit
@@ -3762,11 +3790,13 @@ Your goal is to iteratively refine answers until they meet the quality bar.
                     require_gap_report=self.checklist_require_gap_report,
                     gap_report_mode=self.gap_report_mode,
                     builder_enabled=self.builder_enabled,
+                    regression_guard_enabled=self.regression_guard_enabled,
                     improvements_cfg=self.improvements_cfg,
                     round_evaluator_before_checklist=self.round_evaluator_before_checklist,
                     orchestrator_managed_round_evaluator=self.orchestrator_managed_round_evaluator,
                     round_evaluator_transformation_pressure=self.round_evaluator_transformation_pressure,
                     specialized_subagents_available=self.specialized_subagents_available,
+                    enable_evaluator_personas=self.enable_evaluator_personas,
                 )
                 evaluation_section = f"""{analysis}
 
@@ -4000,6 +4030,7 @@ Both are terminal actions that end your round.
                     require_gap_report=self.checklist_require_gap_report,
                     gap_report_mode=self.gap_report_mode,
                     builder_enabled=getattr(self, "builder_enabled", True),
+                    regression_guard_enabled=getattr(self, "regression_guard_enabled", False),
                     improvements_cfg=self.improvements_cfg,
                     score_current_work_only=True,
                 )
@@ -4674,7 +4705,7 @@ class SubagentSection(SystemPromptSection):
         # Most types run background=True (fire-and-forget while main agent keeps working).
         # evaluator is blocking (background=False) so the main agent waits for evidence
         # before scoring — scores without evidence are meaningless.
-        background_by_type: dict[str, bool] = {"evaluator": False, "round_evaluator": False}
+        background_by_type: dict[str, bool] = {"evaluator": False, "round_evaluator": False, "regression_guard": False}
 
         lines = [
             "",
@@ -4723,6 +4754,14 @@ class SubagentSection(SystemPromptSection):
                         "returns a detailed improvement spec; the parent still owns all workflow "
                         "tools and terminal decisions.",
                     )
+            if t.name.lower() == "regression_guard":
+                lines.append(
+                    "Use this before accepting a revision to verify it is actually better — "
+                    "not just different. Give it the criteria verbatim, all candidate answers "
+                    "with workspace paths, and which answer is the new candidate. It performs "
+                    "blind comparison and returns a `verdict.json` with pass/fail/mixed verdict "
+                    "and per-criterion evidence. The parent agent decides what to do with the verdict.",
+                )
             if t.name.lower() == "builder":
                 lines.append(
                     "**FOR `BUILDER` TASKS — maximize parallelism, split aggressively:**\n\n"
@@ -4800,6 +4839,18 @@ artifact paths the evaluator should inspect directly.
 - **Constraint**: ask for critique + `improvement_spec` only. Do NOT ask for checklist payloads, \
 numeric scores, or terminal recommendations.
 """
+            if "regression_guard" in specialized_names:
+                regression_guard_guidance = """
+**FOR `REGRESSION_GUARD` TASKS, EXPLICITLY INCLUDE:**
+- **Evaluation criteria verbatim** — paste the full E1..EN criterion text into the task.
+- **All candidate answers** labeled anonymously (Answer A, Answer B, etc.) with workspace paths \
+to each answer's deliverables.
+- **Which answer is the candidate** (new revision) vs which is the previous version.
+- **Output type** — what kind of deliverable to verify (static image, interactive site, code, audio).
+- **Constraint**: ask for a comparison verdict only. Do NOT ask for improvement suggestions or fixes.
+"""
+            else:
+                regression_guard_guidance = ""
             if "novelty" in specialized_names or "quality_rethinking" in specialized_names:
                 novelty_quality_guidance = """
 **FOR `NOVELTY` AND `QUALITY_RETHINKING` TASKS, EXPLICITLY INCLUDE:**
@@ -4825,6 +4876,7 @@ If that checklist is present, treat it as required inputs for your task brief.
 
 {evaluator_guidance}
 {round_evaluator_guidance}
+{regression_guard_guidance}
 {novelty_quality_guidance}
 """
         return f"""{attached}

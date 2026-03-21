@@ -789,6 +789,120 @@ def test_subagent_section_builder_guidance_not_shown_without_builder():
     assert "for `builder` tasks" not in content.lower()
 
 
+# ── Regression Guard subagent type ──
+
+
+def test_regression_guard_subagent_md_exists():
+    """regression_guard SUBAGENT.md exists and has required frontmatter."""
+    path = Path(__file__).parent.parent / "subagent_types" / "regression_guard" / "SUBAGENT.md"
+    assert path.exists(), "regression_guard/SUBAGENT.md missing"
+    content = path.read_text()
+    assert "name: regression_guard" in content
+    assert "description:" in content
+    assert "expected_input:" in content
+    assert "Pareto-better" in content
+
+
+def test_regression_guard_discovered_when_allowed():
+    """regression_guard is found by scanner when explicitly in allowed_types."""
+    from massgen.subagent.type_scanner import scan_subagent_types
+
+    builtin_dir = Path(__file__).parent.parent / "subagent_types"
+    types = scan_subagent_types(
+        builtin_dir=builtin_dir,
+        project_dir=Path("/nonexistent"),
+        allowed_types=["regression_guard"],
+    )
+    names = [t.name for t in types]
+    assert "regression_guard" in names
+
+
+def test_regression_guard_not_in_defaults():
+    """regression_guard is NOT in DEFAULT_SUBAGENT_TYPES (must be explicitly enabled)."""
+    from massgen.subagent.type_scanner import DEFAULT_SUBAGENT_TYPES
+
+    assert "regression_guard" not in DEFAULT_SUBAGENT_TYPES
+
+
+def test_regression_guard_uses_blocking_mode():
+    """regression_guard should use background=False (blocking) in the prompt."""
+    from massgen.subagent.models import SpecializedSubagentConfig
+    from massgen.system_prompt_sections import SubagentSection
+
+    types = [
+        SpecializedSubagentConfig(name="regression_guard", description="Blind comparison"),
+    ]
+    section = SubagentSection("/workspace", max_concurrent=3, specialized_subagents=types)
+    content = section.build_content()
+    assert "background=False" in content
+
+
+def test_regression_guard_inline_guidance_shown():
+    """regression_guard inline guidance describes blind comparison and verdict."""
+    from massgen.subagent.models import SpecializedSubagentConfig
+    from massgen.system_prompt_sections import SubagentSection
+
+    types = [
+        SpecializedSubagentConfig(name="regression_guard", description="Blind comparison"),
+    ]
+    section = SubagentSection("/workspace", max_concurrent=3, specialized_subagents=types)
+    content = section.build_content().lower()
+    assert "blind comparison" in content
+    assert "verdict" in content
+
+
+def test_regression_guard_specialized_guidance_shown():
+    """Specialized guidance section for regression_guard tasks is included."""
+    from massgen.subagent.models import SpecializedSubagentConfig
+    from massgen.system_prompt_sections import SubagentSection
+
+    types = [
+        SpecializedSubagentConfig(name="regression_guard", description="Blind comparison"),
+    ]
+    section = SubagentSection("/workspace", max_concurrent=3, specialized_subagents=types)
+    content = section.build_content().lower()
+    assert "for `regression_guard` tasks, explicitly include" in content
+    assert "evaluation criteria verbatim" in content
+    assert "which answer is the candidate" in content
+
+
+def test_regression_guard_guidance_not_shown_without_type():
+    """regression_guard guidance should not appear when type is absent."""
+    from massgen.subagent.models import SpecializedSubagentConfig
+    from massgen.system_prompt_sections import SubagentSection
+
+    types = [
+        SpecializedSubagentConfig(name="evaluator", description="Checks features"),
+    ]
+    section = SubagentSection("/workspace", max_concurrent=3, specialized_subagents=types)
+    content = section.build_content().lower()
+    assert "for `regression_guard` tasks" not in content
+
+
+def test_regression_guard_phase5_guidance_when_enabled():
+    """Phase 5 should mention regression guard delegation when enabled."""
+    from massgen.system_prompt_sections import _build_checklist_gated_decision
+
+    prompt = _build_checklist_gated_decision(
+        checklist_items=["Criterion 1"],
+        regression_guard_enabled=True,
+    )
+    assert "regression_guard" in prompt.lower()
+    assert "blind comparison" in prompt.lower()
+    assert "verdict" in prompt.lower()
+
+
+def test_regression_guard_phase5_guidance_absent_when_disabled():
+    """Phase 5 should NOT mention regression guard when disabled."""
+    from massgen.system_prompt_sections import _build_checklist_gated_decision
+
+    prompt = _build_checklist_gated_decision(
+        checklist_items=["Criterion 1"],
+        regression_guard_enabled=False,
+    )
+    assert "regression_guard" not in prompt.lower()
+
+
 # ── Test 13-15: EvaluationSection with evaluator subagent ──
 
 

@@ -381,6 +381,11 @@ class Orchestrator(ChatAgent):
         # Tracks failed evaluator launches per answer-label set so deterministic
         # launch failures don't get retried forever.
         self._round_evaluator_launch_failures: dict[tuple[str, tuple[str, ...]], int] = {}
+        # Evaluator persona state: set by set_evaluator_personas MCP tool,
+        # consumed by _run_round_evaluator_pre_round_if_needed.
+        # Pending is single-use; last is reuse fallback.
+        self._pending_evaluator_personas: list[dict[str, str]] | None = None
+        self._last_evaluator_personas: list[dict[str, str]] | None = None
         # Context blocks inserted at the start of the next parent round.
         self._round_start_context_blocks: dict[str, list[str]] = {}
 
@@ -458,22 +463,25 @@ class Orchestrator(ChatAgent):
             _step_inputs = load_session_dir_inputs(self._step_mode.session_dir)
             all_agent_ids = sorted(set(list(agents.keys()) + list(_step_inputs.virtual_agents.keys())))
             self.coordination_tracker.initialize_session(all_agent_ids)
-            # Pre-load virtual agent answers into coordination tracker
+            # Pre-load ALL session dir answers into coordination tracker —
+            # including the real agent's own prior answer. In step mode, the
+            # agent starts fresh each step and should see all prior answers
+            # (including its own) anonymized.
             for va_id, va_state in _step_inputs.virtual_agents.items():
-                if va_id not in agents and va_state.latest_answer is not None:
+                if va_state.latest_answer is not None:
                     self.coordination_tracker.add_agent_answer(va_id, va_state.latest_answer)
                     logger.info(
-                        "[StepMode] Pre-loaded virtual agent %s (step %d, answer: %d chars)",
+                        "[StepMode] Pre-loaded session agent %s (step %d, answer: %d chars)",
                         va_id,
                         va_state.latest_step,
                         len(va_state.latest_answer),
                     )
             self._step_inputs = _step_inputs
-            # Pre-mark virtual agent answers as "seen" by real agents
-            # so fairness/restart logic doesn't block on static virtual answers
+            # Pre-mark session dir answers as "seen" by real agents
+            # so fairness/restart logic doesn't block on static answers
             for real_agent_id in agents.keys():
                 for va_id, va_state in _step_inputs.virtual_agents.items():
-                    if va_id not in agents and va_state.latest_answer is not None:
+                    if va_state.latest_answer is not None:
                         self.agent_states[real_agent_id].known_answer_ids.add(va_id)
         else:
             self.coordination_tracker.initialize_session(list(agents.keys()))
@@ -1050,6 +1058,8 @@ class Orchestrator(ChatAgent):
                 "critic_subagent_enabled": "critic" in [t.lower() for t in _active_subagent_types],
                 # Builder subagent guidance only when builder type is available
                 "builder_subagent_enabled": "builder" in [t.lower() for t in _active_subagent_types],
+                # Regression guard: agent-initiated blind comparison before committing
+                "regression_guard_subagent_enabled": "regression_guard" in [t.lower() for t in _active_subagent_types],
                 # Quality rethinking subagent: per-element craft improvements
                 "quality_rethinking_subagent_enabled": "quality_rethinking" in [t.lower() for t in _active_subagent_types],
                 # Planning injection dir for auto-populating task plan from propose_improvements
@@ -1085,6 +1095,15 @@ class Orchestrator(ChatAgent):
                     getattr(
                         getattr(self.config, "coordination_config", None),
                         "enable_novelty_on_iteration",
+                        False,
+                    ),
+                ),
+                # Evaluator personas config (opt-in)
+                "evaluator_team_size": self._get_evaluator_team_size(),
+                "enable_evaluator_personas": bool(
+                    getattr(
+                        getattr(self.config, "coordination_config", None),
+                        "enable_evaluator_personas",
                         False,
                     ),
                 ),
@@ -1544,11 +1563,86 @@ class Orchestrator(ChatAgent):
                 ],
             }
 
-        # Create SDK MCP server with both tools
+        # --- set_evaluator_personas tool (opt-in via enable_evaluator_personas) ---
+        _coord_cfg = getattr(self.config, "coordination_config", None)
+        _personas_enabled = bool(
+            _coord_cfg and getattr(_coord_cfg, "enable_evaluator_personas", False),
+        )
+
+        _personas_tool = None
+        if _personas_enabled:
+            set_personas_schema = {
+                "type": "object",
+                "properties": {
+                    "personas": {
+                        "type": "array",
+                        "description": ("List of evaluator personas. Each persona configures " "one evaluator subagent's critique focus for the next round. " "Count must match evaluator team size."),
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "label": {
+                                    "type": "string",
+                                    "description": "Short descriptive name for this evaluator persona.",
+                                },
+                                "instructions": {
+                                    "type": "string",
+                                    "description": "System prompt instructions shaping this evaluator's critique lens.",
+                                },
+                            },
+                            "required": ["label", "instructions"],
+                        },
+                    },
+                },
+                "required": ["personas"],
+            }
+
+            @tool(
+                name="set_evaluator_personas",
+                description=(
+                    "Configure distinct evaluation lenses for round evaluator subagents. "
+                    "Call before new_answer to shape how evaluators critique your next submission. "
+                    "Each persona defines a unique focus area for one evaluator."
+                ),
+                input_schema=set_personas_schema,
+            )
+            async def _set_evaluator_personas_impl(args):
+                import json as _json
+
+                personas = args.get("personas", [])
+                error = _orchestrator._validate_evaluator_personas(personas)
+                if error:
+                    return {
+                        "content": [
+                            {"type": "text", "text": _json.dumps({"error": error})},
+                        ],
+                        "isError": True,
+                    }
+                _orchestrator._pending_evaluator_personas = [{"label": str(p["label"]).strip(), "instructions": str(p["instructions"]).strip()} for p in personas]
+                labels = [p["label"] for p in _orchestrator._pending_evaluator_personas]
+                return {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": _json.dumps(
+                                {
+                                    "status": "accepted",
+                                    "message": f"Evaluator personas set: {', '.join(labels)}. " "These will be applied to the next round evaluator run.",
+                                },
+                            ),
+                        },
+                    ],
+                }
+
+            _personas_tool = _set_evaluator_personas_impl
+
+        # Create SDK MCP server with checklist tools
+        _checklist_tools = [submit_checklist_handler, propose_improvements_handler]
+        if _personas_tool is not None:
+            _checklist_tools.append(_personas_tool)
         sdk_server = create_sdk_mcp_server(
             name="massgen_checklist",
             version="1.0.0",
-            tools=[submit_checklist_handler, propose_improvements_handler],
+            tools=_checklist_tools,
         )
 
         # Inject into backend's MCP servers
@@ -1674,6 +1768,11 @@ class Orchestrator(ChatAgent):
             normalized_pending = {str(label).strip() for label in raw_pending if str(label).strip()}
         agent_state.pending_checklist_recheck_labels = normalized_pending
 
+        # Sync evaluator personas from stdio specs into orchestrator state.
+        raw_personas = persisted_state.get("pending_evaluator_personas")
+        if isinstance(raw_personas, list) and raw_personas:
+            self._pending_evaluator_personas = raw_personas
+
     def _refresh_checklist_state_for_agent(
         self,
         agent_id: str,
@@ -1786,6 +1885,8 @@ class Orchestrator(ChatAgent):
                 "critic_subagent_enabled": state.get("critic_subagent_enabled", False),
                 # Preserve builder gating from initial state
                 "builder_subagent_enabled": state.get("builder_subagent_enabled", False),
+                # Preserve regression_guard gating from initial state
+                "regression_guard_subagent_enabled": state.get("regression_guard_subagent_enabled", False),
                 # Preserve quality_rethinking gating from initial state
                 "quality_rethinking_subagent_enabled": state.get("quality_rethinking_subagent_enabled", False),
                 # Preserve quality-rethinking auto-injection toggle from initial state
@@ -5909,10 +6010,15 @@ Your answer:"""
                             # Step mode: record answer and signal completion
                             if self._step_mode and self._step_mode.enabled:
                                 self._step_complete = True
+                                workspace_path = None
+                                agent = self.agents.get(agent_id)
+                                if agent and agent.backend.filesystem_manager and agent.backend.filesystem_manager.cwd:
+                                    workspace_path = str(agent.backend.filesystem_manager.cwd)
                                 self._step_action_data = {
                                     "action": "new_answer",
                                     "agent_id": agent_id,
                                     "answer_text": result_data,
+                                    "workspace_path": workspace_path,
                                 }
                                 logger.info("[StepMode] Agent %s submitted answer — step complete", agent_id)
 
@@ -6016,6 +6122,7 @@ Your answer:"""
                                             "agent_id": agent_id,
                                             "vote_target": result_data.get("agent_id", ""),
                                             "vote_reason": result_data.get("reason", ""),
+                                            "workspace_path": None,
                                         }
                                         logger.info("[StepMode] Agent %s voted — step complete", agent_id)
                                 # End round token tracking with "vote" outcome
@@ -10219,6 +10326,20 @@ Your answer:"""
         )
         return "builder" in [t.lower() for t in types]
 
+    def _is_regression_guard_subagent_enabled(self) -> bool:
+        """Return True when 'regression_guard' is in the active subagent types."""
+        from massgen.subagent.type_scanner import DEFAULT_SUBAGENT_TYPES
+
+        types = (
+            getattr(
+                getattr(self.config, "coordination_config", None),
+                "subagent_types",
+                None,
+            )
+            or DEFAULT_SUBAGENT_TYPES
+        )
+        return "regression_guard" in [t.lower() for t in types]
+
     def _is_changedoc_enabled(self) -> bool:
         """Return True when changedoc decision journal is enabled."""
         coord = getattr(self.config, "coordination_config", None)
@@ -10341,13 +10462,14 @@ Your answer:"""
     def _get_current_answers_snapshot(self) -> dict[str, str]:
         """Return latest submitted answer content for each agent that has one.
 
-        In step mode, also includes virtual agent answers from the session directory
-        so the real agent can see peer context and vote for virtual agents.
+        In step mode, includes ALL session dir answers (including the real
+        agent's own prior answer) so the agent sees everything anonymized.
+        A new answer from the real agent takes precedence over the prior one.
         """
         snapshot = {aid: state.answer for aid, state in self.agent_states.items() if state.answer}
         if self._step_mode and self._step_mode.enabled and self._step_inputs:
             for va_id, va_state in self._step_inputs.virtual_agents.items():
-                if va_id not in self.agents and va_state.latest_answer is not None:
+                if va_state.latest_answer is not None:
                     snapshot.setdefault(va_id, va_state.latest_answer)
         return snapshot
 
@@ -10896,6 +11018,58 @@ Your answer:"""
         return bool(
             coord and getattr(coord, "round_evaluator_before_checklist", False) and getattr(coord, "orchestrator_managed_round_evaluator", False),
         )
+
+    def _get_evaluator_team_size(self) -> int:
+        """Return the number of evaluator subagents in the shared child team."""
+        coord = getattr(self.config, "coordination_config", None)
+        sub_orch = getattr(coord, "subagent_orchestrator", None) if coord else None
+        if sub_orch is None:
+            return 0
+        if isinstance(sub_orch, dict):
+            agents = sub_orch.get("agents", [])
+        else:
+            agents = getattr(sub_orch, "agents", None) or []
+        return len(agents)
+
+    def _validate_evaluator_personas(
+        self,
+        personas: Any,
+    ) -> str | None:
+        """Validate evaluator personas input. Return error string or None if valid."""
+        if not isinstance(personas, list):
+            return "personas must be a list"
+        expected = self._get_evaluator_team_size()
+        if len(personas) == 0:
+            return f"personas list is empty; expected {expected} persona(s)"
+        if len(personas) != expected:
+            return f"Expected {expected} persona(s) to match evaluator team size, got {len(personas)}"
+        for i, p in enumerate(personas):
+            if not isinstance(p, dict):
+                return f"Persona at index {i} must be an object with 'label' and 'instructions'"
+            if "label" not in p:
+                return f"Persona at index {i} is missing required 'label' field"
+            if "instructions" not in p:
+                return f"Persona at index {i} is missing required 'instructions' field"
+            if not str(p.get("label", "")).strip():
+                return f"Persona at index {i} has empty label"
+            if not str(p.get("instructions", "")).strip():
+                return f"Persona at index {i} has empty instructions"
+        return None
+
+    def _consume_evaluator_personas(self) -> list[dict[str, str]] | None:
+        """Consume pending evaluator personas, falling back to last used set.
+
+        Returns the personas to use for the current round evaluator spawn,
+        or None if no personas are configured.
+        """
+        if self._pending_evaluator_personas is not None:
+            consumed = self._pending_evaluator_personas
+            self._last_evaluator_personas = consumed
+            self._pending_evaluator_personas = None
+            return consumed
+        if self._last_evaluator_personas is not None:
+            return self._last_evaluator_personas
+        return None
 
     def _get_round_evaluator_latest_labels(
         self,
@@ -11873,6 +12047,10 @@ Your answer:"""
             "context_paths": spawn_context_paths,
             "timeout_seconds": configured_timeout,
         }
+        # Inject evaluator personas if configured by the main agent.
+        consumed_personas = self._consume_evaluator_personas()
+        if consumed_personas:
+            task_payload["metadata"] = {"evaluator_personas": consumed_personas}
         spawn_args: dict[str, Any] = {
             "tasks": [task_payload],
             "background": False,
@@ -12954,6 +13132,7 @@ Your answer:"""
                 item_categories=_active_categories,
                 item_verify_by=_active_verify_by,
                 builder_enabled=self._is_builder_subagent_enabled(),
+                regression_guard_enabled=self._is_regression_guard_subagent_enabled(),
             )
 
             # Update checklist tool state if registered (mutable dict — tool closure reads this)

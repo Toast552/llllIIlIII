@@ -457,16 +457,22 @@ class FilesystemManager:
                 suppressed_repo_paths = []
                 for ctx_path_config in context_paths:
                     ctx_path = ctx_path_config.get("path", "")
+                    permission = ctx_path_config.get("permission", "read")
                     git_dir = os.path.join(ctx_path, ".git")
-                    if ctx_path and os.path.isdir(git_dir):
+                    if ctx_path and os.path.isdir(git_dir) and permission != "read":
+                        # Only suppress writable git repo paths (they use worktree
+                        # isolation). Read-only context paths (e.g., parent workspace
+                        # mounted for subagents) must stay mounted in Docker so the
+                        # agent can access deliverable files.
                         suppressed_repo_paths.append(ctx_path)
                         extra_mount_paths.append((git_dir, git_dir, "rw"))
                         logger.info(
                             f"[FilesystemManager] write_mode: mounting .git/ dir for worktree refs: {git_dir}",
                         )
                     else:
-                        # Preserve non-git context paths (e.g., log/session directories)
-                        # so agents can still read external artifacts in Docker.
+                        # Preserve read-only context paths and non-git paths (e.g.,
+                        # log/session directories, parent workspaces) so agents can
+                        # still read external artifacts in Docker.
                         preserved_context_paths.append(ctx_path_config)
                 context_paths = preserved_context_paths
                 logger.info(

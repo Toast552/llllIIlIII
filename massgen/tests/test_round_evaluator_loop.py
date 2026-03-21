@@ -630,8 +630,9 @@ def test_example_round_evaluator_config_exists_and_validates():
     assert config["orchestrator"]["image_generation_backend"] == "openai"
     assert config["orchestrator"]["video_generation_backend"] == "openai"
     assert config["orchestrator"]["coordination"]["round_evaluator_transformation_pressure"] in ("balanced", "aggressive", "gentle")
-    assert "round_evaluator_refine:" not in raw_text
-    assert "round_evaluator_skip_synthesis:" not in raw_text
+    # These keys should not be active in the example config (commented out is fine)
+    assert "round_evaluator_refine" not in config["orchestrator"]["coordination"]
+    assert "round_evaluator_skip_synthesis" not in config["orchestrator"]["coordination"]
     child_agents = config["orchestrator"]["coordination"]["subagent_orchestrator"]["agents"]
     assert len(child_agents) == 3
 

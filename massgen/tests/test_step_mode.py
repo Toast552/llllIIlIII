@@ -255,14 +255,16 @@ class TestStepModeOutput:
         assert data["answer"] == "My new answer"
         assert "timestamp" in data
 
-        # Check last_action.json
-        last_action = session_dir / "last_action.json"
+        # Check per-agent last_action.json
+        last_action = session_dir / "agents" / "agent_a" / "last_action.json"
         assert last_action.exists()
         action_data = json.loads(last_action.read_text())
         assert action_data["action"] == "new_answer"
         assert action_data["agent_id"] == "agent_a"
         assert action_data["answer_text"] == "My new answer"
         assert action_data["duration_seconds"] == 45.2
+        # No global last_action.json (avoids race in parallel runs)
+        assert not (session_dir / "last_action.json").exists()
 
     def test_save_vote_output(self, tmp_path: Path) -> None:
         """Saving a vote creates vote.json with seen_steps."""
@@ -339,6 +341,111 @@ class TestStepModeOutput:
 
         answer_file = session_dir / "agents" / "agent_x" / "001" / "answer.json"
         assert answer_file.exists()
+
+    def test_save_copies_workspace(self, tmp_path: Path) -> None:
+        """save_step_mode_output copies workspace when workspace_source provided."""
+        from massgen.step_mode import save_step_mode_output
+
+        ws = tmp_path / "workspace_src"
+        ws.mkdir()
+        (ws / "index.html").write_text("<html>hello</html>")
+        (ws / "style.css").write_text("body {}")
+
+        session_dir = tmp_path / "session"
+        step_dir = save_step_mode_output(
+            session_dir=str(session_dir),
+            agent_id="agent_a",
+            action="new_answer",
+            answer_text="My answer",
+            vote_target=None,
+            vote_reason=None,
+            seen_steps=None,
+            duration_seconds=10.0,
+            workspace_source=str(ws),
+        )
+
+        ws_dest = step_dir / "workspace"
+        assert ws_dest.is_dir()
+        assert (ws_dest / "index.html").read_text() == "<html>hello</html>"
+        assert (ws_dest / "style.css").read_text() == "body {}"
+
+    def test_save_replaces_stale_workspace_paths_in_answer_text(self, tmp_path: Path) -> None:
+        """Stale workspace paths in answer_text are replaced with session dir paths."""
+        from massgen.step_mode import save_step_mode_output
+
+        ws = tmp_path / "workspace_src"
+        ws.mkdir()
+        (ws / "index.html").write_text("<html>test</html>")
+
+        stale_path = str(ws)
+        answer_text = f"I created index.html at {stale_path}/index.html\nWorkspace: {stale_path}"
+
+        session_dir = tmp_path / "session"
+        step_dir = save_step_mode_output(
+            session_dir=str(session_dir),
+            agent_id="agent_a",
+            action="new_answer",
+            answer_text=answer_text,
+            vote_target=None,
+            vote_reason=None,
+            seen_steps=None,
+            duration_seconds=10.0,
+            workspace_source=stale_path,
+        )
+
+        saved = json.loads((step_dir / "answer.json").read_text())
+        session_ws = str(step_dir / "workspace")
+        assert stale_path not in saved["answer"]
+        assert session_ws in saved["answer"]
+
+    def test_save_then_load_workspace_roundtrip(self, tmp_path: Path) -> None:
+        """Workspace saved by save_step_mode_output is loadable by load_session_dir_inputs."""
+        from massgen.step_mode import load_session_dir_inputs, save_step_mode_output
+
+        ws = tmp_path / "workspace_src"
+        ws.mkdir()
+        (ws / "index.html").write_text("<html>test</html>")
+
+        session_dir = tmp_path / "session"
+        save_step_mode_output(
+            session_dir=str(session_dir),
+            agent_id="agent_a",
+            action="new_answer",
+            answer_text="My answer",
+            vote_target=None,
+            vote_reason=None,
+            seen_steps=None,
+            duration_seconds=5.0,
+            workspace_source=str(ws),
+        )
+
+        inputs = load_session_dir_inputs(str(session_dir))
+        assert inputs.virtual_agents["agent_a"].latest_workspace is not None
+        assert (Path(inputs.virtual_agents["agent_a"].latest_workspace) / "index.html").exists()
+
+    def test_save_workspace_path_in_last_action(self, tmp_path: Path) -> None:
+        """last_action.json includes workspace_path when workspace is copied."""
+        from massgen.step_mode import save_step_mode_output
+
+        ws = tmp_path / "workspace_src"
+        ws.mkdir()
+        (ws / "app.js").write_text("console.log('hi')")
+
+        session_dir = tmp_path / "session"
+        step_dir = save_step_mode_output(
+            session_dir=str(session_dir),
+            agent_id="agent_a",
+            action="new_answer",
+            answer_text="Built an app",
+            vote_target=None,
+            vote_reason=None,
+            seen_steps=None,
+            duration_seconds=15.0,
+            workspace_source=str(ws),
+        )
+
+        last_action = json.loads((session_dir / "agents" / "agent_a" / "last_action.json").read_text())
+        assert last_action["workspace_path"] == str(step_dir / "workspace")
 
 
 # ---------------------------------------------------------------------------
@@ -557,6 +664,56 @@ class TestStepModeAnswerVisibility:
         assert "agent_b" in snapshot
         assert snapshot["agent_b"] == "Answer from B"
 
+    def test_snapshot_includes_own_prior_answer(self, tmp_path: Path) -> None:
+        """Real agent's prior answer from session dir is visible before it submits a new one.
+
+        In step mode, the agent starts fresh each step and should see ALL prior
+        answers (including its own) anonymized. This is the whole point of step
+        mode — the agent evaluates all work from scratch.
+        """
+        session_dir = tmp_path / "session"
+        orch = _make_step_mode_orchestrator(
+            session_dir,
+            real_agent_id="agent_a",
+            virtual_answers={"agent_a": [(1, "My prior answer from round 1")]},
+        )
+
+        # Before the agent submits anything, it should see its own prior answer
+        snapshot = orch._get_current_answers_snapshot()
+        assert "agent_a" in snapshot
+        assert snapshot["agent_a"] == "My prior answer from round 1"
+
+    def test_snapshot_prefers_new_answer_over_prior(self, tmp_path: Path) -> None:
+        """When real agent submits a new answer, it replaces the prior session dir answer."""
+        session_dir = tmp_path / "session"
+        orch = _make_step_mode_orchestrator(
+            session_dir,
+            real_agent_id="agent_a",
+            virtual_answers={"agent_a": [(1, "Old answer from session")]},
+        )
+
+        # Simulate the real agent submitting a new answer
+        orch.agent_states["agent_a"].answer = "Fresh answer from this step"
+
+        snapshot = orch._get_current_answers_snapshot()
+        assert snapshot["agent_a"] == "Fresh answer from this step"
+
+    def test_own_prior_answer_preloaded_in_coordination_tracker(self, tmp_path: Path) -> None:
+        """Real agent's own prior answer is in coordination_tracker for anonymization."""
+        session_dir = tmp_path / "session"
+        orch = _make_step_mode_orchestrator(
+            session_dir,
+            real_agent_id="agent_a",
+            virtual_answers={
+                "agent_a": [(1, "My prior answer")],
+                "agent_b": [(1, "Peer answer")],
+            },
+        )
+
+        # Both should be in the tracker
+        assert "agent_a" in orch.coordination_tracker.answers_by_agent
+        assert "agent_b" in orch.coordination_tracker.answers_by_agent
+
     def test_snapshot_prefers_real_agent_answer(self, tmp_path: Path) -> None:
         """Real agent's answer takes precedence if same ID appears in session dir."""
         session_dir = tmp_path / "session"
@@ -629,3 +786,306 @@ class TestStepModeAnswerVisibility:
 
         snapshot = orch._get_current_answers_snapshot()
         assert snapshot["agent_a"] == "Revised draft"
+
+
+# ---------------------------------------------------------------------------
+# A0.8: State machine — multi-agent round transitions
+# ---------------------------------------------------------------------------
+
+
+class TestStepModeStateMachine:
+    """End-to-end state machine tests simulating multi-agent step mode rounds.
+
+    State machine:
+      Round 1: all agents answer (no prior context)
+      Round 2: agents see all answers → vote or submit new answer
+      Stale vote: new answer invalidates prior votes
+      Consensus: majority of non-stale votes for same target
+    """
+
+    def test_round1_all_agents_answer(self, tmp_path: Path) -> None:
+        """Round 1: three agents produce initial answers, no votes yet."""
+        from massgen.step_mode import load_session_dir_inputs, save_step_mode_output
+
+        session_dir = tmp_path / "session"
+        for agent_id in ("agent_a", "agent_b", "agent_c"):
+            save_step_mode_output(
+                session_dir=str(session_dir),
+                agent_id=agent_id,
+                action="new_answer",
+                answer_text=f"Answer from {agent_id}",
+                vote_target=None,
+                vote_reason=None,
+                seen_steps=None,
+                duration_seconds=30.0,
+            )
+
+        inputs = load_session_dir_inputs(str(session_dir))
+        assert len(inputs.virtual_agents) == 3
+        for agent_id in ("agent_a", "agent_b", "agent_c"):
+            va = inputs.virtual_agents[agent_id]
+            assert va.latest_answer == f"Answer from {agent_id}"
+            assert va.latest_step == 1
+            assert va.latest_answer_step == 1
+
+    def test_round2_all_agents_vote_consensus(self, tmp_path: Path) -> None:
+        """Round 2: all agents vote, majority agrees → consensus."""
+        from massgen.step_mode import is_vote_stale, save_step_mode_output
+
+        session_dir = tmp_path / "session"
+        # Round 1: all answer
+        for aid in ("agent_a", "agent_b", "agent_c"):
+            save_step_mode_output(
+                session_dir=str(session_dir),
+                agent_id=aid,
+                action="new_answer",
+                answer_text=f"Answer {aid}",
+                vote_target=None,
+                vote_reason=None,
+                seen_steps=None,
+                duration_seconds=30.0,
+            )
+        # Round 2: all vote for agent_b (consensus)
+        seen = {"agent_a": 1, "agent_b": 1, "agent_c": 1}
+        for aid in ("agent_a", "agent_b", "agent_c"):
+            save_step_mode_output(
+                session_dir=str(session_dir),
+                agent_id=aid,
+                action="vote",
+                answer_text=None,
+                vote_target="agent_b",
+                vote_reason="Best answer",
+                seen_steps=seen,
+                duration_seconds=10.0,
+            )
+
+        # All votes are fresh — no new answers since voting
+        for aid in ("agent_a", "agent_b", "agent_c"):
+            assert is_vote_stale(str(session_dir), aid, 2) is False
+
+    def test_answer_driven_restart_stales_votes(self, tmp_path: Path) -> None:
+        """New answer after votes makes those votes stale."""
+        from massgen.step_mode import is_vote_stale, save_step_mode_output
+
+        session_dir = tmp_path / "session"
+        # Round 1: all answer
+        for aid in ("agent_a", "agent_b", "agent_c"):
+            save_step_mode_output(
+                session_dir=str(session_dir),
+                agent_id=aid,
+                action="new_answer",
+                answer_text=f"Answer {aid}",
+                vote_target=None,
+                vote_reason=None,
+                seen_steps=None,
+                duration_seconds=30.0,
+            )
+        # Round 2: agent_a and agent_b vote, agent_c submits NEW answer
+        seen = {"agent_a": 1, "agent_b": 1, "agent_c": 1}
+        save_step_mode_output(
+            session_dir=str(session_dir),
+            agent_id="agent_a",
+            action="vote",
+            answer_text=None,
+            vote_target="agent_b",
+            vote_reason="Good",
+            seen_steps=seen,
+            duration_seconds=10.0,
+        )
+        save_step_mode_output(
+            session_dir=str(session_dir),
+            agent_id="agent_b",
+            action="vote",
+            answer_text=None,
+            vote_target="agent_a",
+            vote_reason="Better",
+            seen_steps=seen,
+            duration_seconds=10.0,
+        )
+        # agent_c submits new answer instead of voting
+        save_step_mode_output(
+            session_dir=str(session_dir),
+            agent_id="agent_c",
+            action="new_answer",
+            answer_text="Revised answer from C",
+            vote_target=None,
+            vote_reason=None,
+            seen_steps=None,
+            duration_seconds=30.0,
+        )
+
+        # agent_a and agent_b votes are now stale (they saw agent_c at step 1, now step 2)
+        assert is_vote_stale(str(session_dir), "agent_a", 2) is True
+        assert is_vote_stale(str(session_dir), "agent_b", 2) is True
+
+    def test_split_votes_no_consensus(self, tmp_path: Path) -> None:
+        """All agents vote for different targets → no majority."""
+        from massgen.step_mode import (
+            is_vote_stale,
+            load_session_dir_inputs,
+            save_step_mode_output,
+        )
+
+        session_dir = tmp_path / "session"
+        # Round 1
+        for aid in ("agent_a", "agent_b", "agent_c"):
+            save_step_mode_output(
+                session_dir=str(session_dir),
+                agent_id=aid,
+                action="new_answer",
+                answer_text=f"Answer {aid}",
+                vote_target=None,
+                vote_reason=None,
+                seen_steps=None,
+                duration_seconds=30.0,
+            )
+        # Round 2: each votes for a different agent
+        seen = {"agent_a": 1, "agent_b": 1, "agent_c": 1}
+        save_step_mode_output(
+            session_dir=str(session_dir),
+            agent_id="agent_a",
+            action="vote",
+            answer_text=None,
+            vote_target="agent_b",
+            vote_reason="B is best",
+            seen_steps=seen,
+            duration_seconds=10.0,
+        )
+        save_step_mode_output(
+            session_dir=str(session_dir),
+            agent_id="agent_b",
+            action="vote",
+            answer_text=None,
+            vote_target="agent_c",
+            vote_reason="C is best",
+            seen_steps=seen,
+            duration_seconds=10.0,
+        )
+        save_step_mode_output(
+            session_dir=str(session_dir),
+            agent_id="agent_c",
+            action="vote",
+            answer_text=None,
+            vote_target="agent_a",
+            vote_reason="A is best",
+            seen_steps=seen,
+            duration_seconds=10.0,
+        )
+
+        # All votes are fresh (no new answers)
+        for aid in ("agent_a", "agent_b", "agent_c"):
+            assert is_vote_stale(str(session_dir), aid, 2) is False
+
+        # But no majority — each target has exactly 1 vote
+        inputs = load_session_dir_inputs(str(session_dir))
+        vote_counts: dict[str, int] = {}
+        for va_id, va_state in inputs.virtual_agents.items():
+            for step in va_state.steps:
+                target = step.data.get("target")
+                if step.action == "vote" and target:
+                    vote_counts[target] = vote_counts.get(target, 0) + 1
+        assert max(vote_counts.values()) == 1  # No majority
+
+    def test_per_agent_last_action(self, tmp_path: Path) -> None:
+        """Per-agent last_action.json files are written for parallel safety."""
+        from massgen.step_mode import save_step_mode_output
+
+        session_dir = tmp_path / "session"
+        save_step_mode_output(
+            session_dir=str(session_dir),
+            agent_id="agent_a",
+            action="new_answer",
+            answer_text="Answer A",
+            vote_target=None,
+            vote_reason=None,
+            seen_steps=None,
+            duration_seconds=30.0,
+        )
+        save_step_mode_output(
+            session_dir=str(session_dir),
+            agent_id="agent_b",
+            action="new_answer",
+            answer_text="Answer B",
+            vote_target=None,
+            vote_reason=None,
+            seen_steps=None,
+            duration_seconds=25.0,
+        )
+
+        # Per-agent action files exist and have correct agent
+        action_a = json.loads((session_dir / "agents" / "agent_a" / "last_action.json").read_text())
+        action_b = json.loads((session_dir / "agents" / "agent_b" / "last_action.json").read_text())
+        assert action_a["agent_id"] == "agent_a"
+        assert action_b["agent_id"] == "agent_b"
+        assert action_a["answer_text"] == "Answer A"
+        assert action_b["answer_text"] == "Answer B"
+
+    def test_round2_agent_sees_all_prior_answers(self, tmp_path: Path) -> None:
+        """In round 2, the real agent sees all round 1 answers (including its own)."""
+        session_dir = tmp_path / "session"
+        # Round 1: all 3 agents answer
+        _write_answer(session_dir, "agent_a", 1, "A round 1 answer")
+        _write_answer(session_dir, "agent_b", 1, "B round 1 answer")
+        _write_answer(session_dir, "agent_c", 1, "C round 1 answer")
+
+        # Round 2: agent_a is the real agent
+        orch = _make_step_mode_orchestrator(
+            session_dir,
+            real_agent_id="agent_a",
+        )
+
+        snapshot = orch._get_current_answers_snapshot()
+        assert len(snapshot) == 3
+        assert snapshot["agent_a"] == "A round 1 answer"
+        assert snapshot["agent_b"] == "B round 1 answer"
+        assert snapshot["agent_c"] == "C round 1 answer"
+
+    def test_round2_new_answer_replaces_prior_in_snapshot(self, tmp_path: Path) -> None:
+        """When real agent submits new answer, it replaces prior in snapshot."""
+        session_dir = tmp_path / "session"
+        _write_answer(session_dir, "agent_a", 1, "A round 1")
+        _write_answer(session_dir, "agent_b", 1, "B round 1")
+
+        orch = _make_step_mode_orchestrator(session_dir, real_agent_id="agent_a")
+
+        # Before submitting: sees own prior
+        assert orch._get_current_answers_snapshot()["agent_a"] == "A round 1"
+
+        # Agent submits new answer
+        orch.agent_states["agent_a"].answer = "A round 2 revised"
+
+        # After submitting: new answer takes precedence
+        snapshot = orch._get_current_answers_snapshot()
+        assert snapshot["agent_a"] == "A round 2 revised"
+        assert snapshot["agent_b"] == "B round 1"
+
+    def test_workspace_roundtrip_multi_agent(self, tmp_path: Path) -> None:
+        """Workspaces persist and paths are replaced for multiple agents."""
+        from massgen.step_mode import load_session_dir_inputs, save_step_mode_output
+
+        session_dir = tmp_path / "session"
+        for aid in ("agent_a", "agent_b"):
+            ws = tmp_path / f"ws_{aid}"
+            ws.mkdir()
+            (ws / "index.html").write_text(f"<html>{aid}</html>")
+
+            save_step_mode_output(
+                session_dir=str(session_dir),
+                agent_id=aid,
+                action="new_answer",
+                answer_text=f"Built site at {ws}/index.html",
+                vote_target=None,
+                vote_reason=None,
+                seen_steps=None,
+                duration_seconds=30.0,
+                workspace_source=str(ws),
+            )
+
+        inputs = load_session_dir_inputs(str(session_dir))
+        for aid in ("agent_a", "agent_b"):
+            va = inputs.virtual_agents[aid]
+            assert va.latest_workspace is not None
+            assert (Path(va.latest_workspace) / "index.html").exists()
+            assert (Path(va.latest_workspace) / "index.html").read_text() == f"<html>{aid}</html>"
+            # Stale path replaced
+            assert f"ws_{aid}" not in (va.latest_answer or "")
