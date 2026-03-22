@@ -7,6 +7,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useAgentStore } from '../stores/agentStore';
+import { useMessageStore } from '../stores/v2/messageStore';
 import type { WSEvent } from '../types';
 
 export type ConnectionStatus = 'connecting' | 'connected' | 'disconnected' | 'error';
@@ -43,6 +44,7 @@ export function useWebSocket({
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const processWSEvent = useAgentStore((state) => state.processWSEvent);
+  const processV2Event = useMessageStore((state) => state.processWSEvent);
 
   // Build WebSocket URL
   const getWsUrl = useCallback(() => {
@@ -51,17 +53,18 @@ export function useWebSocket({
     return `${protocol}//${host}/ws/${sessionId}`;
   }, [sessionId]);
 
-  // Handle incoming messages
+  // Handle incoming messages — dispatch to both v1 and v2 stores
   const handleMessage = useCallback(
     (event: MessageEvent) => {
       try {
         const data: WSEvent = JSON.parse(event.data);
         processWSEvent(data);
+        processV2Event(data);
       } catch (err) {
         console.error('Failed to parse WebSocket message:', err);
       }
     },
-    [processWSEvent]
+    [processWSEvent, processV2Event]
   );
 
   // Connect to WebSocket

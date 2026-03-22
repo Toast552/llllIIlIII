@@ -29,6 +29,7 @@ import { useWorkspaceConnection } from './hooks/useWorkspaceConnection';
 import { useWizardStore } from './stores/wizardStore';
 import { debugLog } from './utils/debugLogger';
 import type { Notification } from './stores/notificationStore';
+import { AppShell } from './components/v2/layout/AppShell';
 
 function ConnectionIndicator({ status }: { status: ConnectionStatus }) {
   const config: Record<ConnectionStatus, { icon: typeof Wifi; color: string; text: string }> = {
@@ -55,6 +56,7 @@ const initialConfig = initialUrlParams.get('config');
 const initialSession = initialUrlParams.get('session');
 const initialWizardOpen = initialUrlParams.get('wizard') === 'open';
 const initialTemporaryQuickstart = initialUrlParams.get('temporary') === '1';
+const useV2UI = initialUrlParams.get('v') === '2';
 
 export function App() {
   // Session management - use URL param if provided, otherwise generate random UUID
@@ -77,6 +79,7 @@ export function App() {
   const initStatus = useAgentStore(selectInitStatus);
   const preparationStatus = useAgentStore(selectPreparationStatus);
   const reset = useAgentStore((s) => s.reset);
+  const beginLaunch = useAgentStore((s) => s.beginLaunch);
   const backToCoordination = useAgentStore((s) => s.backToCoordination);
   const setViewMode = useAgentStore((s) => s.setViewMode);
   const startContinuation = useAgentStore((s) => s.startContinuation);
@@ -251,11 +254,12 @@ export function App() {
       e.preventDefault();
       if (inputQuestion.trim() && status === 'connected') {
         // Pass config path when starting coordination
+        beginLaunch(inputQuestion.trim());
         startCoordination(inputQuestion.trim(), selectedConfig || undefined);
         setInputQuestion('');
       }
     },
-    [inputQuestion, status, startCoordination, selectedConfig]
+    [inputQuestion, status, beginLaunch, startCoordination, selectedConfig]
   );
 
   const handleNewSession = useCallback(() => {
@@ -330,6 +334,20 @@ export function App() {
   const configName = selectedConfig
     ? selectedConfig.split('/').pop()?.replace('.yaml', '') || 'Selected'
     : 'No config';
+
+  // v2 UI: Discord + tmux hybrid layout (activated via ?v=2 query param)
+  if (useV2UI) {
+    return (
+      <AppShell
+        wsStatus={status}
+        startCoordination={startCoordination}
+        continueConversation={continueConversation}
+        cancelCoordination={cancelCoordination}
+        selectedConfig={selectedConfig}
+        onConfigChange={handleConfigChange}
+      />
+    );
+  }
 
   // Automation mode: show simplified timeline view
   if (automationMode) {
