@@ -96,13 +96,15 @@ function DropdownToken<T extends string>({
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
   const [menuPos, setMenuPos] = useState<{ left: number; bottom: number } | null>(null);
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) {
-        setOpen(false);
-      }
+      const target = e.target as Node;
+      if (ref.current?.contains(target)) return;
+      if (menuRef.current?.contains(target)) return;
+      setOpen(false);
     };
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
@@ -154,6 +156,7 @@ function DropdownToken<T extends string>({
 
       {open && menuPos && createPortal(
         <div
+          ref={menuRef}
           data-testid={testId ? `${testId}-menu` : undefined}
           className={cn(
             'fixed z-[9999]',
@@ -1075,11 +1078,15 @@ function PreCollabDropdown() {
 
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
   const [menuPos, setMenuPos] = useState<{ left: number; bottom: number } | null>(null);
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+      const target = e.target as Node;
+      if (ref.current?.contains(target)) return;
+      if (menuRef.current?.contains(target)) return;
+      setOpen(false);
     };
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
@@ -1134,6 +1141,7 @@ function PreCollabDropdown() {
 
       {open && menuPos && createPortal(
         <div
+          ref={menuRef}
           data-testid="dropdown-precollab-menu"
           className={cn(
             'fixed z-[9999]',
