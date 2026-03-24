@@ -40,6 +40,11 @@ from ..mcp_tools.backend_utils import MCPErrorHandler
 from ..structured_logging import trace_llm_api_call
 from ._streaming_buffer_mixin import StreamingBufferMixin
 from .base import FilesystemSupport, StreamChunk
+from .llm_circuit_breaker import (
+    CircuitBreakerOpenError,
+    LLMCircuitBreaker,
+    LLMCircuitBreakerConfig,
+)
 from .base_with_custom_tool_and_mcp import (
     CustomToolAndMCPBackend,
     CustomToolChunk,
@@ -52,6 +57,8 @@ class ClaudeBackend(StreamingBufferMixin, CustomToolAndMCPBackend):
     """Claude backend using Anthropic's Messages API with full multi-tool support."""
 
     def __init__(self, api_key: str | None = None, **kwargs):
+        # Extract circuit breaker config before passing to super
+        cb_config = self._build_circuit_breaker_config(kwargs)
         super().__init__(api_key, **kwargs)
         self.api_key = api_key or os.getenv("ANTHROPIC_API_KEY")
         self.search_count = 0  # Track web search usage for pricing
@@ -59,6 +66,22 @@ class ClaudeBackend(StreamingBufferMixin, CustomToolAndMCPBackend):
         self.formatter = ClaudeFormatter()
         self.api_params_handler = ClaudeAPIParamsHandler(self)
         self._uploaded_file_ids: list[str] = []
+        self.circuit_breaker = LLMCircuitBreaker(config=cb_config, backend_name="claude")
+
+    @staticmethod
+    def _build_circuit_breaker_config(kwargs: dict[str, Any]) -> LLMCircuitBreakerConfig:
+        """Extract circuit breaker settings from kwargs and build config."""
+        cb_kwargs: dict[str, Any] = {}
+        prefix = "llm_circuit_breaker_"
+        keys_to_pop: list[str] = []
+        for key in kwargs:
+            if key.startswith(prefix):
+                param = key[len(prefix):]
+                cb_kwargs[param] = kwargs[key]
+                keys_to_pop.append(key)
+        for key in keys_to_pop:
+            kwargs.pop(key)
+        return LLMCircuitBreakerConfig(**cb_kwargs)
 
     def supports_upload_files(self) -> bool:
         """Claude Vision supports inline images; Files API handles PDFs and text docs."""
@@ -608,12 +631,20 @@ class ClaudeBackend(StreamingBufferMixin, CustomToolAndMCPBackend):
             model=model,
             operation="stream",
         ):
-            # Create stream (handle betas)
+            # Create stream (handle betas) with circuit breaker protection
             try:
-                if "betas" in api_params:
-                    stream = await client.beta.messages.create(**api_params)
-                else:
-                    stream = await client.messages.create(**api_params)
+                async def _make_api_call():
+                    if "betas" in api_params:
+                        return await client.beta.messages.create(**api_params)
+                    return await client.messages.create(**api_params)
+
+                stream = await self.circuit_breaker.call_with_retry(
+                    _make_api_call,
+                    agent_id=agent_id,
+                )
+            except CircuitBreakerOpenError:
+                self.end_api_call_timing(success=False, error="circuit_breaker_open")
+                raise
             except Exception as e:
                 self.end_api_call_timing(success=False, error=str(e))
                 raise
@@ -916,12 +947,20 @@ class ClaudeBackend(StreamingBufferMixin, CustomToolAndMCPBackend):
             model=model,
             operation="stream",
         ):
-            # Create stream (handle code execution beta)
+            # Create stream (handle code execution beta) with circuit breaker
             try:
-                if "betas" in api_params:
-                    stream = await client.beta.messages.create(**api_params)
-                else:
-                    stream = await client.messages.create(**api_params)
+                async def _make_api_call_ce():
+                    if "betas" in api_params:
+                        return await client.beta.messages.create(**api_params)
+                    return await client.messages.create(**api_params)
+
+                stream = await self.circuit_breaker.call_with_retry(
+                    _make_api_call_ce,
+                    agent_id=agent_id,
+                )
+            except CircuitBreakerOpenError:
+                self.end_api_call_timing(success=False, error="circuit_breaker_open")
+                raise
             except Exception as e:
                 self.end_api_call_timing(success=False, error=str(e))
                 raise
