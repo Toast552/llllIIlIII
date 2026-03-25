@@ -5400,6 +5400,7 @@ async def run_coordination_with_history(
             agent_temporary_workspace=agent_temporary_workspace,
             previous_turns=previous_turns,
             winning_agents_history=winning_agents_history,
+            raw_config=config,
         )
 
         # Set up checkpoint coordination if main_agent configured
@@ -6207,6 +6208,7 @@ async def run_coordination(
             session_id=session_id,
             snapshot_storage=snapshot_storage,
             agent_temporary_workspace=agent_temporary_workspace,
+            raw_config=config,
         )
 
         # Set up checkpoint coordination if main_agent configured

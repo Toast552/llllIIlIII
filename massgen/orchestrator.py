@@ -209,6 +209,7 @@ class Orchestrator(ChatAgent):
         generated_evaluation_criteria: list | None = None,
         plan_session_id: str | None = None,
         step_mode: StepModeConfig | None = None,
+        raw_config: dict[str, Any] | None = None,
     ):
         """
         Initialize MassGen orchestrator.
@@ -423,27 +424,15 @@ class Orchestrator(ChatAgent):
         self._background_subagents_enabled = background_subagent_config.get("enabled", True)
         self._background_subagent_injection_strategy = background_subagent_config.get("injection_strategy", "tool_result")
 
-        # Checkpoint coordination state
+        # Raw YAML config dict (used by checkpoint subprocess to generate sub-run configs)
+        self._raw_config_dict: dict[str, Any] = raw_config or {}
+
+        # Checkpoint coordination state (subprocess-based)
         self._main_agent_id: str | None = None  # Set by set_main_agent()
-        self._checkpoint_active: bool = False  # True during checkpoint rounds
+        self._checkpoint_active: bool = False  # True during checkpoint subprocess
         self._checkpoint_task: str | None = None  # Current checkpoint task
-        self._checkpoint_context: str | None = None  # Checkpoint context
-        self._checkpoint_expected_actions: list[dict[str, Any]] | None = None
-        self._checkpoint_eval_criteria: list[str] | None = None
-        self._checkpoint_personas: dict[str, str] | None = None
-        self._checkpoint_gated_actions: list[dict[str, Any]] | None = None
         self._checkpoint_number: int = 0  # Sequential checkpoint counter
-        self._checkpoint_stream_end_requested: bool = False  # SDK handler flag
-        self._checkpoint_display_ids: dict[str, str] = {}  # real_id -> display_id
-        self._saved_checkpoint_mcp: Any = None  # Saved MCP config during checkpoint
         self._checkpoint_participants: dict[str, dict[str, Any]] = {}  # display_id -> info
-        self._checkpoint_activated_event_pending: bool = False  # Emit event once
-        # Fresh-agent checkpoint state: saved originals during checkpoint rounds
-        self._saved_agents: dict[str, ChatAgent] | None = None
-        self._saved_agent_states: dict[str, AgentState] | None = None
-        self._saved_coordination_tracker: CoordinationTracker | None = None
-        self._saved_workflow_tools: list[dict[str, Any]] | None = None
-        self._checkpoint_workspace_clones: list[str] = []  # Paths to clean up after checkpoint
 
         # Agent startup rate limiting (per model)
         # Load from centralized configuration file instead of hardcoding
@@ -1749,252 +1738,17 @@ class Orchestrator(ChatAgent):
         )
 
     def _init_checkpoint_tool(self) -> None:
-        """Inject checkpoint MCP tool into the main agent's backend.
+        """Set up checkpoint tool for the main agent.
 
-        Only injects for the main agent (prevents recursion during checkpoint
-        rounds). Follows the same two-path pattern as _init_checklist_tool():
-        - SDK path: in-process MCP server for ClaudeCode backends
-        - Stdio path: stdio MCP server for standard API backends
+        The checkpoint tool schema is provided by the CheckpointToolkit
+        (workflow toolkit) -- no MCP server needed. Execution is handled
+        by the orchestrator's streaming loop interception which spawns a
+        subprocess via CheckpointSubprocessManager.
         """
         if not self._main_agent_id:
             return
-
-        agent = self.agents.get(self._main_agent_id)
-        if not agent or not hasattr(agent, "backend"):
-            return
-
-        backend = agent.backend
-
-        # Get workspace path from filesystem manager
-        workspace_path = getattr(
-            getattr(backend, "filesystem_manager", None),
-            "cwd",
-            None,
-        )
-
-        # Get gated patterns from coordination config
-        gated_patterns = (
-            getattr(
-                getattr(self.config, "coordination_config", None),
-                "checkpoint_gated_patterns",
-                [],
-            )
-            or []
-        )
-
-        if getattr(backend, "supports_sdk_mcp", False):
-            # SDK path: in-process MCP server (ClaudeCode)
-            self._init_checkpoint_tool_sdk(
-                self._main_agent_id,
-                backend,
-                workspace_path,
-                gated_patterns,
-            )
-        elif hasattr(backend, "mcp_servers"):
-            # Stdio path: standard MCP backends (Claude API, OpenAI, Gemini, Grok)
-            if not workspace_path:
-                logger.warning(
-                    "[Checkpoint] Cannot inject stdio MCP: no workspace path " f"for agent '{self._main_agent_id}'",
-                )
-                return
-            self._init_checkpoint_tool_stdio(
-                self._main_agent_id,
-                backend,
-                workspace_path,
-                gated_patterns,
-            )
-        else:
-            logger.info(
-                f"[Checkpoint] Agent '{self._main_agent_id}' backend has no " "mcp_servers attribute; checkpoint tool available via workflow " "toolkit only",
-            )
-
-    def _init_checkpoint_tool_sdk(
-        self,
-        agent_id: str,
-        backend,
-        workspace_path,
-        gated_patterns: list,
-    ) -> None:
-        """Register checkpoint tool as an in-process SDK MCP server."""
-        try:
-            from claude_agent_sdk import create_sdk_mcp_server, tool
-        except ImportError:
-            logger.warning(
-                "claude-agent-sdk not available, checkpoint tool will not " "be registered via SDK MCP",
-            )
-            return
-
-        from .mcp_tools.checkpoint._checkpoint_mcp_server import (
-            build_checkpoint_signal,
-            validate_checkpoint_params,
-        )
-
-        # Reference to orchestrator for closure (used by SDK handler)
-        _orchestrator = self
-
-        @tool(
-            name="checkpoint",
-            description=(
-                "Delegate a task to the multi-agent team for collaborative "
-                "execution. All configured agents activate and work on the "
-                "task using standard coordination (iterate, refine, vote). "
-                "The consensus result and workspace changes sync back to you."
-            ),
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "task": {
-                        "type": "string",
-                        "description": "What agents should accomplish",
-                    },
-                    "eval_criteria": {
-                        "type": "array",
-                        "description": ("Evaluation criteria the team should use to judge quality. " "Each criterion describes what good output looks like."),
-                        "items": {"type": "string"},
-                        "minItems": 1,
-                    },
-                    "context": {
-                        "type": "string",
-                        "description": "Background info, prior work, constraints",
-                    },
-                    "personas": {
-                        "type": "object",
-                        "description": ("Optional agent personas. Dict of agent_id -> persona text. " "Each persona gives an agent a distinct role/perspective."),
-                        "additionalProperties": {"type": "string"},
-                    },
-                    "gated_actions": {
-                        "type": "array",
-                        "description": ("Restricted tools agents should propose rather than " "execute directly. Each entry: {tool, description}."),
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "tool": {"type": "string"},
-                                "description": {"type": "string"},
-                            },
-                            "required": ["tool", "description"],
-                        },
-                    },
-                },
-                "required": ["task", "eval_criteria"],
-            },
-        )
-        async def _checkpoint_impl(args):
-            import json as _json
-
-            task = args.get("task", "")
-            context = args.get("context", "")
-            eval_criteria = args.get("eval_criteria", [])
-            personas = args.get("personas")
-            gated_actions = args.get("gated_actions")
-            # Backward compat: also check expected_actions
-            if not gated_actions:
-                gated_actions = args.get("expected_actions")
-
-            try:
-                params = validate_checkpoint_params(
-                    task,
-                    context,
-                    eval_criteria=eval_criteria,
-                    personas=personas,
-                    gated_actions=gated_actions,
-                )
-            except ValueError as e:
-                return {
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": _json.dumps(
-                                {
-                                    "success": False,
-                                    "error": str(e),
-                                },
-                            ),
-                        },
-                    ],
-                    "isError": True,
-                }
-
-            signal = build_checkpoint_signal(
-                task=params["task"],
-                context=params["context"],
-                eval_criteria=params["eval_criteria"],
-                personas=params["personas"],
-                gated_actions=params["gated_actions"],
-            )
-
-            # Directly activate checkpoint via orchestrator closure — no file I/O
-            _orchestrator._activate_checkpoint(signal)
-            # Signal the stream loop to end this agent's stream
-            _orchestrator._checkpoint_stream_end_requested = True
-
-            return {
-                "content": [
-                    {
-                        "type": "text",
-                        "text": _json.dumps(
-                            {
-                                "success": True,
-                                "operation": "checkpoint",
-                                "message": (f"Checkpoint delegated: {params['task'][:100]}. " "All agents are now working on this task. " "Results will be returned when consensus is " "reached."),
-                                "signal": signal,
-                            },
-                        ),
-                    },
-                ],
-            }
-
-        sdk_server = create_sdk_mcp_server(
-            name="massgen_checkpoint",
-            version="1.0.0",
-            tools=[_checkpoint_impl],
-        )
-
-        # Inject into backend's MCP servers
-        if not hasattr(backend, "config") or not isinstance(backend.config, dict):
-            logger.warning(
-                f"Agent {agent_id} backend has no dict config, " "skipping checkpoint SDK MCP",
-            )
-            return
-
-        if "mcp_servers" not in backend.config:
-            backend.config["mcp_servers"] = {}
-
-        if isinstance(backend.config["mcp_servers"], dict):
-            backend.config["mcp_servers"]["massgen_checkpoint"] = sdk_server
-        elif isinstance(backend.config["mcp_servers"], list):
-            backend.config["mcp_servers"].append(
-                {
-                    "name": "massgen_checkpoint",
-                    "__sdk_server__": sdk_server,
-                },
-            )
-
         logger.info(
-            f"[Orchestrator] Registered checkpoint SDK MCP tool for " f"agent {agent_id}",
-        )
-
-    def _init_checkpoint_tool_stdio(
-        self,
-        agent_id: str,
-        backend,
-        workspace_path,
-        gated_patterns: list,
-    ) -> None:
-        """Add stdio MCP server for checkpoint tool on standard backends."""
-        from .mcp_tools.subrun_utils import build_checkpoint_mcp_config
-
-        checkpoint_mcp = build_checkpoint_mcp_config(
-            workspace_path=Path(workspace_path),
-            agent_id=agent_id,
-            gated_patterns=gated_patterns,
-        )
-
-        # Replace any existing checkpoint entry
-        backend.mcp_servers = [s for s in backend.mcp_servers if not (isinstance(s, dict) and s.get("name") == "massgen_checkpoint")]
-        backend.mcp_servers.append(checkpoint_mcp)
-
-        logger.info(
-            f"[Orchestrator] Registered checkpoint stdio MCP for " f"agent {agent_id} (workspace: {workspace_path})",
+            f"[Checkpoint] Checkpoint tool active for main agent " f"'{self._main_agent_id}' (via workflow toolkit + interception)",
         )
 
     def _detect_convergence(self, agent_id: str) -> tuple:
@@ -2321,405 +2075,60 @@ class Orchestrator(ChatAgent):
         # Solo mode: only main agent
         return agent_id == self._main_agent_id
 
-    def _get_checkpoint_display_id(self, agent_id: str) -> str:
-        """Return display ID for checkpoint routing, or raw agent_id if not in checkpoint."""
-        if self._checkpoint_active:
-            return self._checkpoint_display_ids.get(agent_id, agent_id)
-        return agent_id
+    async def _activate_checkpoint(self, signal: dict[str, Any]) -> str:
+        """Spawn a checkpoint subprocess and return the consensus result.
 
-    def _remove_checkpoint_mcp_from_main_agent(self) -> None:
-        """Remove checkpoint MCP server from main agent's backend config."""
-        agent = self.agents.get(self._main_agent_id)
-        if not agent:
-            return
-        backend = agent.backend
-        if hasattr(backend, "config") and isinstance(backend.config, dict):
-            mcp_servers = backend.config.get("mcp_servers", {})
-            if isinstance(mcp_servers, dict):
-                self._saved_checkpoint_mcp = mcp_servers.pop(
-                    "massgen_checkpoint",
-                    None,
-                )
-            elif isinstance(mcp_servers, list):
-                for i, s in enumerate(mcp_servers):
-                    if isinstance(s, dict) and s.get("name") == "massgen_checkpoint":
-                        self._saved_checkpoint_mcp = mcp_servers.pop(i)
-                        break
-
-    def _restore_checkpoint_mcp_to_main_agent(self) -> None:
-        """Re-inject checkpoint MCP server into main agent's backend config."""
-        saved = getattr(self, "_saved_checkpoint_mcp", None)
-        if not saved:
-            return
-        agent = self.agents.get(self._main_agent_id)
-        if not agent:
-            return
-        backend = agent.backend
-        if hasattr(backend, "config") and isinstance(backend.config, dict):
-            mcp_servers = backend.config.get("mcp_servers", {})
-            if isinstance(mcp_servers, dict):
-                mcp_servers["massgen_checkpoint"] = saved
-            elif isinstance(mcp_servers, list):
-                mcp_servers.append(saved)
-        self._saved_checkpoint_mcp = None
-
-    def _save_pre_checkpoint_state(self) -> None:
-        """Save original agents, states, tracker, and workflow tools before checkpoint."""
-        self._saved_agents = self.agents
-        self._saved_agent_states = self.agent_states
-        self._saved_coordination_tracker = self.coordination_tracker
-        self._saved_workflow_tools = self.workflow_tools
-
-    def _restore_post_checkpoint_state(self) -> None:
-        """Restore original agents and states after checkpoint completes."""
-        if self._saved_agents is None:
-            return
-        self.agents = self._saved_agents
-        self.agent_states = self._saved_agent_states
-        self.coordination_tracker = self._saved_coordination_tracker
-        self.workflow_tools = self._saved_workflow_tools
-        self._saved_agents = None
-        self._saved_agent_states = None
-        self._saved_coordination_tracker = None
-        self._saved_workflow_tools = None
-
-    def _create_fresh_checkpoint_agents(self) -> dict[str, ChatAgent]:
-        """Create fresh agent instances for checkpoint with clean context.
-
-        For each agent, creates a new backend and ConfigurableAgent with:
-        - Deep-copied backend config (no shared state)
-        - Cloned workspace from the original agent
-        - Checkpoint display ID as agent_id (e.g., "agent_a-ckpt1")
-        - No conversation history or memory objects
-
-        Returns:
-            Dict of {checkpoint_display_id: fresh_agent}.
-        """
-        from .chat_agent import ConfigurableAgent
-        from .cli import create_backend
-
-        fresh_agents: dict[str, ChatAgent] = {}
-
-        for aid, agent in self.agents.items():
-            display_id = f"{aid}-ckpt{self._checkpoint_number}"
-            backend = agent.backend
-
-            # Deep-copy the backend config dict
-            backend_config = copy.deepcopy(backend.config) if hasattr(backend, "config") else {}
-
-            # Filter out MCP servers that are auto-injected by FilesystemManager
-            # (they contain path-specific configs that must be regenerated for
-            # the new workspace) and the checkpoint MCP (not needed in checkpoint round).
-            _injected_mcps = {"massgen_checkpoint", "command_line", "filesystem", "workspace_tools"}
-            mcp_servers = backend_config.get("mcp_servers", {})
-            if isinstance(mcp_servers, dict):
-                for name in _injected_mcps:
-                    mcp_servers.pop(name, None)
-            elif isinstance(mcp_servers, list):
-                backend_config["mcp_servers"] = [s for s in mcp_servers if not (isinstance(s, dict) and s.get("name") in _injected_mcps)]
-
-            # Set agent_id in backend config so backends that need it at init
-            # (e.g., Codex for Docker container lookup) can find it.
-            backend_config["agent_id"] = display_id
-
-            # Restore instance_id (popped from kwargs during original backend init,
-            # needed for Docker container naming so command_line MCP can find the container).
-            original_instance_id = getattr(backend, "_instance_id", None)
-            if original_instance_id:
-                backend_config["instance_id"] = original_instance_id
-
-            # Generate new workspace path by appending checkpoint suffix
-            original_cwd = getattr(
-                getattr(backend, "filesystem_manager", None),
-                "cwd",
-                None,
-            )
-            if original_cwd:
-                suffix = secrets.token_hex(4)
-                new_workspace = f"{original_cwd}_ckpt_{self._checkpoint_number}_{suffix}"
-                backend_config["cwd"] = new_workspace
-                self._checkpoint_workspace_clones.append(new_workspace)
-
-            # Create a fresh backend via create_backend
-            # NOTE: create_backend -> FilesystemManager.__init__ -> _setup_workspace
-            # clears the workspace directory. We clone files AFTER this step.
-            backend_type = getattr(backend, "_backend_type", None)
-            if not backend_type:
-                logger.warning(
-                    f"[Checkpoint] Agent '{aid}' backend has no _backend_type, " "cannot create fresh instance; reusing original",
-                )
-                fresh_agents[display_id] = agent
-                continue
-
-            try:
-                fresh_backend = create_backend(backend_type, api_key=backend.api_key, **backend_config)
-            except Exception as e:
-                logger.warning(
-                    f"[Checkpoint] Failed to create fresh backend for '{aid}': {e}; " "reusing original",
-                )
-                fresh_agents[display_id] = agent
-                continue
-
-            # Clone original workspace files INTO the fresh workspace AFTER
-            # _setup_workspace has already created the directory structure.
-            # _setup_workspace clears the workspace on init, so we must copy after.
-            fresh_cwd = getattr(
-                getattr(fresh_backend, "filesystem_manager", None),
-                "cwd",
-                None,
-            )
-            if original_cwd and fresh_cwd and Path(original_cwd).exists():
-                try:
-                    for item in Path(original_cwd).iterdir():
-                        dst = Path(fresh_cwd) / item.name
-                        if dst.exists():
-                            # Skip items already created by _setup_workspace (e.g. .git)
-                            continue
-                        if item.is_symlink():
-                            continue
-                        if item.is_file():
-                            shutil.copy2(item, dst)
-                        elif item.is_dir():
-                            shutil.copytree(item, dst, dirs_exist_ok=True)
-                    logger.info(
-                        f"[Checkpoint] Cloned workspace files {original_cwd} -> {fresh_cwd}",
-                    )
-                except Exception as e:
-                    logger.warning(f"[Checkpoint] Failed to clone workspace files: {e}")
-
-            # Deep-copy the original agent's AgentConfig and override agent_id
-            fresh_config = copy.deepcopy(agent.config)
-            fresh_config.agent_id = display_id
-
-            # Create fresh ConfigurableAgent — no memory, no history
-            fresh_agent = ConfigurableAgent(
-                config=fresh_config,
-                backend=fresh_backend,
-            )
-
-            # Setup orchestration paths on the fresh backend's filesystem manager
-            # so save_snapshot() knows the agent_id and can write to log directories.
-            # Then update MCP config with agent_id (needed for Docker mode --agent-id).
-            fm = getattr(fresh_backend, "filesystem_manager", None)
-            if fm and hasattr(fm, "setup_orchestration_paths"):
-                workspace_token = self.coordination_tracker.get_path_token(display_id) if hasattr(self.coordination_tracker, "get_path_token") else display_id
-                fm.setup_orchestration_paths(
-                    agent_id=display_id,
-                    snapshot_storage=self._snapshot_storage,
-                    agent_temporary_workspace=self._agent_temporary_workspace,
-                    workspace_token=workspace_token,
-                )
-                # Refresh MCP config with agent_id (inject --agent-id for Docker mode)
-                if hasattr(fm, "update_backend_mcp_config"):
-                    fm.update_backend_mcp_config(fresh_backend.config)
-                logger.info(
-                    f"[Checkpoint] Setup orchestration paths for '{display_id}'",
-                )
-
-            fresh_agents[display_id] = fresh_agent
-            logger.info(
-                f"[Checkpoint] Created fresh agent '{display_id}' " f"(backend={backend_type})",
-            )
-
-        return fresh_agents
-
-    def _propagate_checkpoint_results_to_main_workspace(
-        self,
-        winning_agent_id: str,
-    ) -> None:
-        """Copy deliverable files from winning checkpoint agent's workspace to main agent.
-
-        Args:
-            winning_agent_id: The checkpoint agent ID whose workspace to copy from.
-        """
-        winner = self.agents.get(winning_agent_id)
-        if not self._saved_agents or not self._main_agent_id:
-            return
-        main_agent = self._saved_agents.get(self._main_agent_id)
-        if not winner or not main_agent:
-            return
-
-        src_cwd = getattr(
-            getattr(winner.backend, "filesystem_manager", None),
-            "cwd",
-            None,
-        )
-        dst_cwd = getattr(
-            getattr(main_agent.backend, "filesystem_manager", None),
-            "cwd",
-            None,
-        )
-        if not src_cwd or not dst_cwd:
-            return
-
-        src = Path(src_cwd)
-        dst = Path(dst_cwd)
-        if not src.exists():
-            return
-
-        copied_count = 0
-        for item in src.iterdir():
-            if item.name.startswith("."):
-                continue  # Skip hidden/metadata dirs
-            dst_item = dst / item.name
-            try:
-                if item.is_file():
-                    shutil.copy2(item, dst_item)
-                    copied_count += 1
-                elif item.is_dir():
-                    shutil.copytree(item, dst_item, dirs_exist_ok=True)
-                    copied_count += 1
-            except Exception as e:
-                logger.warning(
-                    f"[Checkpoint] Failed to copy {item.name} to main workspace: {e}",
-                )
-
-        if copied_count:
-            logger.info(
-                f"[Checkpoint] Propagated {copied_count} items from " f"'{winning_agent_id}' workspace to main agent workspace",
-            )
-
-    def _detect_checkpoint_signal(self, agent_id: str) -> dict[str, Any] | None:
-        """Check if the main agent has triggered a checkpoint.
-
-        Reads the checkpoint signal file from the agent's workspace.
-
-        Args:
-            agent_id: The agent to check.
-
-        Returns:
-            Checkpoint signal dict, or None if no signal.
-        """
-        if agent_id != self._main_agent_id:
-            return None
-
-        agent = self.agents.get(agent_id)
-        if not agent or not agent.backend.filesystem_manager:
-            return None
-
-        cwd = agent.backend.filesystem_manager.cwd
-        if not cwd:
-            return None
-
-        signal_file = Path(cwd) / ".massgen_checkpoint_signal.json"
-        if not signal_file.exists():
-            return None
-
-        try:
-            import json
-
-            signal = json.loads(signal_file.read_text())
-            # Remove the signal file after reading
-            signal_file.unlink()
-            if signal.get("type") == "checkpoint":
-                return signal
-        except Exception as e:
-            logger.warning(f"[Checkpoint] Error reading signal: {e}")
-
-        return None
-
-    def _activate_checkpoint(self, signal: dict[str, Any]) -> None:
-        """Switch from solo mode to checkpoint mode with fresh agent instances.
-
-        Creates brand-new agent instances with clean context (no pre-checkpoint
-        history). The original agents are saved and restored after checkpoint.
+        Replaces the old in-process approach with a subprocess call:
+        1. Emit checkpoint_activated event
+        2. Spawn ``massgen --stream-events`` subprocess
+        3. Relay events to parent EventEmitter with remapped agent IDs
+        4. Sync workspace deliverables back to main agent
+        5. Emit checkpoint_completed event
+        6. Return consensus text for injection into main agent context
 
         Args:
             signal: The checkpoint signal dict from the main agent.
+
+        Returns:
+            The consensus text from the checkpoint subprocess.
         """
+        from .mcp_tools.checkpoint._subprocess_manager import (
+            CheckpointSubprocessManager,
+        )
+
         self._checkpoint_active = True
         self._checkpoint_number += 1
         self._checkpoint_task = signal.get("task", "")
-        self._checkpoint_context = signal.get("context", "")
-        self._checkpoint_expected_actions = signal.get("expected_actions", [])
-        self._checkpoint_eval_criteria = signal.get("eval_criteria", [])
-        self._checkpoint_personas = signal.get("personas", {})
-        self._checkpoint_gated_actions = signal.get("gated_actions", [])
 
-        # Track the event on the ORIGINAL tracker before saving state
+        # Track event on the coordination tracker
         self.coordination_tracker._add_event(
             EventType.CHECKPOINT_CALLED,
             agent_id=self._main_agent_id,
             details=f"Checkpoint #{self._checkpoint_number}: {self._checkpoint_task[:100]}",
             context={
                 "task": self._checkpoint_task,
-                "context": self._checkpoint_context,
-                "expected_actions": self._checkpoint_expected_actions,
+                "context": signal.get("context", ""),
             },
         )
 
-        # Build display ID mapping: original agent_id -> checkpoint display_id
-        self._checkpoint_display_ids = {}
-        for aid in self.agents:
-            self._checkpoint_display_ids[aid] = f"{aid}-ckpt{self._checkpoint_number}"
-
-        # Remove checkpoint MCP from main agent before saving (prevents it from
-        # leaking into checkpoint participants via deep-copy)
-        self._remove_checkpoint_mcp_from_main_agent()
-
-        # Save original state (agents, states, tracker, workflow_tools)
-        self._save_pre_checkpoint_state()
-
-        # Create fresh agent instances with cloned workspaces
-        fresh_agents = self._create_fresh_checkpoint_agents()
-        self.agents = fresh_agents
-
-        # Create fresh AgentState for each checkpoint participant
-        self.agent_states = {aid: AgentState() for aid in self.agents}
-
-        # Create fresh CoordinationTracker for the checkpoint round
-        self.coordination_tracker = CoordinationTracker()
-        self.coordination_tracker.initialize_session(sorted(self.agents.keys()))
-
-        self.coordination_tracker._add_event(
-            EventType.CHECKPOINT_AGENTS_ACTIVATED,
-            agent_id=None,
-            details=f"{len(self.agents)} fresh agents created for checkpoint #{self._checkpoint_number}",
-        )
-
-        # Rebuild workflow tools for the new agent IDs (checkpoint context)
-        _is_decomposition = getattr(self.config, "coordination_mode", "voting") == "decomposition"
-        self.workflow_tools = get_workflow_tools(
-            valid_agent_ids=sorted(self.agents.keys()),
-            template_overrides=getattr(
-                self.message_templates,
-                "_template_overrides",
-                {},
-            ),
-            api_format="chat_completions",
-            orchestrator=self,
-            broadcast_mode=False,
-            broadcast_wait_by_default=True,
-            decomposition_mode=_is_decomposition,
-            checkpoint_context=True,
-        )
-
-        # Store participant info for the display layer to consume
+        # Build participant info from parent config for display
         self._checkpoint_participants = {}
-        for display_id, agent in self.agents.items():
+        for aid in self.agents:
+            display_id = f"{aid}-ckpt{self._checkpoint_number}"
             model_name = ""
-            if hasattr(agent.backend, "get_model_name"):
+            if hasattr(self.agents[aid].backend, "get_model_name"):
                 try:
-                    model_name = agent.backend.get_model_name()
+                    model_name = self.agents[aid].backend.get_model_name()
                 except Exception:
                     pass
-            # Extract original agent_id from display_id
-            real_aid = display_id.split("-ckpt")[0] if "-ckpt" in display_id else display_id
             self._checkpoint_participants[display_id] = {
-                "real_agent_id": real_aid,
+                "real_agent_id": aid,
                 "model": model_name,
             }
 
-        # Create workspace symlinks for checkpoint agents
-        self.ensure_workspace_symlinks()
-
-        # Flag for the stream loop to emit checkpoint_activated event
-        self._checkpoint_activated_event_pending = True
-
-        # Set display ID mapping on event emitter for WebUI routing
+        # Emit checkpoint_activated event for WebUI
         _emitter = get_event_emitter()
         if _emitter:
-            _emitter.set_checkpoint_display_ids(self._checkpoint_display_ids)
             _emitter.emit_checkpoint_activated(
                 checkpoint_number=self._checkpoint_number,
                 task=self._checkpoint_task,
@@ -2727,56 +2136,53 @@ class Orchestrator(ChatAgent):
                 main_agent_id=self._main_agent_id,
             )
 
-        logger.info(
-            f"[Checkpoint] Activated checkpoint #{self._checkpoint_number} " f"with {len(fresh_agents)} fresh agents: {self._checkpoint_task[:80]}",
+        # Resolve main agent workspace for subprocess
+        main_agent = self.agents.get(self._main_agent_id)
+        parent_workspace = None
+        if main_agent:
+            parent_workspace = getattr(
+                getattr(main_agent.backend, "filesystem_manager", None),
+                "cwd",
+                None,
+            )
+
+        if not parent_workspace:
+            logger.error("[Checkpoint] No parent workspace for subprocess")
+            self._checkpoint_active = False
+            return "Checkpoint failed: no workspace available"
+
+        # Relay callback: re-emit subprocess events through parent emitter
+        async def _relay_event(event):
+            if _emitter:
+                _emitter.emit(event)
+
+        # Spawn subprocess
+        manager = CheckpointSubprocessManager(
+            parent_config=self._raw_config_dict,
+            parent_workspace=parent_workspace,
+            checkpoint_number=self._checkpoint_number,
         )
 
-    def _deactivate_checkpoint(
-        self,
-        consensus: str,
-        workspace_changes: list[dict[str, str]],
-        action_results: list[dict[str, Any]],
-    ) -> None:
-        """Switch from checkpoint mode back to solo mode.
+        result = await manager.spawn(
+            signal=signal,
+            on_event=_relay_event,
+        )
 
-        Destroys fresh checkpoint agents and restores original agents.
-        Copies deliverable files from the winning agent's workspace back
-        to the main agent's workspace.
+        # Extract consensus
+        consensus = result.get("output", "")
+        workspace_changes = result.get("workspace_changes", [])
 
-        Args:
-            consensus: The winning answer text.
-            workspace_changes: List of file changes from checkpoint.
-            action_results: Results of executed proposed_actions.
-        """
-        # Determine winning agent (best answer) for workspace propagation
-        winning_agent_id = None
-        if self.coordination_tracker.final_answers:
-            # Use the agent whose answer was selected as consensus
-            for aid, answer in self.coordination_tracker.final_answers.items():
-                if answer.answer_text and consensus and answer.answer_text[:100] in consensus[:200]:
-                    winning_agent_id = aid
-                    break
-            # Fallback: use any agent with a final answer
-            if not winning_agent_id:
-                winning_agent_id = next(iter(self.coordination_tracker.final_answers), None)
-        if not winning_agent_id:
-            # Fallback: first checkpoint agent
-            winning_agent_id = next(iter(self.agents), None)
+        if result.get("success"):
+            manager.cleanup()
+        else:
+            error = result.get("error", "Unknown error")
+            consensus = f"Checkpoint failed: {error}"
+            ws_path = manager._checkpoint_workspace
+            logger.error(
+                f"[Checkpoint] Subprocess failed: {error}. " f"Logs preserved at: {ws_path}",
+            )
 
-        # Copy deliverable files from winning participant to main workspace
-        if winning_agent_id:
-            self._propagate_checkpoint_results_to_main_workspace(winning_agent_id)
-
-        # Clean up cloned checkpoint workspaces (after propagation)
-        for clone_path in self._checkpoint_workspace_clones:
-            try:
-                shutil.rmtree(clone_path, ignore_errors=True)
-                logger.info(f"[Checkpoint] Cleaned up workspace clone: {clone_path}")
-            except Exception as e:
-                logger.debug(f"[Checkpoint] Failed to clean up {clone_path}: {e}")
-        self._checkpoint_workspace_clones = []
-
-        # Record completion on checkpoint tracker before restoring
+        # Track completion
         self.coordination_tracker._add_event(
             EventType.CHECKPOINT_COMPLETED,
             agent_id=self._main_agent_id,
@@ -2784,49 +2190,25 @@ class Orchestrator(ChatAgent):
             context={
                 "consensus_preview": consensus[:200] if consensus else "",
                 "files_changed": len(workspace_changes),
-                "actions_executed": len(action_results),
-                "winning_agent": winning_agent_id,
             },
         )
 
-        # Restore original agents, states, tracker, and workflow tools
-        self._restore_post_checkpoint_state()
-
-        self._checkpoint_active = False
-
-        # Restore checkpoint MCP to main agent for potential future checkpoints
-        self._restore_checkpoint_mcp_to_main_agent()
-
-        # Inject consensus into main agent's answer state so it appears in
-        # _get_current_answers_snapshot() when the main agent restarts.
-        # Without this, the main agent restarts blind (no knowledge of checkpoint results).
-        if self._main_agent_id and self._main_agent_id in self.agent_states:
-            if consensus:
-                self.agent_states[self._main_agent_id].answer = consensus
-            self.agent_states[self._main_agent_id].restart_pending = True
-            self.agent_states[self._main_agent_id].has_voted = False
-
-        # Mark non-main agents as voted so only the main agent runs in solo mode
-        for aid in self.agent_states:
-            if aid != self._main_agent_id:
-                self.agent_states[aid].has_voted = True
-
-        # Clear display ID mapping
-        self._checkpoint_display_ids = {}
-
-        # Clear display ID mapping on event emitter
-        _emitter = get_event_emitter()
+        # Emit checkpoint_completed event for WebUI
         if _emitter:
-            _emitter.set_checkpoint_display_ids({})
             _emitter.emit_checkpoint_completed(
                 checkpoint_number=self._checkpoint_number,
                 consensus=consensus,
                 main_agent_id=self._main_agent_id,
             )
 
+        self._checkpoint_active = False
+        self._checkpoint_participants = {}
+
         logger.info(
-            f"[Checkpoint] Deactivated checkpoint #{self._checkpoint_number}, " f"restored original agents, returning to solo mode",
+            f"[Checkpoint] Completed checkpoint #{self._checkpoint_number}: " f"{self._checkpoint_task[:80]}",
         )
+
+        return consensus
 
     def ensure_workspace_symlinks(self) -> None:
         """Ensure per-agent workspace symlinks exist in the current attempt log directory.
@@ -6569,47 +5951,6 @@ Your answer:"""
 
         # Stream agent outputs in real-time until coordination is complete
         while not _coordination_complete():
-            # Emit pending checkpoint_activated event (from interceptor activation path)
-            if self._checkpoint_activated_event_pending:
-                self._checkpoint_activated_event_pending = False
-                yield StreamChunk(
-                    type="checkpoint_activated",
-                    content=self._checkpoint_task,
-                    source=self.orchestrator_id,
-                    checkpoint_participants=self._checkpoint_participants,
-                    checkpoint_number=self._checkpoint_number,
-                    main_agent_id=self._main_agent_id,
-                )
-
-            # Checkpoint deactivation: when all checkpoint agents have finished,
-            # deactivate checkpoint mode and restore the main agent for solo continuation.
-            if self._checkpoint_active:
-                ckpt_all_done = all(state.has_voted or state.is_killed for state in self.agent_states.values())
-                if ckpt_all_done:
-                    # Collect best answer from checkpoint agent states
-                    best_answer = ""
-                    for aid, state in self.agent_states.items():
-                        if state.answer:
-                            best_answer = state.answer
-                            break
-                    self._deactivate_checkpoint(
-                        consensus=best_answer,
-                        workspace_changes=[],
-                        action_results=[],
-                    )
-                    ckpt_num = self._checkpoint_number
-                    yield StreamChunk(
-                        type="checkpoint_completed",
-                        content=best_answer,
-                        source=self.orchestrator_id,
-                        checkpoint_number=ckpt_num,
-                        main_agent_id=self._main_agent_id,
-                    )
-                    # Loop continues — main agent will be started in solo mode
-                    # on the next iteration since _checkpoint_active is now False
-                    # and the original agents/states are restored.
-                    continue
-
             # Step mode: exit after one action (answer or vote)
             if self._step_complete:
                 logger.info("[StepMode] Step complete — exiting coordination loop")
@@ -6730,8 +6071,7 @@ Your answer:"""
                 agent_id = next(aid for aid, t in active_tasks.items() if t is task)
                 # Remove completed task from active_tasks
                 del active_tasks[agent_id]
-                # For StreamChunk routing, use checkpoint display ID
-                display_agent_id = self._get_checkpoint_display_id(agent_id)
+                display_agent_id = agent_id
 
                 try:
                     # Unpack chunk tuple - may be 2-tuple (type, data) or 3-tuple (type, data, tool_call_id)
@@ -6739,29 +6079,6 @@ Your answer:"""
                     chunk_type = chunk_tuple[0]
                     chunk_data = chunk_tuple[1]
                     chunk_tool_call_id = chunk_tuple[2] if len(chunk_tuple) > 2 else None
-
-                    # SDK checkpoint: the in-process handler activated checkpoint
-                    # directly and flagged stream end. Force-complete this agent.
-                    if getattr(self, "_checkpoint_stream_end_requested", False):
-                        self._checkpoint_stream_end_requested = False
-                        completed_agent_ids.add(agent_id)
-                        yield StreamChunk(
-                            type="system_status",
-                            content=f"Checkpoint: {self._checkpoint_task[:80]}",
-                            source=self.orchestrator_id,
-                        )
-                        if self._checkpoint_activated_event_pending:
-                            self._checkpoint_activated_event_pending = False
-                            yield StreamChunk(
-                                type="checkpoint_activated",
-                                content=self._checkpoint_task,
-                                source=self.orchestrator_id,
-                                checkpoint_participants=self._checkpoint_participants,
-                                checkpoint_number=self._checkpoint_number,
-                                main_agent_id=self._main_agent_id,
-                            )
-                        await self._close_agent_stream(agent_id, active_streams)
-                        break
 
                     if chunk_type == "content":
                         # Stream agent content in real-time with source info
@@ -7276,27 +6593,6 @@ Your answer:"""
                                     "estimated_cost": token_usage.estimated_cost or 0,
                                 },
                             )
-
-                        # Checkpoint: detect checkpoint signal from main agent
-                        if self.is_checkpoint_mode and not self._checkpoint_active:
-                            checkpoint_signal = self._detect_checkpoint_signal(agent_id)
-                            if checkpoint_signal:
-                                self._activate_checkpoint(checkpoint_signal)
-                                yield StreamChunk(
-                                    type="system_status",
-                                    content=f"Checkpoint: {checkpoint_signal.get('task', '')[:80]}",
-                                    source=self.orchestrator_id,
-                                )
-                                if self._checkpoint_activated_event_pending:
-                                    self._checkpoint_activated_event_pending = False
-                                    yield StreamChunk(
-                                        type="checkpoint_activated",
-                                        content=self._checkpoint_task,
-                                        source=self.orchestrator_id,
-                                        checkpoint_participants=self._checkpoint_participants,
-                                        checkpoint_number=self._checkpoint_number,
-                                        main_agent_id=self._main_agent_id,
-                                    )
 
                         # Note: Removed agent_status: completed emission here - it was causing
                         # agents to show "Done" immediately before they've done any work.
@@ -14919,11 +14215,13 @@ Your answer:"""
                                 external_tool_calls.append(tool_call)
                                 continue
 
-                            # Intercept MCP checkpoint tool before generic MCP passthrough
-                            if tool_name == "mcp__massgen_checkpoint__checkpoint":
+                            # Intercept checkpoint tool (both MCP and workflow name)
+                            # Add to tool_calls for post-stream workflow processing
+                            if tool_name in ("checkpoint", "mcp__massgen_checkpoint__checkpoint"):
                                 logger.info(
-                                    f"[Orchestrator] Agent {agent_id} called MCP checkpoint tool (will intercept in post-stream processing)",
+                                    f"[Orchestrator] Agent {agent_id} called checkpoint tool '{tool_name}'",
                                 )
+                                tool_calls.append(tool_call)
                                 continue
 
                             # Check if this is an MCP or custom tool (handled by backend)
@@ -15488,26 +14786,6 @@ Your answer:"""
                             return
 
                         elif tool_name == "checkpoint" or tool_name == "mcp__massgen_checkpoint__checkpoint":
-                            # SDK path: the in-process MCP handler already activated
-                            # checkpoint and set _checkpoint_stream_end_requested. Just
-                            # acknowledge and end the stream so the coordination loop
-                            # picks up the flag.
-                            if self._checkpoint_active and self._checkpoint_stream_end_requested:
-                                workflow_tool_found = True
-                                checkpoint_task = tool_args.get("task", self._checkpoint_task or "")
-                                yield self._trace_tuple(
-                                    f"📋 Checkpoint: {checkpoint_task[:80]}",
-                                    kind="coordination",
-                                )
-                                yield (
-                                    "result",
-                                    (
-                                        "answer",
-                                        f"[CHECKPOINT] Delegating to team: {checkpoint_task}",
-                                    ),
-                                )
-                                yield ("done", None)
-                                return
                             # Reject recursive checkpoint calls during active checkpoint
                             if self._checkpoint_active:
                                 yield self._trace_tuple(
@@ -15523,32 +14801,50 @@ Your answer:"""
                             checkpoint_personas = tool_args.get("personas")
                             checkpoint_gated = tool_args.get("gated_actions") or tool_args.get("expected_actions", [])
 
+                            # Validate required params — models don't always
+                            # respect schema constraints
+                            from massgen.mcp_tools.checkpoint._checkpoint_mcp_server import (
+                                build_checkpoint_signal,
+                                validate_checkpoint_params,
+                            )
+
+                            try:
+                                validated = validate_checkpoint_params(
+                                    task=checkpoint_task,
+                                    context=checkpoint_context,
+                                    eval_criteria=checkpoint_eval_criteria,
+                                    personas=checkpoint_personas,
+                                    gated_actions=checkpoint_gated,
+                                )
+                            except ValueError as e:
+                                yield self._trace_tuple(
+                                    f"❌ Checkpoint rejected: {e}",
+                                    kind="coordination",
+                                )
+                                continue
+
                             yield self._trace_tuple(
                                 f"📋 Checkpoint: {checkpoint_task[:80]}",
                                 kind="coordination",
                             )
 
-                            # Build checkpoint signal and activate directly
-                            from massgen.mcp_tools.checkpoint._checkpoint_mcp_server import (
-                                build_checkpoint_signal,
-                            )
-
                             signal = build_checkpoint_signal(
-                                task=checkpoint_task,
-                                context=checkpoint_context,
-                                eval_criteria=checkpoint_eval_criteria,
-                                personas=checkpoint_personas,
-                                gated_actions=checkpoint_gated,
+                                task=validated["task"],
+                                context=validated["context"],
+                                eval_criteria=validated["eval_criteria"],
+                                personas=validated["personas"],
+                                gated_actions=validated["gated_actions"],
                             )
-                            # Directly activate checkpoint — no file I/O needed
-                            self._activate_checkpoint(signal)
 
-                            # Return tool result and end the stream
+                            # Spawn subprocess and wait for completion
+                            consensus = await self._activate_checkpoint(signal)
+
+                            # Return consensus as tool result; agent continues
                             yield (
                                 "result",
                                 (
                                     "answer",
-                                    f"[CHECKPOINT] Delegating to team: {checkpoint_task}",
+                                    f"[CHECKPOINT COMPLETE] {consensus[:2000]}",
                                 ),
                             )
                             yield ("done", None)

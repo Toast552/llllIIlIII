@@ -956,272 +956,6 @@ class TestAgentOutputWriterCheckpoint:
         assert "Planning the task..." not in ckpt_content
 
 
-# ============================================================================
-# Phase 5: Checkpoint Agent Identity Separation
-# ============================================================================
-
-
-class TestCheckpointDisplayIdMapping:
-    """Test display ID mapping for checkpoint participants."""
-
-    def _make_orchestrator(self):
-        """Create a minimal orchestrator for testing display ID mapping."""
-        from unittest.mock import MagicMock
-
-        from massgen.agent_config import AgentConfig
-
-        mock_backend_a = MagicMock()
-        mock_backend_a.get_model_name.return_value = "claude-sonnet-4"
-        mock_backend_a.filesystem_manager = None
-        mock_backend_a.config = {"mcp_servers": {}}
-
-        mock_backend_b = MagicMock()
-        mock_backend_b.get_model_name.return_value = "gpt-4o"
-        mock_backend_b.filesystem_manager = None
-        mock_backend_b.config = {"mcp_servers": {}}
-
-        agent_a = MagicMock()
-        agent_a.backend = mock_backend_a
-        agent_b = MagicMock()
-        agent_b.backend = mock_backend_b
-
-        agents = {"agent_a": agent_a, "agent_b": agent_b}
-        config = AgentConfig.create_openai_config()
-
-        from massgen.orchestrator import Orchestrator
-
-        orch = Orchestrator(
-            orchestrator_id="orch",
-            agents=agents,
-            config=config,
-        )
-        orch._main_agent_id = "agent_a"
-        return orch
-
-    def test_get_checkpoint_display_id_outside_checkpoint(self):
-        """Outside checkpoint, display ID should equal raw agent_id."""
-        orch = self._make_orchestrator()
-        assert orch._get_checkpoint_display_id("agent_a") == "agent_a"
-        assert orch._get_checkpoint_display_id("agent_b") == "agent_b"
-
-    def test_get_checkpoint_display_id_during_checkpoint(self):
-        """During checkpoint, main agent gets remapped display ID."""
-        orch = self._make_orchestrator()
-        signal = {"type": "checkpoint", "task": "Build website", "context": "", "expected_actions": []}
-        orch._activate_checkpoint(signal)
-
-        # Main agent should get checkpoint display ID via the mapping
-        display_id = orch._get_checkpoint_display_id("agent_a")
-        assert display_id == "agent_a-ckpt1"
-
-        # Non-main agent also gets ckpt label
-        display_id_b = orch._get_checkpoint_display_id("agent_b")
-        assert display_id_b == "agent_b-ckpt1"
-
-        # After activation, self.agents uses display IDs as keys (fresh agents)
-        assert "agent_a-ckpt1" in orch.agents
-        assert "agent_b-ckpt1" in orch.agents
-
-    def test_display_id_increments_with_checkpoint_number(self):
-        """Display ID should use the current checkpoint number."""
-        orch = self._make_orchestrator()
-        signal = {"type": "checkpoint", "task": "Task 1", "context": "", "expected_actions": []}
-        orch._activate_checkpoint(signal)
-        assert orch._get_checkpoint_display_id("agent_a") == "agent_a-ckpt1"
-
-        # Deactivate properly (restores original agents) and activate again
-        orch._deactivate_checkpoint(
-            consensus="Done",
-            workspace_changes=[],
-            action_results=[],
-        )
-        signal2 = {"type": "checkpoint", "task": "Task 2", "context": "", "expected_actions": []}
-        orch._activate_checkpoint(signal2)
-        assert orch._get_checkpoint_display_id("agent_a") == "agent_a-ckpt2"
-
-    def test_activate_checkpoint_sets_display_ids(self):
-        """_activate_checkpoint should populate _checkpoint_display_ids."""
-        orch = self._make_orchestrator()
-        signal = {"type": "checkpoint", "task": "Build it", "context": "", "expected_actions": []}
-        orch._activate_checkpoint(signal)
-
-        assert "agent_a" in orch._checkpoint_display_ids
-        assert orch._checkpoint_display_ids["agent_a"] == "agent_a-ckpt1"
-        # All agents get ckpt label during checkpoint
-        assert "agent_b" in orch._checkpoint_display_ids
-        assert orch._checkpoint_display_ids["agent_b"] == "agent_b-ckpt1"
-
-    def test_activate_checkpoint_stores_participants(self):
-        """_activate_checkpoint should store participant info for display layer."""
-        orch = self._make_orchestrator()
-        signal = {"type": "checkpoint", "task": "Build it", "context": "", "expected_actions": []}
-        orch._activate_checkpoint(signal)
-
-        assert hasattr(orch, "_checkpoint_participants")
-        participants = orch._checkpoint_participants
-        # Should have entries for all agents, keyed by display ID
-        assert "agent_a-ckpt1" in participants
-        assert "agent_b-ckpt1" in participants
-        assert participants["agent_a-ckpt1"]["real_agent_id"] == "agent_a"
-        assert participants["agent_b-ckpt1"]["real_agent_id"] == "agent_b"
-
-    def test_activate_saves_original_agents(self):
-        """_activate_checkpoint should save original agents for later restoration."""
-        orch = self._make_orchestrator()
-        original_agents = orch.agents
-        signal = {"type": "checkpoint", "task": "Build", "context": "", "expected_actions": []}
-        orch._activate_checkpoint(signal)
-
-        # Original agents should be saved
-        assert orch._saved_agents is not None
-        assert orch._saved_agents is original_agents
-        # Current agents should be different (display IDs as keys)
-        assert set(orch.agents.keys()) != set(original_agents.keys())
-
-    def test_deactivate_restores_original_agents(self):
-        """_deactivate_checkpoint should restore original agents."""
-        orch = self._make_orchestrator()
-        original_agents = orch.agents
-        original_agent_ids = set(original_agents.keys())
-
-        signal = {"type": "checkpoint", "task": "Build", "context": "", "expected_actions": []}
-        orch._activate_checkpoint(signal)
-        assert set(orch.agents.keys()) != original_agent_ids
-
-        orch._deactivate_checkpoint(
-            consensus="Result",
-            workspace_changes=[],
-            action_results=[],
-        )
-        # After deactivation, original agents restored
-        assert set(orch.agents.keys()) == original_agent_ids
-        assert orch._saved_agents is None
-        assert orch._checkpoint_active is False
-
-
-class TestCheckpointMcpRemovalRestore:
-    """Test checkpoint MCP tool removal and restoration."""
-
-    def _make_orchestrator_with_mcp(self, mcp_servers_format="dict"):
-        """Create an orchestrator with checkpoint MCP injected."""
-        from unittest.mock import MagicMock
-
-        from massgen.agent_config import AgentConfig
-
-        mock_backend_a = MagicMock()
-        mock_backend_a.get_model_name.return_value = "claude-sonnet-4"
-        mock_backend_a.filesystem_manager = None
-        if mcp_servers_format == "dict":
-            mock_backend_a.config = {
-                "mcp_servers": {
-                    "massgen_checkpoint": {"name": "massgen_checkpoint", "type": "sdk"},
-                    "other_mcp": {"name": "other_mcp"},
-                },
-            }
-        else:
-            mock_backend_a.config = {
-                "mcp_servers": [
-                    {"name": "massgen_checkpoint", "type": "sdk"},
-                    {"name": "other_mcp"},
-                ],
-            }
-
-        mock_backend_b = MagicMock()
-        mock_backend_b.get_model_name.return_value = "gpt-4o"
-        mock_backend_b.filesystem_manager = None
-        mock_backend_b.config = {"mcp_servers": {}}
-
-        agent_a = MagicMock()
-        agent_a.backend = mock_backend_a
-        agent_b = MagicMock()
-        agent_b.backend = mock_backend_b
-
-        agents = {"agent_a": agent_a, "agent_b": agent_b}
-        config = AgentConfig.create_openai_config()
-
-        from massgen.orchestrator import Orchestrator
-
-        orch = Orchestrator(
-            orchestrator_id="orch",
-            agents=agents,
-            config=config,
-        )
-        orch._main_agent_id = "agent_a"
-        return orch
-
-    def test_remove_checkpoint_mcp_dict_format(self):
-        """Should remove massgen_checkpoint from dict-format mcp_servers."""
-        orch = self._make_orchestrator_with_mcp("dict")
-        orch._remove_checkpoint_mcp_from_main_agent()
-
-        mcp_servers = orch.agents["agent_a"].backend.config["mcp_servers"]
-        assert "massgen_checkpoint" not in mcp_servers
-        assert "other_mcp" in mcp_servers
-        assert orch._saved_checkpoint_mcp is not None
-
-    def test_remove_checkpoint_mcp_list_format(self):
-        """Should remove massgen_checkpoint from list-format mcp_servers."""
-        orch = self._make_orchestrator_with_mcp("list")
-        orch._remove_checkpoint_mcp_from_main_agent()
-
-        mcp_servers = orch.agents["agent_a"].backend.config["mcp_servers"]
-        names = [s["name"] for s in mcp_servers if isinstance(s, dict)]
-        assert "massgen_checkpoint" not in names
-        assert "other_mcp" in names
-        assert orch._saved_checkpoint_mcp is not None
-
-    def test_restore_checkpoint_mcp_dict_format(self):
-        """Should restore massgen_checkpoint to dict-format mcp_servers."""
-        orch = self._make_orchestrator_with_mcp("dict")
-        orch._remove_checkpoint_mcp_from_main_agent()
-        orch._restore_checkpoint_mcp_to_main_agent()
-
-        mcp_servers = orch.agents["agent_a"].backend.config["mcp_servers"]
-        assert "massgen_checkpoint" in mcp_servers
-        assert orch._saved_checkpoint_mcp is None
-
-    def test_restore_checkpoint_mcp_list_format(self):
-        """Should restore massgen_checkpoint to list-format mcp_servers."""
-        orch = self._make_orchestrator_with_mcp("list")
-        orch._remove_checkpoint_mcp_from_main_agent()
-        orch._restore_checkpoint_mcp_to_main_agent()
-
-        mcp_servers = orch.agents["agent_a"].backend.config["mcp_servers"]
-        names = [s["name"] for s in mcp_servers if isinstance(s, dict)]
-        assert "massgen_checkpoint" in names
-        assert orch._saved_checkpoint_mcp is None
-
-    def test_activate_checkpoint_removes_mcp(self):
-        """_activate_checkpoint should remove checkpoint MCP from main agent before saving."""
-        orch = self._make_orchestrator_with_mcp("dict")
-        signal = {"type": "checkpoint", "task": "Build", "context": "", "expected_actions": []}
-        orch._activate_checkpoint(signal)
-
-        # MCP should be removed from the saved original agent
-        saved_agent_a = orch._saved_agents["agent_a"]
-        mcp_servers = saved_agent_a.backend.config["mcp_servers"]
-        assert "massgen_checkpoint" not in mcp_servers
-
-    def test_deactivate_checkpoint_restores_mcp(self):
-        """_deactivate_checkpoint should restore checkpoint MCP to main agent."""
-        orch = self._make_orchestrator_with_mcp("dict")
-        signal = {"type": "checkpoint", "task": "Build", "context": "", "expected_actions": []}
-        orch._activate_checkpoint(signal)
-
-        # MCP should be saved
-        assert orch._saved_checkpoint_mcp is not None
-
-        orch._deactivate_checkpoint(
-            consensus="Done",
-            workspace_changes=[],
-            action_results=[],
-        )
-
-        # After deactivation, MCP should be restored to main agent
-        mcp_servers = orch.agents["agent_a"].backend.config["mcp_servers"]
-        assert "massgen_checkpoint" in mcp_servers
-
-
 class TestCheckpointRejectionGuard:
     """Test that checkpoint tool calls are rejected during active checkpoint."""
 
@@ -1268,50 +1002,6 @@ class TestCheckpointRejectionGuard:
         assert should_get_checkpoint_tools is False
 
 
-class TestCheckpointTaskPassthrough:
-    """Test that checkpoint task is passed to participants."""
-
-    def test_checkpoint_task_stored_on_activation(self):
-        """_activate_checkpoint should store the task for participant use."""
-        from unittest.mock import MagicMock
-
-        from massgen.agent_config import AgentConfig
-        from massgen.orchestrator import Orchestrator
-
-        mock_backend = MagicMock()
-        mock_backend.get_model_name.return_value = "claude-sonnet-4"
-        mock_backend.filesystem_manager = None
-        mock_backend.config = {"mcp_servers": {}}
-
-        agent_a = MagicMock()
-        agent_a.backend = mock_backend
-        agent_b = MagicMock()
-        agent_b.backend = MagicMock()
-        agent_b.backend.filesystem_manager = None
-        agent_b.backend.config = {"mcp_servers": {}}
-        agent_b.backend.get_model_name.return_value = "gpt-4o"
-
-        agents = {"agent_a": agent_a, "agent_b": agent_b}
-        config = AgentConfig.create_openai_config()
-        orch = Orchestrator(
-            orchestrator_id="orch",
-            agents=agents,
-            config=config,
-        )
-        orch._main_agent_id = "agent_a"
-
-        signal = {
-            "type": "checkpoint",
-            "task": "Build a website about love",
-            "context": "Use React and TypeScript",
-            "expected_actions": [],
-        }
-        orch._activate_checkpoint(signal)
-
-        assert orch._checkpoint_task == "Build a website about love"
-        assert orch._checkpoint_context == "Use React and TypeScript"
-
-
 class TestStreamChunkCheckpointFields:
     """Test StreamChunk has fields for checkpoint events."""
 
@@ -1341,480 +1031,234 @@ class TestStreamChunkCheckpointFields:
         assert chunk.main_agent_id is None
 
 
-class TestDeactivateCheckpointWiring:
-    """Test that _deactivate_checkpoint restores state properly."""
+# ============================================================================
+# Phase: Checkpoint Subprocess Config Generation
+# ============================================================================
 
-    def _make_orchestrator(self):
-        """Create orchestrator with checkpoint state."""
-        from unittest.mock import MagicMock
 
-        from massgen.agent_config import AgentConfig
-        from massgen.orchestrator import Orchestrator
+class TestGenerateCheckpointConfig:
+    """Test checkpoint-specific subprocess config generation."""
 
-        mock_backend_a = MagicMock()
-        mock_backend_a.get_model_name.return_value = "claude-sonnet-4"
-        mock_backend_a.filesystem_manager = None
-        mock_backend_a.config = {
-            "mcp_servers": {
-                "massgen_checkpoint": {"name": "massgen_checkpoint"},
-                "other": {"name": "other"},
+    def test_generates_valid_config_from_parent(self, tmp_path):
+        """generate_checkpoint_config() should produce a runnable config."""
+        from massgen.mcp_tools.subrun_utils import generate_checkpoint_config
+
+        parent_config = {
+            "agents": [
+                {
+                    "id": "agent_a",
+                    "main_agent": True,
+                    "backend": {
+                        "type": "claude",
+                        "model": "claude-sonnet-4-20250514",
+                        "mcp_servers": [
+                            {"name": "massgen_checkpoint", "transport": "stdio"},
+                        ],
+                    },
+                },
+                {
+                    "id": "agent_b",
+                    "backend": {
+                        "type": "claude",
+                        "model": "claude-sonnet-4-20250514",
+                    },
+                },
+            ],
+            "orchestrator": {
+                "coordination": {
+                    "checkpoint_enabled": True,
+                },
             },
         }
 
-        mock_backend_b = MagicMock()
-        mock_backend_b.get_model_name.return_value = "gpt-4o"
-        mock_backend_b.filesystem_manager = None
-        mock_backend_b.config = {"mcp_servers": {}}
-
-        agent_a = MagicMock()
-        agent_a.backend = mock_backend_a
-        agent_b = MagicMock()
-        agent_b.backend = mock_backend_b
-
-        agents = {"agent_a": agent_a, "agent_b": agent_b}
-        config = AgentConfig.create_openai_config()
-        orch = Orchestrator(
-            orchestrator_id="orch",
-            agents=agents,
-            config=config,
-        )
-        orch._main_agent_id = "agent_a"
-        return orch
-
-    def test_deactivate_clears_checkpoint_state(self):
-        """_deactivate_checkpoint should clear active flag and restore original agents."""
-        orch = self._make_orchestrator()
-        signal = {"type": "checkpoint", "task": "Build", "context": "", "expected_actions": []}
-        orch._activate_checkpoint(signal)
-        assert orch._checkpoint_active is True
-
-        orch._deactivate_checkpoint(
-            consensus="Result text",
-            workspace_changes=[],
-            action_results=[],
-        )
-        assert orch._checkpoint_active is False
-        # Original agents should be restored
-        assert "agent_a" in orch.agents
-        assert "agent_b" in orch.agents
-        # Main agent should be marked for restart with has_voted=False
-        assert orch.agent_states["agent_a"].restart_pending is True
-        assert orch.agent_states["agent_a"].has_voted is False
-        # Non-main agents should be marked as voted (inactive in solo mode)
-        assert orch.agent_states["agent_b"].has_voted is True
-
-    def test_restore_mcp_after_deactivation(self):
-        """After deactivation, checkpoint MCP should be restored to main agent."""
-        orch = self._make_orchestrator()
-        signal = {"type": "checkpoint", "task": "Build", "context": "", "expected_actions": []}
-        orch._activate_checkpoint(signal)
-
-        # MCP should have been removed from the saved original agent
-        saved_agent_a = orch._saved_agents["agent_a"]
-        assert "massgen_checkpoint" not in saved_agent_a.backend.config["mcp_servers"]
-
-        # After deactivation, MCP should be restored
-        orch._deactivate_checkpoint(
-            consensus="Done",
-            workspace_changes=[],
-            action_results=[],
-        )
-        assert "massgen_checkpoint" in orch.agents["agent_a"].backend.config["mcp_servers"]
-
-    def test_deactivate_injects_consensus_into_main_agent_state(self):
-        """After deactivation, main agent's answer state should contain the consensus."""
-        orch = self._make_orchestrator()
-        signal = {"type": "checkpoint", "task": "Build", "context": "", "expected_actions": []}
-        orch._activate_checkpoint(signal)
-
-        orch._deactivate_checkpoint(
-            consensus="The team built a beautiful website with React.",
-            workspace_changes=[],
-            action_results=[],
-        )
-
-        # Main agent should have the consensus in its answer state
-        assert orch.agent_states["agent_a"].answer == "The team built a beautiful website with React."
-
-    def test_deactivate_cleans_up_workspace_clones(self, tmp_path):
-        """After deactivation, cloned checkpoint workspaces should be cleaned up."""
-        from massgen.agent_config import AgentConfig
-        from massgen.orchestrator import Orchestrator
-
-        # Create real workspace dirs
-        ws = tmp_path / "workspace"
-        ws.mkdir()
-        (ws / "file.txt").write_text("content")
-
-        mock_fm = MagicMock()
-        mock_fm.cwd = str(ws)
-        mock_backend = MagicMock()
-        mock_backend.get_model_name.return_value = "test"
-        mock_backend.filesystem_manager = mock_fm
-        mock_backend.config = {"mcp_servers": {}, "model": "test"}
-        mock_backend.api_key = "key"
-        mock_backend._backend_type = "claude"
-
-        agent = MagicMock()
-        agent.backend = mock_backend
-        agent.config = AgentConfig.create_openai_config()
-        agent.config.agent_id = "agent_a"
-
-        config = AgentConfig.create_openai_config()
-        orch = Orchestrator(
-            orchestrator_id="orch",
-            agents={"agent_a": agent},
-            config=config,
-        )
-        orch._main_agent_id = "agent_a"
-
-        # Simulate: manually add a fake clone path
-        clone_path = tmp_path / "workspace_ckpt_clone"
-        clone_path.mkdir()
-        (clone_path / "deliverable.html").write_text("<html>")
-        orch._checkpoint_workspace_clones = [str(clone_path)]
-
-        # Simulate a minimal activation/deactivation cycle
-        signal = {"type": "checkpoint", "task": "Build", "context": "", "expected_actions": []}
-        orch._activate_checkpoint(signal)
-        orch._deactivate_checkpoint(
-            consensus="Done",
-            workspace_changes=[],
-            action_results=[],
-        )
-
-        # All cloned workspace paths tracked before activation should be cleaned up
-        # (the ones from _activate_checkpoint may still exist since we didn't mock create_backend)
-        # But the manually-added one should be gone
-        assert not clone_path.exists()
-
-
-# ============================================================================
-# Phase 6: Fresh Agent Instances
-# ============================================================================
-
-
-class TestBackendTypeStamping:
-    """Test that create_backend stamps _backend_type on backends."""
-
-    def test_create_backend_stamps_type(self):
-        """create_backend should stamp _backend_type on the returned backend."""
-        from unittest.mock import patch
-
-        from massgen.cli import create_backend
-
-        # Mock the ResponseBackend to avoid needing a real API key
-        with patch("massgen.cli.ResponseBackend") as MockBackend:
-            mock_instance = MagicMock()
-            MockBackend.return_value = mock_instance
-            # Pass api_key via env to avoid double-passing
-            with patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}):
-                result = create_backend("openai")
-            assert result._backend_type == "openai"
-
-    def test_create_backend_stamps_claude_type(self):
-        """Claude backend should get _backend_type='claude'."""
-        from unittest.mock import patch
-
-        from massgen.cli import create_backend
-
-        with patch("massgen.cli.ClaudeBackend") as MockBackend:
-            mock_instance = MagicMock()
-            MockBackend.return_value = mock_instance
-            with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
-                result = create_backend("claude")
-            assert result._backend_type == "claude"
-
-
-class TestFreshCheckpointAgentCreation:
-    """Test _create_fresh_checkpoint_agents creates isolated agents."""
-
-    def _make_orchestrator_with_workspaces(self, tmp_path):
-        """Create orchestrator with real workspace paths for testing fresh agents."""
-        from unittest.mock import MagicMock
-
-        from massgen.agent_config import AgentConfig
-        from massgen.orchestrator import Orchestrator
-
-        # Create real workspace directories
-        ws_a = tmp_path / "workspace_a"
-        ws_a.mkdir()
-        (ws_a / "CONTEXT.md").write_text("# Context\nMain agent setup.")
-        (ws_a / "src").mkdir()
-        (ws_a / "src" / "app.tsx").write_text("export default App;")
-
-        ws_b = tmp_path / "workspace_b"
-        ws_b.mkdir()
-
-        mock_fm_a = MagicMock()
-        mock_fm_a.cwd = str(ws_a)
-        mock_backend_a = MagicMock()
-        mock_backend_a.get_model_name.return_value = "claude-sonnet-4"
-        mock_backend_a.filesystem_manager = mock_fm_a
-        mock_backend_a.config = {"mcp_servers": {}, "model": "claude-sonnet-4"}
-        mock_backend_a.api_key = "test-key"
-        mock_backend_a._backend_type = "claude"
-
-        mock_fm_b = MagicMock()
-        mock_fm_b.cwd = str(ws_b)
-        mock_backend_b = MagicMock()
-        mock_backend_b.get_model_name.return_value = "gpt-4o"
-        mock_backend_b.filesystem_manager = mock_fm_b
-        mock_backend_b.config = {"mcp_servers": {}, "model": "gpt-4o"}
-        mock_backend_b.api_key = "test-key"
-        mock_backend_b._backend_type = "openai"
-
-        agent_a = MagicMock()
-        agent_a.backend = mock_backend_a
-        agent_a.config = AgentConfig.create_openai_config()
-        agent_a.config.agent_id = "agent_a"
-
-        agent_b = MagicMock()
-        agent_b.backend = mock_backend_b
-        agent_b.config = AgentConfig.create_openai_config()
-        agent_b.config.agent_id = "agent_b"
-
-        agents = {"agent_a": agent_a, "agent_b": agent_b}
-        config = AgentConfig.create_openai_config()
-
-        orch = Orchestrator(
-            orchestrator_id="orch",
-            agents=agents,
-            config=config,
-        )
-        orch._main_agent_id = "agent_a"
-        orch._checkpoint_number = 1
-        return orch, ws_a, ws_b
-
-    def test_fresh_agents_get_display_ids(self, tmp_path):
-        """Fresh agents should use checkpoint display IDs as their keys."""
-        from unittest.mock import patch
-
-        orch, ws_a, ws_b = self._make_orchestrator_with_workspaces(tmp_path)
-
-        def _make_mock_backend(btype, **kw):
-            fm = MagicMock()
-            fm.cwd = kw.get("cwd")
-            return MagicMock(
-                config=kw,
-                api_key=kw.get("api_key"),
-                _backend_type=btype,
-                filesystem_manager=fm,
-                get_model_name=MagicMock(return_value="mock-model"),
-            )
-
-        with patch("massgen.cli.create_backend") as mock_create:
-            mock_create.side_effect = _make_mock_backend
-            fresh = orch._create_fresh_checkpoint_agents()
-
-        assert "agent_a-ckpt1" in fresh
-        assert "agent_b-ckpt1" in fresh
-        assert len(fresh) == 2
-
-    def test_fresh_agents_setup_orchestration_paths(self, tmp_path):
-        """Fresh agents should have setup_orchestration_paths called for log snapshots."""
-        from unittest.mock import patch
-
-        orch, ws_a, ws_b = self._make_orchestrator_with_workspaces(tmp_path)
-
-        created_fms = []
-
-        def _make_mock_backend(btype, **kw):
-            fm = MagicMock()
-            fm.cwd = kw.get("cwd")
-            created_fms.append(fm)
-            return MagicMock(
-                config=kw,
-                api_key=kw.get("api_key"),
-                _backend_type=btype,
-                filesystem_manager=fm,
-                get_model_name=MagicMock(return_value="mock-model"),
-            )
-
-        with patch("massgen.cli.create_backend") as mock_create:
-            mock_create.side_effect = _make_mock_backend
-            orch._create_fresh_checkpoint_agents()
-
-        # setup_orchestration_paths should have been called on each fresh backend's fm
-        for fm in created_fms:
-            fm.setup_orchestration_paths.assert_called_once()
-            call_kwargs = fm.setup_orchestration_paths.call_args
-            # agent_id should be the display ID (contains "ckpt")
-            assert "ckpt" in call_kwargs.kwargs.get("agent_id", call_kwargs.args[0] if call_kwargs.args else "")
-
-    def test_fresh_agents_clone_workspace(self, tmp_path):
-        """Fresh agents should have cloned workspace with original files."""
-        from unittest.mock import patch
-
-        orch, ws_a, ws_b = self._make_orchestrator_with_workspaces(tmp_path)
-
-        created_backends = []
-
-        def mock_create(btype, **kw):
-            # Simulate _setup_workspace: create the cwd directory (empty)
-            cwd = kw.get("cwd")
-            if cwd:
-                Path(cwd).mkdir(parents=True, exist_ok=True)
-            fm = MagicMock()
-            fm.cwd = cwd
-            mock = MagicMock(
-                config=kw,
-                api_key=kw.get("api_key"),
-                _backend_type=btype,
-                filesystem_manager=fm,
-                get_model_name=MagicMock(return_value="mock-model"),
-            )
-            created_backends.append(kw)
-            return mock
-
-        with patch("massgen.cli.create_backend", side_effect=mock_create):
-            fresh = orch._create_fresh_checkpoint_agents()
-
-        # Find the workspace created for agent_a's fresh instance
-        agent_a_ckpt = fresh.get("agent_a-ckpt1")
-        assert agent_a_ckpt is not None
-
-        # The cloned workspace should contain the original files
-        cloned_cwd_a = None
-        for kw in created_backends:
-            cwd = kw.get("cwd", "")
-            if "workspace_a" in str(cwd) and "_ckpt_" in str(cwd):
-                cloned_cwd_a = cwd
-                break
-
-        assert cloned_cwd_a is not None
-        cloned_path = Path(cloned_cwd_a)
-        assert cloned_path.exists()
-        assert (cloned_path / "CONTEXT.md").exists()
-        assert (cloned_path / "src" / "app.tsx").exists()
-
-    def test_fresh_agents_filter_checkpoint_mcp(self, tmp_path):
-        """Fresh agents should not have massgen_checkpoint in their MCP servers."""
-        from unittest.mock import patch
-
-        orch, ws_a, ws_b = self._make_orchestrator_with_workspaces(tmp_path)
-        # Add checkpoint MCP to agent_a's config
-        orch.agents["agent_a"].backend.config["mcp_servers"] = {
-            "massgen_checkpoint": {"name": "massgen_checkpoint"},
-            "command_line": {"name": "command_line", "args": ["--allowed-paths", "/old/path"]},
-            "filesystem": {"name": "filesystem"},
-            "other_mcp": {"name": "other_mcp"},
+        signal = {
+            "task": "Build the frontend",
+            "eval_criteria": ["Beautiful UI", "Responsive design"],
+            "personas": {"agent_a": "Senior designer", "agent_b": "UX expert"},
         }
 
-        backend_configs = []
-
-        def mock_create(btype, **kw):
-            backend_configs.append(kw)
-            return MagicMock(
-                config=kw,
-                api_key=kw.get("api_key"),
-                _backend_type=btype,
-                filesystem_manager=MagicMock(cwd=kw.get("cwd")),
-                get_model_name=MagicMock(return_value="mock-model"),
-            )
-
-        with patch("massgen.cli.create_backend", side_effect=mock_create):
-            orch._create_fresh_checkpoint_agents()
-
-        # Check that auto-injected MCPs were filtered from configs passed to create_backend
-        # Find the config that originally had MCPs (agent_a's config)
-        for cfg in backend_configs:
-            mcp_servers = cfg.get("mcp_servers", {})
-            if not mcp_servers:
-                continue  # Skip agent_b which had no MCPs
-            if isinstance(mcp_servers, dict):
-                assert "massgen_checkpoint" not in mcp_servers
-                assert "command_line" not in mcp_servers
-                assert "filesystem" not in mcp_servers
-                # User MCPs should be preserved
-                assert "other_mcp" in mcp_servers
-
-
-class TestWorkspacePropagation:
-    """Test _propagate_checkpoint_results_to_main_workspace."""
-
-    def test_propagate_copies_files(self, tmp_path):
-        """Winning agent's workspace files should be copied to main workspace."""
-        from unittest.mock import MagicMock
-
-        from massgen.agent_config import AgentConfig
-        from massgen.orchestrator import Orchestrator
-
-        # Create workspaces
-        winner_ws = tmp_path / "winner_ws"
-        winner_ws.mkdir()
-        (winner_ws / "index.html").write_text("<html>Winner</html>")
-        (winner_ws / "styles").mkdir()
-        (winner_ws / "styles" / "main.css").write_text("body { color: red; }")
-        (winner_ws / ".git").mkdir()  # Should be skipped
-
-        main_ws = tmp_path / "main_ws"
-        main_ws.mkdir()
-
-        # Setup orchestrator with checkpoint agents
-        winner_backend = MagicMock()
-        winner_backend.filesystem_manager = MagicMock(cwd=str(winner_ws))
-
-        main_backend = MagicMock()
-        main_backend.filesystem_manager = MagicMock(cwd=str(main_ws))
-
-        winner_agent = MagicMock()
-        winner_agent.backend = winner_backend
-
-        main_agent = MagicMock()
-        main_agent.backend = main_backend
-        main_agent.config = AgentConfig.create_openai_config()
-        main_agent.config.agent_id = "agent_a"
-
-        # Create mock orchestrator state
-        mock_backend = MagicMock()
-        mock_backend.filesystem_manager = None
-        mock_backend.config = {"mcp_servers": {}}
-        mock_backend.get_model_name.return_value = "test"
-
-        dummy_agent = MagicMock()
-        dummy_agent.backend = mock_backend
-
-        config = AgentConfig.create_openai_config()
-        orch = Orchestrator(
-            orchestrator_id="orch",
-            agents={"winner-ckpt1": winner_agent, "other-ckpt1": dummy_agent},
-            config=config,
+        config = generate_checkpoint_config(
+            parent_config=parent_config,
+            workspace=tmp_path,
+            signal=signal,
         )
-        orch._main_agent_id = "agent_a"
-        orch._saved_agents = {"agent_a": main_agent}
 
-        orch._propagate_checkpoint_results_to_main_workspace("winner-ckpt1")
+        # All agents participate equally (no main_agent flag)
+        for agent in config["agents"]:
+            assert "main_agent" not in agent
 
-        # Files should have been copied
-        assert (main_ws / "index.html").exists()
-        assert (main_ws / "index.html").read_text() == "<html>Winner</html>"
-        assert (main_ws / "styles" / "main.css").exists()
-        # Hidden dirs should not be copied
-        assert not (main_ws / ".git").exists()
+        # checkpoint_enabled must be false to prevent recursion
+        coord = config["orchestrator"].get("coordination", {})
+        assert coord.get("checkpoint_enabled") is False
 
-    def test_propagate_skips_when_no_workspace(self, tmp_path):
-        """Should not crash when workspace paths are missing."""
-        from unittest.mock import MagicMock
+    def test_injects_eval_criteria_as_checklist(self, tmp_path):
+        """Eval criteria from signal should become inline checklist criteria."""
+        from massgen.mcp_tools.subrun_utils import generate_checkpoint_config
 
-        from massgen.agent_config import AgentConfig
-        from massgen.orchestrator import Orchestrator
+        parent_config = {
+            "agents": [
+                {"id": "agent_a", "backend": {"type": "claude"}},
+            ],
+            "orchestrator": {},
+        }
+        signal = {
+            "task": "Review code",
+            "eval_criteria": ["Correct logic", "Clean style"],
+        }
 
-        mock_backend = MagicMock()
-        mock_backend.filesystem_manager = None
-        mock_backend.config = {"mcp_servers": {}}
-        mock_backend.get_model_name.return_value = "test"
-        agent = MagicMock()
-        agent.backend = mock_backend
-
-        config = AgentConfig.create_openai_config()
-        orch = Orchestrator(
-            orchestrator_id="orch",
-            agents={"agent-ckpt1": agent},
-            config=config,
+        config = generate_checkpoint_config(
+            parent_config=parent_config,
+            workspace=tmp_path,
+            signal=signal,
         )
-        orch._main_agent_id = "agent_a"
-        orch._saved_agents = {"agent_a": agent}
 
-        # Should not raise
-        orch._propagate_checkpoint_results_to_main_workspace("agent-ckpt1")
+        coord = config["orchestrator"].get("coordination", {})
+        assert coord.get("evaluation_mode") == "checklist_gated"
+        criteria = coord.get("inline_checklist_criteria", [])
+        assert "Correct logic" in criteria
+        assert "Clean style" in criteria
+
+    def test_injects_personas(self, tmp_path):
+        """Personas from signal should be injected into agent configs."""
+        from massgen.mcp_tools.subrun_utils import generate_checkpoint_config
+
+        parent_config = {
+            "agents": [
+                {"id": "agent_a", "backend": {"type": "claude"}},
+                {"id": "agent_b", "backend": {"type": "claude"}},
+            ],
+            "orchestrator": {},
+        }
+        signal = {
+            "task": "Design API",
+            "eval_criteria": ["RESTful"],
+            "personas": {
+                "agent_a": "Backend architect",
+                "agent_b": "API security expert",
+            },
+        }
+
+        config = generate_checkpoint_config(
+            parent_config=parent_config,
+            workspace=tmp_path,
+            signal=signal,
+        )
+
+        agent_map = {a["id"]: a for a in config["agents"]}
+        assert agent_map["agent_a"].get("persona") == "Backend architect"
+        assert agent_map["agent_b"].get("persona") == "API security expert"
+
+    def test_removes_checkpoint_mcp_servers(self, tmp_path):
+        """Checkpoint and gated_action MCP servers should be excluded."""
+        from massgen.mcp_tools.subrun_utils import generate_checkpoint_config
+
+        parent_config = {
+            "agents": [
+                {
+                    "id": "agent_a",
+                    "backend": {
+                        "type": "claude",
+                        "mcp_servers": [
+                            {"name": "massgen_checkpoint", "transport": "stdio"},
+                            {"name": "filesystem", "transport": "stdio"},
+                        ],
+                    },
+                },
+            ],
+            "orchestrator": {},
+        }
+        signal = {"task": "Test", "eval_criteria": ["Works"]}
+
+        config = generate_checkpoint_config(
+            parent_config=parent_config,
+            workspace=tmp_path,
+            signal=signal,
+        )
+
+        mcp_names = [s.get("name") for s in config["agents"][0]["backend"].get("mcp_servers", [])]
+        assert "massgen_checkpoint" not in mcp_names
+        assert "filesystem" in mcp_names
+
+    def test_empty_personas_no_persona_field(self, tmp_path):
+        """When signal has no personas, agent configs should not get persona field."""
+        from massgen.mcp_tools.subrun_utils import generate_checkpoint_config
+
+        parent_config = {
+            "agents": [{"id": "agent_a", "backend": {"type": "claude"}}],
+            "orchestrator": {},
+        }
+        signal = {"task": "Test", "eval_criteria": ["Works"], "personas": {}}
+
+        config = generate_checkpoint_config(
+            parent_config=parent_config,
+            workspace=tmp_path,
+            signal=signal,
+        )
+
+        assert "persona" not in config["agents"][0]
+
+
+# ============================================================================
+# Phase: Checkpoint Subprocess Manager
+# ============================================================================
+
+
+class TestCheckpointSubprocessManager:
+    """Test CheckpointSubprocessManager lifecycle."""
+
+    def test_build_command_includes_stream_events(self, tmp_path):
+        """Subprocess command should include --stream-events for event relay."""
+        from massgen.mcp_tools.checkpoint._subprocess_manager import (
+            CheckpointSubprocessManager,
+        )
+
+        mgr = CheckpointSubprocessManager(
+            parent_config={"agents": [{"id": "a", "backend": {"type": "claude"}}]},
+            parent_workspace=tmp_path,
+            checkpoint_number=1,
+        )
+        yaml_path = tmp_path / "ckpt.yaml"
+        yaml_path.write_text("agents: []")
+        answer_file = tmp_path / "answer.txt"
+
+        cmd = mgr._build_command(
+            config_path=yaml_path,
+            answer_file=answer_file,
+            task="Build it",
+        )
+        assert "--stream-events" in cmd
+        assert "--automation" not in cmd  # --stream-events implies --automation
+        assert "Build it" in cmd
+
+    def test_remap_agent_id(self):
+        """Event agent IDs should be remapped with checkpoint suffix."""
+        from massgen.mcp_tools.checkpoint._subprocess_manager import (
+            CheckpointSubprocessManager,
+        )
+
+        mgr = CheckpointSubprocessManager(
+            parent_config={"agents": [{"id": "a", "backend": {"type": "claude"}}]},
+            parent_workspace="/tmp/test",
+            checkpoint_number=2,
+        )
+
+        assert mgr._remap_agent_id("agent_a") == "agent_a-ckpt2"
+        assert mgr._remap_agent_id("agent_b") == "agent_b-ckpt2"
+        # None stays None
+        assert mgr._remap_agent_id(None) is None
+
+    def test_generates_workspace_path(self, tmp_path):
+        """Manager should create a checkpoint workspace directory."""
+        from massgen.mcp_tools.checkpoint._subprocess_manager import (
+            CheckpointSubprocessManager,
+        )
+
+        mgr = CheckpointSubprocessManager(
+            parent_config={"agents": [{"id": "a", "backend": {"type": "claude"}}]},
+            parent_workspace=tmp_path,
+            checkpoint_number=1,
+        )
+
+        ws = mgr._create_checkpoint_workspace()
+        assert ws.exists()
+        assert "ckpt_1" in ws.name

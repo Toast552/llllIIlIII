@@ -186,8 +186,6 @@ class EventEmitter:
         self._current_agent_id: str | None = None
         self._current_round_numbers: dict[str, int] = {}
         self._default_round_number: int = 0
-        self._checkpoint_display_ids: dict[str, str] = {}  # real_id -> display_id
-
         # Initialize file if log_dir provided
         if self._log_dir:
             self._init_file()
@@ -274,18 +272,6 @@ class EventEmitter:
 
                 _logging.getLogger(__name__).debug("Event listener %s failed: %s", listener, e)
 
-    def set_checkpoint_display_ids(self, mapping: dict[str, str]) -> None:
-        """Set display ID mapping for checkpoint mode.
-
-        When set, agent_ids in emitted events are remapped to display IDs
-        so the WebUI can route messages to checkpoint-specific channels.
-
-        Args:
-            mapping: real_agent_id -> display_id (e.g. {"agent_a": "agent_a-ckpt1"}).
-                     Pass empty dict to clear.
-        """
-        self._checkpoint_display_ids = dict(mapping)
-
     def emit_raw(self, event_type: str, **kwargs: Any) -> None:
         """Emit an event with automatic timestamp and context.
 
@@ -294,12 +280,6 @@ class EventEmitter:
             **kwargs: Event-specific data
         """
         resolved_agent_id = kwargs.pop("agent_id", self._current_agent_id)
-        # Remap agent_id to checkpoint display ID if active
-        if resolved_agent_id and self._checkpoint_display_ids:
-            resolved_agent_id = self._checkpoint_display_ids.get(
-                resolved_agent_id,
-                resolved_agent_id,
-            )
         explicit_round = kwargs.pop("round_number", None)
         if explicit_round is not None:
             resolved_round = explicit_round
