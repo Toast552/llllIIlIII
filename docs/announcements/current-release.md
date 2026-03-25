@@ -7,7 +7,7 @@ After posting, update the social links below.
 
 ## Release Summary
 
-We're excited to release MassGen v0.1.68 — Checkpoint Mode! 🚀 New checkpoint coordination mode lets a main agent plan solo then delegate execution to the full multi-agent team via the `checkpoint()` tool. Plus: LLM API circuit breaker for 429 rate limit handling, WebUI checkpoint support, and LiteLLM supply chain fix.
+We're excited to release MassGen v0.1.68 — Checkpoint Mode! 🚀 New checkpoint coordination mode lets a main agent plan solo then delegate execution to the full multi-agent team via the `checkpoint()` tool. Plus: LLM API circuit breaker for 429 rate limit handling (currently Claude backend only), WebUI checkpoint support, and LiteLLM supply chain fix (if you installed MassGen on March 24, 2026, between 10:39 UTC and 16:00 UTC, please see https://docs.litellm.ai/blog/security-update-march-2026 to check if affected).
 
 ## Install
 
@@ -29,7 +29,7 @@ Copy everything below this line, then append content from `feature-highlights.md
 
 ---
 
-We're excited to release MassGen v0.1.68 — Checkpoint Mode! 🚀 New checkpoint coordination mode lets a main agent plan solo then delegate execution to the full multi-agent team via the `checkpoint()` tool. Plus: LLM API circuit breaker for 429 rate limit handling, WebUI checkpoint support, and LiteLLM supply chain fix.
+We're excited to release MassGen v0.1.68 — Checkpoint Mode! 🚀 New checkpoint coordination mode lets a main agent plan solo then delegate execution to the full multi-agent team via the `checkpoint()` tool. Plus: LLM API circuit breaker for 429 rate limit handling (currently Claude backend only), WebUI checkpoint support, and LiteLLM supply chain fix (if you installed MassGen on March 24, 2026, between 10:39 UTC and 16:00 UTC, please see https://docs.litellm.ai/blog/security-update-march-2026 to check if affected).
 
 **Key Improvement:**
 
@@ -40,14 +40,14 @@ We're excited to release MassGen v0.1.68 — Checkpoint Mode! 🚀 New checkpoin
 - WebUI support for checkpoint mode display
 
 **Plus:**
-- ⚡ **LLM API circuit breaker** — automatic 429 rate limit handling with circuit breaker pattern for Claude backend
+- ⚡ **LLM API circuit breaker** — automatic 429 rate limit handling with circuit breaker pattern (currently Claude backend only)
 - 🔒 **LiteLLM supply chain fix** — pinned litellm<=1.82.6 and committed uv.lock to prevent dependency attacks
 
 **Getting Started:**
 
 ```bash
 pip install massgen==0.1.68
-# Try checkpoint mode
+# Try checkpoint mode -- click 'COORD' in the mode bar above the input then the checkpoint box
 uv run massgen --web
 ```
 

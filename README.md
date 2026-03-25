@@ -161,6 +161,7 @@ This project started with the "threads of thought" and "iterative refinement" id
 
 **What's New in v0.1.68:**
 - **🔀 Checkpoint Mode** - Main agent plans solo then delegates to the team via `checkpoint()` tool with fresh agent instances.
+- **⚡ LLM API Circuit Breaker** - Automatic 429 rate limit handling for Claude backend.
 - **🖥️ WebUI Checkpoint Support** - Checkpoint mode display integrated into the modernized WebUI.
 - **🔒 LiteLLM Fix** - Supply chain protection with pinned dependency and committed lock file.
 
@@ -1247,6 +1248,7 @@ MassGen is currently in its foundational stage, with a focus on parallel, asynch
 #### Checkpoint Mode
 - **Checkpoint Coordination Mode** ([#1028](https://github.com/massgen/MassGen/pull/1028)): Delegator pattern — main agent plans solo then delegates to team via `checkpoint()` tool with fresh agent instances
 - **WebUI Checkpoint Support** ([#1028](https://github.com/massgen/MassGen/pull/1028)): Checkpoint mode display in the modernized WebUI
+- **LLM API Circuit Breaker** ([#1024](https://github.com/massgen/MassGen/pull/1024)): Automatic 429 rate limit handling with circuit breaker pattern (currently Claude backend only)
 - **LiteLLM Supply Chain Fix** ([#1025](https://github.com/massgen/MassGen/pull/1025)): Pinned litellm<=1.82.6 and committed uv.lock
 
 ### Previous Achievements (v0.0.3 - v0.1.67)
