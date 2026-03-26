@@ -11,6 +11,7 @@ import { useV2KeyboardShortcuts } from '../../../hooks/useV2KeyboardShortcuts';
 import type { ConnectionStatus } from '../../../hooks/useWebSocket';
 import { useModeStore } from '../../../stores/v2/modeStore';
 import { useStatusStore } from '../../../stores/v2/statusStore';
+import { useWorkspaceModalStore } from '../../../stores/v2/workspaceModalStore';
 import { Sidebar } from '../sidebar/Sidebar';
 import { TileContainer } from '../tiles/TileContainer';
 import { GlobalInputBar } from './GlobalInputBar';
@@ -19,6 +20,10 @@ import { V2QuickstartWizard } from './V2QuickstartWizard';
 import { V2SetupOverlay } from './V2SetupOverlay';
 import { LaunchIndicator } from './LaunchIndicator';
 import { PromptBanner } from '../tiles/PromptBanner';
+import { WorkspaceModal } from './WorkspaceModal';
+import { WorkspaceBrowserTile } from '../tiles/WorkspaceBrowserTile';
+import { AnswerBrowserTile } from '../tiles/AnswerBrowserTile';
+import { TimelineTile } from '../tiles/TimelineTile';
 
 interface AppShellProps {
   wsStatus: ConnectionStatus;
@@ -254,6 +259,9 @@ export function AppShell({
         />
       </div>
 
+      {/* Workspace Modal (full-screen overlays for Browse Files, Answers/Votes, Timeline) */}
+      <WorkspaceModalRenderer />
+
       {/* V2 Setup Overlay */}
       {isSetupOpen && <V2SetupOverlay />}
 
@@ -266,5 +274,31 @@ export function AppShell({
       )}
 
     </div>
+  );
+}
+
+// ============================================================================
+// Workspace Modal Renderer
+// ============================================================================
+
+const MODAL_TITLES: Record<string, string> = {
+  files: 'Browse Files',
+  answers: 'Answers / Votes',
+  timeline: 'Timeline',
+};
+
+function WorkspaceModalRenderer() {
+  const activeView = useWorkspaceModalStore((s) => s.activeView);
+  const focusAnswerLabel = useWorkspaceModalStore((s) => s.focusAnswerLabel);
+  const close = useWorkspaceModalStore((s) => s.close);
+
+  if (!activeView) return null;
+
+  return (
+    <WorkspaceModal title={MODAL_TITLES[activeView] || ''} onClose={close}>
+      {activeView === 'files' && <WorkspaceBrowserTile />}
+      {activeView === 'answers' && <AnswerBrowserTile focusAnswerLabel={focusAnswerLabel || undefined} />}
+      {activeView === 'timeline' && <TimelineTile />}
+    </WorkspaceModal>
   );
 }

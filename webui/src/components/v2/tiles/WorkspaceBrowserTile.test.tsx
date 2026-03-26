@@ -60,12 +60,12 @@ describe('WorkspaceBrowserTile', () => {
     expect(screen.getAllByLabelText('Rich preview available')).toHaveLength(1)
   })
 
-  it('stacks the inline preview below the file tree after selecting a file', () => {
+  it('shows side-by-side tree and preview after selecting a file', () => {
     render(<WorkspaceBrowserTile />)
 
     fireEvent.click(screen.getByText('plan.json'))
 
     expect(screen.getByTestId('inline-artifact-preview')).toHaveTextContent('tasks/plan.json')
-    expect(screen.getByTestId('panel-group')).toHaveAttribute('data-orientation', 'vertical')
+    expect(screen.getByTestId('panel-group')).toHaveAttribute('data-orientation', 'horizontal')
   })
 })

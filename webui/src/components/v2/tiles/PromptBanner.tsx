@@ -1,7 +1,9 @@
 import { useState, useEffect } from 'react';
 import { cn } from '../../../lib/utils';
 import { useAgentStore } from '../../../stores/agentStore';
+import { useTileStore } from '../../../stores/v2/tileStore';
 import { useStatusStore } from '../../../stores/v2/statusStore';
+import { getAgentColor } from '../../../utils/agentColors';
 
 const MAX_DISPLAY_LENGTH = 80;
 
@@ -52,6 +54,9 @@ export function PromptBanner() {
           expanded={metricsExpanded}
           onToggle={() => { setMetricsExpanded(!metricsExpanded); setPromptExpanded(false); }}
         />
+
+        {/* Autofit toggle — rightmost */}
+        <AutofitButton />
       </div>
 
       {/* Prompt expanded overlay */}
@@ -104,6 +109,56 @@ export function PromptBanner() {
         </div>
       )}
     </div>
+  );
+}
+
+// ============================================================================
+// Autofit Button (global view toggle, moved from per-agent header)
+// ============================================================================
+
+function AutofitButton() {
+  const agentOrder = useAgentStore((s) => s.agentOrder);
+  const isAutofit = useTileStore((s) => s.autofit);
+  const setAutofitTiles = useTileStore((s) => s.setAutofitTiles);
+
+  if (agentOrder.length <= 1) return null;
+
+  const handleAutofit = () => {
+    if (isAutofit) {
+      useTileStore.getState().setTile({
+        id: `channel-${agentOrder[0]}`,
+        type: 'agent-channel',
+        targetId: agentOrder[0],
+        label: agentOrder[0],
+      });
+    } else {
+      const allTiles = agentOrder.map((id) => ({
+        id: `channel-${id}`,
+        type: 'agent-channel' as const,
+        targetId: id,
+        label: id,
+      }));
+      setAutofitTiles(allTiles);
+    }
+  };
+
+  return (
+    <button
+      onClick={handleAutofit}
+      className={cn(
+        'flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded shrink-0',
+        'text-v2-text-muted hover:text-v2-text hover:bg-v2-surface-raised/50',
+        'transition-colors duration-150',
+        isAutofit && 'bg-v2-accent/10 text-v2-accent'
+      )}
+      title={isAutofit ? 'Single agent view' : 'See all agents'}
+    >
+      <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+        <rect x="2" y="2" width="5" height="12" rx="1" />
+        <rect x="9" y="2" width="5" height="12" rx="1" />
+      </svg>
+      {isAutofit ? 'Single' : 'Autofit'}
+    </button>
   );
 }
 
@@ -239,7 +294,49 @@ function MetricsDetail({ onClose }: { onClose: () => void }) {
         label="Total tokens"
         value={(totalInputTokens + totalOutputTokens).toLocaleString()}
       />
+
+      {/* Per-agent round timing */}
+      <AgentTimingSection />
     </div>
+  );
+}
+
+function AgentTimingSection() {
+  const agentTimings = useStatusStore((s) => s.agentTimings);
+  const agentOrder = useAgentStore((s) => s.agentOrder);
+
+  if (agentTimings.length === 0) return null;
+
+  const now = Date.now() / 1000;
+
+  return (
+    <>
+      <div className="h-px bg-v2-border" />
+      <div className="text-[10px] text-v2-text-muted uppercase tracking-wider font-medium">
+        Agent Rounds
+      </div>
+      {agentTimings.map((timing) => {
+        const agentColor = getAgentColor(timing.agentId, agentOrder);
+        const agentName = timing.agentId.replace(/_/g, ' ');
+        const roundElapsed = timing.roundStartTime > 0 ? now - timing.roundStartTime : 0;
+        const isDone = timing.status === 'completed' || timing.status === 'voted';
+
+        return (
+          <div key={timing.agentId} className="flex items-center justify-between text-[11px]">
+            <div className="flex items-center gap-1.5">
+              <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: agentColor.hex }} />
+              <span className="text-v2-text-muted">{agentName}</span>
+            </div>
+            <div className="flex items-center gap-1.5 tabular-nums">
+              <span className="text-v2-text-muted/60">R{timing.roundNumber + 1}</span>
+              <span className="text-v2-text font-medium">
+                {isDone ? 'done' : formatElapsedTime(roundElapsed)}
+              </span>
+            </div>
+          </div>
+        );
+      })}
+    </>
   );
 }
 

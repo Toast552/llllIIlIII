@@ -2,7 +2,8 @@ import { useState, useEffect, useRef } from 'react';
 import { cn } from '../../../lib/utils';
 import { useAgentStore } from '../../../stores/agentStore';
 import { useMessageStore, type AnswerMessage, type VoteMessage, type ChannelMessage } from '../../../stores/v2/messageStore';
-import { useTileStore, type TileType } from '../../../stores/v2/tileStore';
+import { useTileStore } from '../../../stores/v2/tileStore';
+import { useWorkspaceModalStore } from '../../../stores/v2/workspaceModalStore';
 import { getAgentColor } from '../../../utils/agentColors';
 import { SidebarItem } from './SessionSection';
 
@@ -34,8 +35,7 @@ export function ChannelSection({ collapsed }: ChannelSectionProps) {
     prevCountRef.current = agentOrder.length;
   }, [agentOrder.length]);
 
-  const addTile = useTileStore((s) => s.addTile);
-  const removeTile = useTileStore((s) => s.removeTile);
+  const openModal = useWorkspaceModalStore((s) => s.open);
 
   const handleChannelClick = (agentId: string) => {
     const agent = agents[agentId];
@@ -48,16 +48,7 @@ export function ChannelSection({ collapsed }: ChannelSectionProps) {
   };
 
   const handleAnswerClick = (answerLabel: string) => {
-    // Remove any existing workspace-type tile, then open answer browser focused on this answer
-    const workspaceTypes: TileType[] = ['workspace-browser', 'timeline-view', 'answer-browser', 'vote-results'];
-    const existingTile = tiles.find((t) => workspaceTypes.includes(t.type));
-    if (existingTile) removeTile(existingTile.id);
-    addTile({
-      id: `answer-browser-${answerLabel}`,
-      type: 'answer-browser',
-      targetId: answerLabel,
-      label: 'Answers',
-    });
+    openModal('answers', answerLabel);
   };
 
   const toggleAnswers = (agentId: string, e: React.MouseEvent) => {

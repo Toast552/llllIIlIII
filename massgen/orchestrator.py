@@ -6277,6 +6277,15 @@ Your answer:"""
                                             answer_number=_answer_number,
                                             answer_label=_answer_label,
                                         )
+                                    # Record for timeline visualization
+                                    if hasattr(display, "record_answer_with_context"):
+                                        _context = self.coordination_tracker.get_agent_context_labels(agent_id)
+                                        display.record_answer_with_context(
+                                            agent_id=agent_id,
+                                            answer_label=_answer_label,
+                                            context_sources=_context,
+                                            round_num=_agent_round,
+                                        )
                             # Update status file for real-time monitoring
                             # Run in executor to avoid blocking event loop
                             log_session_dir = get_log_session_dir()
@@ -6441,6 +6450,20 @@ Your answer:"""
                                                 target_id=result_data.get("agent_id", ""),
                                                 reason=result_data.get("reason", ""),
                                             )
+                                            # Record for timeline visualization
+                                            if hasattr(display, "record_vote_with_context"):
+                                                _vote_round = self.coordination_tracker.get_agent_round(agent_id) + 1
+                                                _context = self.coordination_tracker.get_agent_context_labels(agent_id)
+                                                _agent_idx = self.coordination_tracker.agent_ids.index(agent_id) + 1 if agent_id in self.coordination_tracker.agent_ids else 0
+                                                _vote_count = len([m for m in (self.coordination_tracker.votes or []) if getattr(m, "voter_id", None) == agent_id])
+                                                _vote_label = f"vote{_agent_idx}.{_vote_count}"
+                                                display.record_vote_with_context(
+                                                    voter_id=agent_id,
+                                                    vote_label=_vote_label,
+                                                    voted_for=result_data.get("agent_id", ""),
+                                                    available_answers=_context,
+                                                    voting_round=_vote_round,
+                                                )
                                 # Emit event (unified pipeline for main + subagent TUI)
                                 _emitter = get_event_emitter()
                                 if _emitter:

@@ -7,6 +7,13 @@
 
 import { create } from 'zustand';
 
+export interface AgentRoundTiming {
+  agentId: string;
+  roundNumber: number;
+  roundStartTime: number;
+  status: string;
+}
+
 interface StatusStoreState {
   /** Total elapsed seconds for the session */
   elapsedSeconds: number;
@@ -28,6 +35,8 @@ interface StatusStoreState {
   lastFetchTime: number;
   /** The elapsed value at lastFetchTime (for interpolation) */
   elapsedAtLastFetch: number;
+  /** Per-agent round timing */
+  agentTimings: AgentRoundTiming[];
 }
 
 interface StatusStoreActions {
@@ -48,6 +57,7 @@ const initialState: StatusStoreState = {
   isPolling: false,
   lastFetchTime: 0,
   elapsedAtLastFetch: 0,
+  agentTimings: [],
 };
 
 let pollInterval: ReturnType<typeof setInterval> | null = null;
@@ -67,6 +77,22 @@ export const useStatusStore = create<StatusStoreState & StatusStoreActions>(
         const meta = status.meta || {};
         const costs = status.costs || {};
         const coordination = status.coordination || {};
+        const agents = status.agents || {};
+
+        // Extract per-agent round timing
+        const timings: AgentRoundTiming[] = [];
+        for (const [agentId, agentData] of Object.entries(agents)) {
+          const ad = agentData as Record<string, unknown>;
+          const rt = ad.round_timing as Record<string, unknown> | undefined;
+          if (rt) {
+            timings.push({
+              agentId,
+              roundNumber: (rt.round_number as number) || 0,
+              roundStartTime: (rt.round_start_time as number) || 0,
+              status: (ad.status as string) || '',
+            });
+          }
+        }
 
         set({
           elapsedSeconds: meta.elapsed_seconds || 0,
@@ -78,6 +104,7 @@ export const useStatusStore = create<StatusStoreState & StatusStoreActions>(
           completionPercentage: coordination.completion_percentage || 0,
           lastFetchTime: Date.now(),
           elapsedAtLastFetch: meta.elapsed_seconds || 0,
+          agentTimings: timings,
         });
       } catch {
         // Silently ignore fetch errors (status.json may not exist yet)

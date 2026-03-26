@@ -121,38 +121,38 @@ export function WorkspaceBrowserTile() {
         </div>
       )}
 
-      {/* Main content: file tree (+ optional preview panel) */}
-      {selectedFile ? (
-        <Group orientation="vertical" className="flex-1 min-h-0">
-          <Panel id="file-tree" defaultSize={45} minSize={20}>
-            <div className="h-full overflow-auto v2-scrollbar">
-              <FileTree
-                files={files}
-                onFileClick={handleFileClick}
-                selectedPath={selectedFile.path}
-              />
-            </div>
-          </Panel>
-          <Separator
-            className={cn(
-              'h-[2px] bg-v2-border transition-colors duration-150',
-              'hover:bg-v2-accent'
-            )}
-          />
-          <Panel id="file-preview" defaultSize={55} minSize={25}>
+      {/* Main content: side-by-side tree (left) + preview (right) */}
+      <Group orientation="horizontal" className="flex-1 min-h-0">
+        <Panel id="file-tree" defaultSize={25} minSize={15}>
+          <div className="h-full overflow-auto v2-scrollbar border-r border-v2-border">
+            <FileTree
+              files={files}
+              onFileClick={handleFileClick}
+              selectedPath={selectedFile?.path || null}
+            />
+          </div>
+        </Panel>
+        <Separator
+          className={cn(
+            'w-[2px] bg-v2-border transition-colors duration-150',
+            'hover:bg-v2-accent'
+          )}
+        />
+        <Panel id="file-preview" defaultSize={75} minSize={40}>
+          {selectedFile ? (
             <FilePreview
               file={selectedFile}
               workspacePath={effectiveWorkspace}
               onOpenInTile={handleOpenInTile}
               onClose={() => setSelectedFile(null)}
             />
-          </Panel>
-        </Group>
-      ) : (
-        <div className="flex-1 overflow-auto v2-scrollbar">
-          <FileTree files={files} onFileClick={handleFileClick} selectedPath={null} />
-        </div>
-      )}
+          ) : (
+            <div className="flex items-center justify-center h-full text-v2-text-muted text-sm">
+              Select a file to preview
+            </div>
+          )}
+        </Panel>
+      </Group>
     </div>
   );
 }
