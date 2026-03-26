@@ -5283,6 +5283,13 @@ async def run_coordination_with_history(
         # Extract orchestrator config dict from YAML
         orchestrator_cfg = config.get("orchestrator", {})
 
+        # Inject instance_id for Docker container naming (parallel execution safety)
+        instance_id = uuid.uuid4().hex[:8]
+        agent_entries = [config["agent"]] if "agent" in config else config.get("agents", [])
+        for agent_data in agent_entries:
+            backend_config = agent_data.get("backend", {})
+            backend_config["instance_id"] = instance_id
+
         # Create agents from config with progress updates
         # Note: Multi-turn reuses existing session, so progress is less critical but nice to have
         num_agents = len(config.get("agents", []))
@@ -6060,6 +6067,14 @@ async def run_coordination(
 
         # Extract orchestrator config dict from YAML
         orchestrator_cfg = config.get("orchestrator", {})
+
+        # Inject instance_id for Docker container naming (parallel execution safety)
+        # CLI main() does this at startup, but WebUI loads config from YAML directly
+        instance_id = uuid.uuid4().hex[:8]
+        agent_entries = [config["agent"]] if "agent" in config else config.get("agents", [])
+        for agent_data in agent_entries:
+            backend_config = agent_data.get("backend", {})
+            backend_config["instance_id"] = instance_id
 
         # Send agent setup status (this is the slow part - Docker containers, etc.)
         agent_configs = config.get("agents", [])

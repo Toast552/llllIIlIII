@@ -68,6 +68,9 @@ export function SessionSection({ collapsed, onSessionChange, onNewSession, onCon
   const searchInputRef = useRef<HTMLInputElement>(null);
   const currentSessionId = useAgentStore((s) => s.sessionId);
   const question = useAgentStore((s) => s.question);
+  const isComplete = useAgentStore((s) => s.isComplete);
+  // Prevent session switching while a coordination run is active
+  const runLocked = !!question && !isComplete;
 
   const handleSwitchSession = useCallback((session: SessionInfo) => {
     const sessionId = session.session_id;
@@ -204,13 +207,15 @@ export function SessionSection({ collapsed, onSessionChange, onNewSession, onCon
             Sessions
           </span>
           <button
-            onClick={onNewSession}
+            onClick={runLocked ? undefined : onNewSession}
+            disabled={runLocked}
             className={cn(
               'flex items-center justify-center w-4 h-4 rounded',
               'text-v2-text-muted hover:text-v2-text',
-              'transition-colors duration-150'
+              'transition-colors duration-150',
+              runLocked && 'opacity-40 cursor-not-allowed'
             )}
-            title="New session"
+            title={runLocked ? 'Locked during active run' : 'New session'}
           >
             <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
               <path d="M6 2v8M2 6h8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
@@ -295,7 +300,8 @@ export function SessionSection({ collapsed, onSessionChange, onNewSession, onCon
                         subtitle={subtitle}
                         active={isActive}
                         collapsed={collapsed}
-                        onClick={isActive ? undefined : () => handleSwitchSession(session)}
+                        disabled={runLocked && !isActive}
+                        onClick={isActive || runLocked ? undefined : () => handleSwitchSession(session)}
                       />
                     </div>
                     {/* Info + kebab buttons — visible on hover */}
@@ -430,22 +436,25 @@ interface SidebarItemProps {
   subtitle?: string;
   active?: boolean;
   collapsed: boolean;
+  disabled?: boolean;
   onClick?: () => void;
 }
 
-export function SidebarItem({ icon, label, subtitle, active, collapsed, onClick }: SidebarItemProps) {
+export function SidebarItem({ icon, label, subtitle, active, collapsed, disabled, onClick }: SidebarItemProps) {
   return (
     <button
-      onClick={onClick}
+      onClick={disabled ? undefined : onClick}
+      disabled={disabled}
       className={cn(
         'flex items-center gap-2 w-full rounded px-2 py-1.5 text-sm',
         'transition-colors duration-100',
         active
           ? 'bg-[var(--v2-channel-active)] text-v2-text'
           : 'text-v2-text-secondary hover:bg-[var(--v2-channel-hover)] hover:text-v2-text',
-        collapsed && 'justify-center px-0'
+        collapsed && 'justify-center px-0',
+        disabled && 'opacity-40 cursor-not-allowed hover:bg-transparent'
       )}
-      title={collapsed ? label : undefined}
+      title={collapsed ? label : (disabled ? 'Locked during active run' : undefined)}
     >
       <span className="shrink-0 flex items-center justify-center w-5 h-5">
         {icon}
