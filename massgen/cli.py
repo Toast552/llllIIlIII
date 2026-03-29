@@ -1928,6 +1928,27 @@ def _substitute_variables(obj: Any, variables: dict[str, str]) -> Any:
         return obj
 
 
+_MASSGEN_WORKSPACES_PREFIX = ".massgen/workspaces/"
+
+
+def _route_workspace_path(cwd: str) -> str:
+    """Route relative workspace paths under .massgen/workspaces/.
+
+    Absolute paths are returned unchanged. Paths already under
+    .massgen/workspaces/ are not double-prefixed.
+    """
+    from pathlib import PurePath
+
+    p = PurePath(cwd)
+    if p.is_absolute():
+        return cwd
+    # Don't double-prefix
+    normalized = str(p).replace("\\", "/")
+    if normalized.startswith(_MASSGEN_WORKSPACES_PREFIX) or normalized.startswith(".massgen/workspaces"):
+        return cwd
+    return f"{_MASSGEN_WORKSPACES_PREFIX}{cwd}"
+
+
 def resolve_config_path(config_arg: str | None) -> Path | None:
     """Resolve config file with flexible syntax.
 
@@ -2598,6 +2619,9 @@ def create_agents_from_config(
         if "cwd" in backend_config:
             variables = {"cwd": backend_config["cwd"]}
             backend_config = _substitute_variables(backend_config, variables)
+
+            # Route relative workspace paths under .massgen/workspaces/
+            backend_config["cwd"] = _route_workspace_path(backend_config["cwd"])
 
             # Apply unique suffix to workspace paths to prevent filesystem conflicts
             # and identity leakage between agents. Each agent gets a unique suffix.
@@ -3601,6 +3625,7 @@ def _parse_coordination_config(coord_cfg: dict[str, Any]) -> "CoordinationConfig
         round_evaluator_refine=coord_cfg.get("round_evaluator_refine", False),
         round_evaluator_transformation_pressure=coord_cfg.get("round_evaluator_transformation_pressure", "balanced"),
         enable_execution_trace_analyzer=coord_cfg.get("enable_execution_trace_analyzer", False),
+        auto_trace_analysis=coord_cfg.get("auto_trace_analysis", False),
         enable_evaluator_personas=coord_cfg.get("enable_evaluator_personas", False),
         enable_quality_rethink_on_iteration=coord_cfg.get("enable_quality_rethink_on_iteration", False),
         enable_novelty_on_iteration=coord_cfg.get("enable_novelty_on_iteration", False),

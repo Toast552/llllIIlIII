@@ -3183,6 +3183,9 @@ class Orchestrator(ChatAgent):
             if hasattr(a.backend, "config"):
                 # Filter out non-serializable or internal keys
                 backend_cfg = {k: v for k, v in a.backend.config.items() if k not in ("mcp_servers", "_config_path")}
+                # Codex/GeminiCLI extract model to self.model; ensure it's in the serialized config
+                if "model" not in backend_cfg and hasattr(a.backend, "model") and a.backend.model:
+                    backend_cfg["model"] = a.backend.model
                 agent_cfg["backend"] = backend_cfg
             runtime_agent_config = getattr(a, "config", None)
             subagent_agents = getattr(runtime_agent_config, "subagent_agents", None)
@@ -3322,6 +3325,9 @@ class Orchestrator(ChatAgent):
                     )
                     subagent_runtime_mode = "inherited"
                     subagent_runtime_fallback_mode = "inherited"
+            # Register this agent's workspace as an allowed root for delegated spawns
+            if self._subagent_launch_watcher is not None:
+                self._subagent_launch_watcher.add_allowed_root(workspace_root)
         elif (
             isinstance(backend_cfg, dict)
             and str(backend_cfg.get("type", "")).lower() == "codex"
@@ -10775,14 +10781,12 @@ Your answer:"""
         """Return True when *type_name* is in the active subagent types."""
         from massgen.subagent.type_scanner import DEFAULT_SUBAGENT_TYPES
 
-        types = (
-            getattr(
-                getattr(self.config, "coordination_config", None),
-                "subagent_types",
-                None,
-            )
-            or DEFAULT_SUBAGENT_TYPES
+        _cfg_types = getattr(
+            getattr(self.config, "coordination_config", None),
+            "subagent_types",
+            None,
         )
+        types = _cfg_types if _cfg_types is not None else DEFAULT_SUBAGENT_TYPES
         return type_name in {t.lower() for t in types}
 
     def _is_builder_subagent_enabled(self) -> bool:
@@ -12004,40 +12008,6 @@ Your answer:"""
         _add(self._agent_temporary_workspace)
         return context_paths
 
-    def _get_trace_analyzer_context_paths(
-        self,
-        parent_agent_id: str,
-    ) -> list[str]:
-        """Collect focused context paths for the execution_trace_analyzer.
-
-        Unlike the round_evaluator which needs the full workspace, the trace
-        analyzer only needs access to the agent's snapshot directory (which
-        contains ``execution_trace.md``).  Giving it the full workspace root
-        leaks ``subagents/`` contents (round_eval data, etc.).
-        """
-        context_paths: list[str] = []
-        seen: set[str] = set()
-
-        def _add(path_value: Any) -> None:
-            normalized = str(path_value or "").strip()
-            if not normalized or normalized in seen:
-                return
-            resolved = str(Path(normalized).resolve()) if normalized else normalized
-            if resolved in seen:
-                return
-            if not Path(resolved).exists():
-                return
-            seen.add(resolved)
-            context_paths.append(resolved)
-
-        # Primary: agent-specific snapshot directory with execution_trace.md.
-        if self._snapshot_storage:
-            agent_snapshot = Path(self._snapshot_storage) / parent_agent_id
-            if agent_snapshot.exists():
-                _add(str(agent_snapshot))
-
-        return context_paths
-
     def _emit_round_evaluator_spawn_event(
         self,
         *,
@@ -12711,24 +12681,7 @@ Your answer:"""
         # TUI display args use the decorated type label so the card shows the pressure level.
         tui_task_payload = {**task_payload, "subagent_type": display_subagent_type}
 
-        # --- Execution trace analyzer (runs alongside round_evaluator) ---
-        trace_analyzer_enabled = bool(
-            coord_cfg and getattr(coord_cfg, "enable_execution_trace_analyzer", False),
-        )
-        trace_task_payload: dict[str, Any] | None = None
-        if trace_analyzer_enabled:
-            trace_task_payload = {
-                "subagent_id": f"trace_analyzer_r{upcoming_round}",
-                "task": ("Analyze the main agent's execution trace. " "Identify process inefficiencies, wasted tool calls, and " "patterns the agent should avoid or adopt in subsequent rounds."),
-                "subagent_type": "execution_trace_analyzer",
-                "context_paths": self._get_trace_analyzer_context_paths(parent_agent_id),
-                "timeout_seconds": configured_timeout,
-            }
-        # Build TUI spawn args — include both tasks when trace analyzer is enabled.
-        if trace_analyzer_enabled and trace_task_payload is not None:
-            tui_spawn_args = {**spawn_args, "tasks": [tui_task_payload, trace_task_payload]}
-        else:
-            tui_spawn_args = {**spawn_args, "tasks": [tui_task_payload]}
+        tui_spawn_args = {**spawn_args, "tasks": [tui_task_payload]}
 
         tool_call_id = f"round_evaluator_pre_round_{parent_agent_id}_r{upcoming_round}_{int(time.time() * 1000)}"
         emitter = get_event_emitter()
@@ -12751,53 +12704,13 @@ Your answer:"""
         # directly is simpler and avoids requiring the parent agent to have an
         # MCP-connected subagent server (which depends on filesystem_manager).
         started_at = time.time()
-        if trace_analyzer_enabled and trace_task_payload is not None:
-            combined_tasks = [task_payload, trace_task_payload]
-        else:
-            combined_tasks = [task_payload]
-
         raw_result = await self._direct_spawn_subagents(
             parent_agent_id=parent_agent_id,
-            tasks=combined_tasks,
+            tasks=[task_payload],
             refine=evaluator_refine,
         )
         elapsed_seconds = max(0.0, time.time() - started_at)
         normalized_result = raw_result if isinstance(raw_result, dict) else {}
-
-        # When trace analyzer was included, split the combined result.
-        if trace_analyzer_enabled and trace_task_payload is not None:
-            eval_normalized, trace_normalized = self._split_combined_spawn_result(
-                normalized_result,
-                evaluator_subagent_id=f"round_eval_r{upcoming_round}",
-                trace_subagent_id=f"trace_analyzer_r{upcoming_round}",
-            )
-            normalized_result = eval_normalized
-
-            # Process trace analyzer result into memory.
-            if trace_normalized.get("success"):
-                trace_results = trace_normalized.get("results", [])
-                if trace_results:
-                    from .subagent.models import SubagentResult as _SR
-
-                    try:
-                        trace_sub = _SR.from_dict(trace_results[0])
-                        memory_block = self._format_trace_analyzer_for_memory_static(
-                            trace_sub,
-                            upcoming_round,
-                        )
-                        if memory_block:
-                            self._queue_round_start_context_block(parent_agent_id, memory_block)
-                            logger.info(
-                                "[Orchestrator] Queued execution-trace analysis for %s round %s",
-                                parent_agent_id,
-                                upcoming_round,
-                            )
-                    except Exception:
-                        logger.warning(
-                            "[Orchestrator] Failed to parse trace analyzer result for %s",
-                            parent_agent_id,
-                            exc_info=True,
-                        )
         success = bool(normalized_result.get("success"))
         self._emit_round_evaluator_spawn_event(
             phase="complete",
@@ -13516,11 +13429,13 @@ Your answer:"""
             # agent.backend.filesystem_manager.clear_workspace()  # Don't clear for now.
             agent.backend.filesystem_manager.log_current_state("before execution")
 
-            # Re-write SUBAGENT.md dirs each round so the lazy scanner in the MCP server
-            # always finds them — workspace clears between rounds can remove .massgen/.
+            # Re-write SUBAGENT.md dirs and MCP config JSON files each round so
+            # the lazy scanner / deferred loader in the MCP server always finds
+            # them — workspace clears between rounds can remove .massgen/.
             if hasattr(self.config, "coordination_config") and getattr(self.config.coordination_config, "enable_subagents", False):
                 workspace_root = agent.backend.filesystem_manager.get_workspace_root()
                 self._write_subagent_type_dirs(workspace_root)
+                self._rewrite_subagent_mcp_config_files(workspace_root, agent_id)
 
             # For single-agent mode with skip_voting (refinement OFF), enable context write access
             # from the START of coordination so the agent can write directly to context paths

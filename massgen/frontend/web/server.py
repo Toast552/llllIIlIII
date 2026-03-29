@@ -4261,6 +4261,95 @@ def create_app(
             status_code=404,
         )
 
+    @app.get("/api/sessions/{session_id}/subagent/{subagent_id}/events")
+    async def get_subagent_events(session_id: str, subagent_id: str, after: int = 0):
+        """Get events for a pre-collab or runtime subagent.
+
+        Reads events.jsonl from the subagent's log directory to enable
+        inner agent activity display in the WebUI.
+
+        Args:
+            session_id: Parent session ID
+            subagent_id: Subagent identifier (e.g. "persona_generation")
+            after: Return only events with sequence > after (for incremental polling)
+        """
+        from massgen.subagent.models import SubagentResult
+
+        # Resolve the log directory for this session
+        log_session_dir = None
+        display = manager.get_display(session_id)
+        if display:
+            log_session_dir = getattr(display, "_log_session_dir", None)
+        if not log_session_dir:
+            try:
+                from massgen.logger_config import get_log_session_dir
+
+                log_session_dir = get_log_session_dir()
+            except Exception:
+                pass
+
+        if not log_session_dir:
+            # Try from disk
+            logs_root = Path(".massgen") / "massgen_logs"
+            log_dir = logs_root / session_id
+            if log_dir.is_dir():
+                attempt_dir = _find_latest_attempt(log_dir)
+                if attempt_dir:
+                    log_session_dir = str(attempt_dir.parent.parent)  # up from turn_N/attempt_N
+
+        if not log_session_dir:
+            return JSONResponse({"events": [], "total": 0})
+
+        # Find the subagent log directory
+        subagent_log_dir = Path(log_session_dir) / "subagents" / subagent_id
+        if not subagent_log_dir.is_dir():
+            return JSONResponse({"events": [], "total": 0})
+
+        # Resolve events.jsonl using the canonical resolver
+        events_path_str = SubagentResult.resolve_events_path(subagent_log_dir)
+        if not events_path_str:
+            return JSONResponse({"events": [], "total": 0})
+
+        events_path = Path(events_path_str)
+        if not events_path.exists():
+            return JSONResponse({"events": [], "total": 0})
+
+        # Read and wrap events
+        def _read_subagent_events() -> tuple[list[dict[str, Any]], int]:
+            result: list[dict[str, Any]] = []
+            seq = 0
+            try:
+                with open(events_path, encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            ev = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        seq += 1
+                        if seq <= after:
+                            continue
+                        result.append(
+                            {
+                                "type": "structured_event",
+                                "session_id": session_id,
+                                "timestamp": ev.get("timestamp", 0),
+                                "sequence": seq,
+                                "event_type": ev.get("event_type", ""),
+                                "agent_id": ev.get("agent_id"),
+                                "round_number": ev.get("round_number", 0),
+                                "data": ev.get("data", {}),
+                            },
+                        )
+            except Exception:
+                pass
+            return result, seq
+
+        events, total = await asyncio.to_thread(_read_subagent_events)
+        return JSONResponse({"events": events, "total": total})
+
     @app.get("/api/sessions/{session_id}/final-answer")
     async def get_final_answer(session_id: str):
         """Get the clean final answer from the saved log file.

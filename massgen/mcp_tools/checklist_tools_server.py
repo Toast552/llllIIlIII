@@ -477,6 +477,7 @@ def evaluate_proposed_improvements(
         )
 
     # Improvement entries
+    _subagents_on = bool(_state.get("subagents_enabled"))
     for cid in failed_criteria:
         criterion_idx = int(cid[1:]) - 1
         criterion_text = items[criterion_idx] if criterion_idx < len(items) else cid
@@ -492,7 +493,7 @@ def evaluate_proposed_improvements(
                 # Keep backward-compat "improvement" key
                 "improvement": norm["plan"],
             }
-            if bool(_state.get("subagents_enabled")) and norm["impact"] in ("structural", "transformative"):
+            if _subagents_on:
                 task_entry["execution"] = {"mode": "delegate", "subagent_type": "builder"}
             else:
                 task_entry["execution"] = {"mode": "inline"}
@@ -507,40 +508,41 @@ def evaluate_proposed_improvements(
             "confirm each preserved item is present in the actual output, and "
             "that passing criteria scores haven't dropped."
         )
-        if bool(_state.get("subagents_enabled")):
-            verify_description += (
-                " If subagents are enabled, delegate this checkpoint to an evaluator or critic "
-                "subagent for explicit before-vs-after comparison and regression checks, "
-                "without revealing which answer is yours."
-            )
-
         verify_task: dict[str, Any] = {
             "type": "verify_preserve",
             "description": verify_description,
             "items": preserve_items,
             "priority": "high",
+            "execution": {"mode": "inline"},
         }
-        if bool(_state.get("subagents_enabled")):
-            # Advisory: evaluator subagent is a strong fit for regression/comparison checks.
-            verify_task["execution"] = {"mode": "delegate", "subagent_type": "evaluator"}
-        else:
-            verify_task["execution"] = {"mode": "inline"}
         task_plan.append(verify_task)
 
+    _base_msg = (
+        f"Improvements validated for {len(failed_criteria)} criteria. "
+        f"{len(normalized_preserve)} criteria marked for preservation. "
+        "Add each item from task_plan to your task plan tool, then "
+        "execute them. Do correctness-critical tasks first when present, "
+        "then the remaining higher-order work. The verify_preserve item at "
+        "the end is a final guardrail — confirm preserved strengths are "
+        "intact and that earlier correctness fixes still hold after later "
+        "changes before submitting. Do not defer blocker correctness fixes "
+        "in favor of easier polish."
+    )
+    if _subagents_on:
+        _base_msg += (
+            "\n\n**DELEGATION REQUIRED**: All improve tasks are marked "
+            "delegate — you MUST spawn builder subagents for them. Do NOT "
+            "implement improvements inline. Group related criteria (those "
+            "touching the same file or surface) into builder subagents, "
+            "max ~2-3 criteria per builder. Primary criteria get their own "
+            "builder. Spawn all builders in parallel via a single "
+            "spawn_subagents call with background=True, then merge their "
+            "outputs before submitting."
+        )
     result: dict[str, Any] = {
         "valid": True,
         "task_plan": task_plan,
-        "message": (
-            f"Improvements validated for {len(failed_criteria)} criteria. "
-            f"{len(normalized_preserve)} criteria marked for preservation. "
-            "Add each item from task_plan to your task plan tool, then "
-            "execute them. Do correctness-critical tasks first when present, "
-            "then the remaining higher-order work. The verify_preserve item at "
-            "the end is a final guardrail — confirm preserved strengths are "
-            "intact and that earlier correctness fixes still hold after later "
-            "changes before submitting. Do not defer blocker correctness fixes "
-            "in favor of easier polish."
-        ),
+        "message": _base_msg,
     }
     if normalized_preserve:
         result["preserve"] = normalized_preserve

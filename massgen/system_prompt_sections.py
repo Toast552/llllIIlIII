@@ -822,6 +822,7 @@ def _build_checklist_gated_decision(
     orchestrator_managed_round_evaluator: bool = False,
     round_evaluator_transformation_pressure: str = "balanced",
     specialized_subagents_available: bool = True,
+    evaluator_available: bool = False,
     enable_evaluator_personas: bool = False,
 ) -> str:
     """Build checklist_gated decision section (tool-gated, hidden threshold).
@@ -992,7 +993,7 @@ def _build_checklist_gated_decision(
             f"- `{iterate_action}`: improve your current work against the criteria. "
             "Your previous answer is **reference material**, not a starting point — "
             "you are free to rebuild, discard, or replace entire sections if the "
-            "evaluator's critique calls for it. Do not limit yourself to patching "
+            "evidence calls for it. Do not limit yourself to patching "
             "what exists. "
             "Use useful ideas from other agents for adjacent integration, but score "
             "your own current work rather than ranking peers.\n"
@@ -1014,19 +1015,22 @@ def _build_checklist_gated_decision(
 - Review peer outputs only where they affect your owned subtask: interfaces,
   contracts, shared assets, visual consistency, or integration boundaries.
 - Gather concrete evidence first (screenshots, renders, tests, manual checks)
-  for your current work and any peer dependency that affects it.
+  for your current work and any peer dependency that affects it."""
+        if evaluator_available:
+            _phase1_scope += """
 - Use evaluators when helpful, but keep the evaluation centered on your current
   work and how well it fits with the latest peer context.
 - Do NOT treat peers as competing final answers to rank.
-
-If no specialized subagents are available: do all evidence gathering and
-qualitative analysis inline.
 
 **CHECKPOINT**: Before moving to Phase 2, confirm your evaluator has returned
 results. Use `list_subagents()` to check — it shows `elapsed_seconds` and
 `seconds_remaining` for each running subagent. Evaluator evidence (screenshots,
 test results, accessibility findings) directly affects your scores. Do NOT
 score without this evidence."""
+        else:
+            _phase1_scope += """
+- Do NOT treat peers as competing final answers to rank.
+- Do all evidence gathering and qualitative analysis inline."""
         _proposal_review = f"""When verdict is `{iterate_action}`, review your current work plus the
 relevant strengths in peer outputs before proposing:
 - What should your next revision preserve?
@@ -1056,7 +1060,8 @@ Use this to fill in the `sources` and `preserve` fields accurately."""
     report_path="<path to your markdown gap report>",
   )"""
         _phase2_scoring = "Score EACH agent per dimension using the evidence from Phase 1. Submit with\n" "per-agent scores format."
-        _phase1_scope = """Spawn **one evaluator** that sees **all candidate answers together**.
+        if evaluator_available:
+            _phase1_scope = """Spawn **one evaluator** that sees **all candidate answers together**.
 Run it in blocking mode (`background=False, refine=False`) because its evidence
 is required before scoring:
 
@@ -1092,14 +1097,20 @@ is required before scoring:
 - Once the evaluator returns, interpret its observations through your own
   quality lens to assign per-agent scores per dimension.
 
-If no specialized subagents are available: do all evidence gathering and
-qualitative analysis inline.
-
 **CHECKPOINT**: Before moving to Phase 2, confirm your evaluator has returned
 results. Use `list_subagents()` to check — it shows `elapsed_seconds` and
 `seconds_remaining` for each running subagent. Evaluator evidence (screenshots,
 test results, accessibility findings) directly affects your scores. Do NOT
 score without this evidence."""
+        else:
+            _phase1_scope = """Gather evidence for all candidate answers yourself before scoring.
+
+- Read all agents' answers and compare cross-agent: what does each answer have \
+that the others lack? What gaps appear in all of them?
+- Gather concrete evidence: screenshots (render to images, then view with \
+`read_media`), test runs, completeness checks, feature verification.
+- Assess creative/craft quality and identify qualitative gaps.
+- Use the evidence to assign per-agent scores per dimension."""
         _proposal_review = f"""When verdict is `{iterate_action}`, review each existing answer before proposing:
 - What does each existing answer do well for each criterion?
 - Which answer has the strongest element for each failing criterion?
@@ -3615,7 +3626,7 @@ through them one by one. If a task is truly infeasible this round, explicitly ma
 in the description with a reason — do not silently leave it pending.
 
 If the plan includes correctness-critical tasks, complete those first. Use explicit \
-correctness criteria when they exist in the task descriptions, evaluator packet, or \
+correctness criteria when they exist in the task descriptions, evaluation evidence, or \
 checklist. Then move to the remaining quality, novelty, or polish tasks. End with the \
 final preserve/regression pass and confirm both that preserved strengths remain and \
 that earlier correctness fixes still pass after later changes.
@@ -3713,7 +3724,9 @@ class EvaluationSection(SystemPromptSection):
         orchestrator_managed_round_evaluator: bool = False,
         round_evaluator_transformation_pressure: str = "balanced",
         specialized_subagents_available: bool = True,
+        evaluator_available: bool = False,
         enable_evaluator_personas: bool = False,
+        auto_trace_analysis: bool = False,
     ):
         super().__init__(
             title="MassGen Coordination",
@@ -3742,7 +3755,9 @@ class EvaluationSection(SystemPromptSection):
         self.orchestrator_managed_round_evaluator = orchestrator_managed_round_evaluator
         self.round_evaluator_transformation_pressure = round_evaluator_transformation_pressure
         self.specialized_subagents_available = specialized_subagents_available
+        self.evaluator_available = evaluator_available
         self.enable_evaluator_personas = enable_evaluator_personas
+        self.auto_trace_analysis = auto_trace_analysis
 
     def build_content(self) -> str:
         # Vote-only mode: agent has exhausted their answer limit
@@ -3913,6 +3928,7 @@ Your goal is to iteratively refine answers until they meet the quality bar.
                     orchestrator_managed_round_evaluator=self.orchestrator_managed_round_evaluator,
                     round_evaluator_transformation_pressure=self.round_evaluator_transformation_pressure,
                     specialized_subagents_available=self.specialized_subagents_available,
+                    evaluator_available=self.evaluator_available,
                     enable_evaluator_personas=self.enable_evaluator_personas,
                 )
                 evaluation_section = f"""{analysis}
@@ -3997,6 +4013,16 @@ CRITICAL: New answers must be SUBSTANTIALLY different from existing answers.
 - Employ different tools or techniques
 - Provide significantly more depth or novel perspectives
 - If you cannot provide a truly novel solution, vote instead"""
+
+        if self.auto_trace_analysis and self.has_existing_answers:
+            evaluation_section += """
+
+**TRACE ANALYSIS (round 2+):**
+Before starting work this round, spawn an `execution_trace_analyzer` subagent \
+to analyze your previous round's execution trace. Give it your execution trace \
+from the previous round. Read its findings — they contain specific DO/DON'T \
+guidance based on what worked and what was wasted effort. Apply those learnings \
+to this round's execution strategy."""
 
         return f"""You are evaluating answers from multiple agents for final response to a message.
 Different agents may have different builtin tools and capabilities.
@@ -4942,6 +4968,7 @@ class SubagentSection(SystemPromptSection):
         attached = self._build_attached_subagents_section()
         specialized_names = {t.name.lower() for t in self.specialized_subagents}
         specialized_guidance = ""
+        evaluator_delegation_guidance = ""
         if specialized_names:
             evaluator_guidance = ""
             round_evaluator_guidance = ""
@@ -5012,6 +5039,33 @@ If that checklist is present, treat it as required inputs for your task brief.
 {regression_guard_guidance}
 {novelty_quality_guidance}
 """
+            if "evaluator" in specialized_names:
+                evaluator_delegation_guidance = """\
+**EVALUATION DELEGATION (blocking evaluator pattern):**
+When your output needs testing or evaluation that involves procedural tool use, delegate it
+to an evaluator subagent and wait for its report before scoring or proposing improvements.
+Spawn with `background=False, refine=False` for evaluator tasks.
+
+Subagent handles (procedural observations):
+- High-volume batch workflows where execution is mostly mechanical and repeatable
+- Serving a website and capturing evidence (screenshots, video recordings, etc.), \
+running Playwright tests, using read_media
+- Executing test suites, linters, or validation scripts against generated code
+- Running benchmarks, profiling, or performance measurements
+- Checking file integrity, link resolution, or cross-references in documents
+- Comparing output against specs or acceptance criteria with automated tools
+
+You handle (analytical judgment):
+- Analyzing previous answers and peer approaches in depth
+- Making quality judgments and deciding what to improve next
+- Synthesizing insights from multiple sources into a coherent strategy
+- Prioritizing which gaps matter most and what to build next
+
+The subagent returns a descriptive report of findings and observations — what it measured,
+what passed, what failed, what it saw. It may include suggestions, but treat those as optional
+input. Trust its observations and measurements. Keep your judgment as the source of truth for
+quality and priorities, since you have the full context and the subagent may run on a simpler \
+model."""
         return f"""{attached}
 # Subagent Delegation
 
@@ -5080,29 +5134,7 @@ Subagents are useful helpers but have limitations:
 
 {specialized_guidance}
 
-**EVALUATION DELEGATION (blocking evaluator pattern):**
-When your output needs testing or evaluation that involves procedural tool use, delegate it
-to an evaluator subagent and wait for its report before scoring or proposing improvements.
-Spawn with `background=False, refine=False` for evaluator tasks.
-
-Subagent handles (procedural observations):
-- High-volume batch workflows where execution is mostly mechanical and repeatable
-- Serving a website and capturing evidence (screenshots, video recordings, etc.), running Playwright tests, using read_media
-- Executing test suites, linters, or validation scripts against generated code
-- Running benchmarks, profiling, or performance measurements
-- Checking file integrity, link resolution, or cross-references in documents
-- Comparing output against specs or acceptance criteria with automated tools
-
-You handle (analytical judgment):
-- Analyzing previous answers and peer approaches in depth
-- Making quality judgments and deciding what to improve next
-- Synthesizing insights from multiple sources into a coherent strategy
-- Prioritizing which gaps matter most and what to build next
-
-The subagent returns a descriptive report of findings and observations — what it measured,
-what passed, what failed, what it saw. It may include suggestions, but treat those as optional
-input. Trust its observations and measurements. Keep your judgment as the source of truth for
-quality and priorities, since you have the full context and the subagent may run on a simpler model.
+{evaluator_delegation_guidance}
 
 **AVOID SUBAGENTS FOR:**
 - Simple, quick operations you can do directly (overhead not worth it)
@@ -5134,7 +5166,7 @@ quality and priorities, since you have the full context and the subagent may run
 When you spawn subagents:
 1. **Use `background=True` for independent builder batches and other async-friendly work** —
    this is the preferred mode when you can keep making progress while they run.
-2. **Use `background=False` only for evaluator work or a true hard blocker** —
+2. **Use `background=False` only for blocking precondition work or a true hard blocker** —
    cases where your very next step is fully blocked on the returned result.
 3. **Do NOT say "I will now run subagents"** and submit an answer before collecting results.
 4. **Only after receiving results** should you integrate outputs and submit your answer.
@@ -5224,7 +5256,7 @@ spawn_subagents(
 
 **background parameter:**
 - `background=False` **(default)**: Blocking mode. Wait for results before proceeding.
-  Use this for evaluator/precondition tasks whose outputs are required for your next step.
+  Use this for blocking precondition tasks whose outputs are required for your next step.
 - `background=True`: Spawn in background and continue working asynchronously.
   Use this only for independent tasks; results are often auto-injected on a later tool call.
   Use `list_subagents()` to check status and discover workspace paths.
