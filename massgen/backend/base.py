@@ -353,7 +353,7 @@ class LLMBackend(ABC):
             "enable_novelty_on_iteration",  # Coordination-only novelty task injection toggle
             "enable_execution_trace_analyzer",  # Coordination-only execution trace analysis toggle
             "novelty_injection",  # Novelty pressure level (none/gentle/moderate/aggressive)
-            "improvements",  # propose_improvements gate settings (orchestrator/checklist only)
+            "improvements",  # draft_approach gate settings (orchestrator/checklist only)
             "learning_capture_mode",  # Learning capture timing (round/verification_and_final_only/final_only)
             "disable_final_only_round_capture_fallback",  # Coordination-only fallback control for final_only+skip_final_presentation
             # Multimodal tools configuration (handled by CustomToolAndMCPBackend)
@@ -534,16 +534,16 @@ class LLMBackend(ABC):
         if hasattr(self, "_tool_execution_metrics"):
             tool_calls = len(self._tool_execution_metrics) - self._round_start_tool_count
 
-        # Calculate context window usage percentage
+        # Calculate context window usage percentage using this round's input tokens
         context_window_size = 0
         context_usage_pct = 0.0
+        round_input_tokens = self.token_usage.input_tokens - self._round_start_snapshot["input_tokens"]
         model = self.config.get("model", "")
         pricing = self.token_calculator.get_model_pricing(self.get_provider_name(), model)
         if pricing and pricing.context_window:
             context_window_size = pricing.context_window
-            current_input = self.token_usage.input_tokens
             if context_window_size > 0:
-                context_usage_pct = (current_input / context_window_size) * 100
+                context_usage_pct = (round_input_tokens / context_window_size) * 100
 
         # Determine token source: "api" if we got real data, "estimated" if we used fallback
         token_source = "estimated" if self._round_used_fallback_estimation else "api"
