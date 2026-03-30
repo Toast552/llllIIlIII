@@ -11,6 +11,7 @@ Usage:
     python -m massgen.cli --build-config
 """
 
+import copy
 import os
 from pathlib import Path
 from typing import Any
@@ -52,8 +53,6 @@ DOCKER_BACKEND_DEFAULTS: dict[str, Any] = {
         ],
     },
     "shared_tools_directory": "shared_tools",
-    "auto_discover_custom_tools": True,
-    "exclude_custom_tools": ["_computer_use"],
 }
 
 
@@ -5297,11 +5296,13 @@ class ConfigBuilder:
             tools = tools or {}
             if use_docker:
                 # Full Docker mode with code-based tools, command execution
+                # deepcopy prevents yaml.dump from emitting anchors/aliases
+                # when multiple agents share the same nested dict objects
                 backend = {
                     "type": agent_type,
                     "model": model,
                     "cwd": "workspace",
-                    **DOCKER_BACKEND_DEFAULTS,
+                    **copy.deepcopy(DOCKER_BACKEND_DEFAULTS),
                 }
             else:
                 # Local mode - file operations only, no command execution
@@ -5361,64 +5362,38 @@ class ConfigBuilder:
             agents.append(agent)
 
         # Build orchestrator config
-        if use_docker:
-            # Full orchestrator config with skills and task planning
-            orchestrator_config = {
-                "snapshot_storage": "snapshots",
-                "agent_temporary_workspace": "temp_workspaces",
-                "voting_sensitivity": "checklist_gated",
-                "voting_threshold": 3,
-                "max_new_answers_per_agent": 5,
-                # Fairness defaults (enabled across all coordination modes)
-                "fairness_enabled": True,
-                "fairness_lead_cap_answers": 2,
-                "max_midstream_injections_per_round": 2,
-                # Multimodal tools enabled for all agents
-                "enable_multimodal_tools": True,
-                # Default generation backends (agents can override)
-                "image_generation_backend": "openai",  # OpenAI responses image gen
-                "video_generation_backend": "openai",  # OpenAI Sora2
-                "audio_generation_backend": "openai",  # OpenAI TTS
-                "coordination": {
-                    "max_orchestration_restarts": 0,  # Disabled pending MAS-268 fix
-                    "learning_capture_mode": "verification_and_final_only",
-                    "use_skills": True,
-                    "skills_directory": ".agent/skills",
-                    "enable_agent_task_planning": True,
-                    "task_planning_filesystem_mode": True,
-                    "enable_memory_filesystem_mode": True,
-                    "write_mode": "auto",
-                },
-            }
-        else:
-            # Local mode still enables built-in skills even without Docker.
-            orchestrator_config = {
-                "snapshot_storage": "snapshots",
-                "agent_temporary_workspace": "temp_workspaces",
-                "voting_sensitivity": "checklist_gated",
-                "voting_threshold": 3,
-                "max_new_answers_per_agent": 5,
-                # Fairness defaults (enabled across all coordination modes)
-                "fairness_enabled": True,
-                "fairness_lead_cap_answers": 2,
-                "max_midstream_injections_per_round": 2,
-                # Multimodal tools enabled for all agents
-                "enable_multimodal_tools": True,
-                # Default generation backends (agents can override)
-                "image_generation_backend": "openai",  # OpenAI image generation
-                "video_generation_backend": "openai",  # OpenAI video generation
-                "audio_generation_backend": "openai",  # OpenAI TTS
-                "coordination": {
-                    "max_orchestration_restarts": 0,  # Disabled pending MAS-268 fix
-                    "learning_capture_mode": "verification_and_final_only",
-                    "use_skills": True,
-                    "skills_directory": ".agent/skills",
-                    "enable_agent_task_planning": True,
-                    "task_planning_filesystem_mode": True,
-                    "enable_memory_filesystem_mode": True,
-                    "write_mode": "auto",
-                },
-            }
+        # Shared orchestrator defaults for both docker and local modes
+        orchestrator_config = {
+            "snapshot_storage": "snapshots",
+            "agent_temporary_workspace": "temp_workspaces",
+            "voting_sensitivity": "checklist_gated",
+            "voting_threshold": 3,
+            "max_new_answers_per_agent": 5,
+            # Fairness defaults (enabled across all coordination modes)
+            "fairness_enabled": True,
+            "fairness_lead_cap_answers": 2,
+            "max_midstream_injections_per_round": 2,
+            # Peer update batching for cleaner agent flow
+            "defer_peer_updates_until_restart": True,
+            "allow_midstream_peer_updates_before_checklist_submit": True,
+            # Multimodal tools enabled for all agents
+            "enable_multimodal_tools": True,
+            # Default generation backends (agents can override)
+            "image_generation_backend": "openai",
+            "video_generation_backend": "openai",
+            "audio_generation_backend": "openai",
+            "coordination": {
+                "max_orchestration_restarts": 0,  # Disabled pending MAS-268 fix
+                "learning_capture_mode": "verification_and_final_only",
+                "fast_iteration_mode": True,
+                "use_skills": True,
+                "skills_directory": ".agent/skills",
+                "enable_agent_task_planning": True,
+                "task_planning_filesystem_mode": True,
+                "enable_memory_filesystem_mode": True,
+                "write_mode": "auto",
+            },
+        }
 
         # Always set context_paths to avoid runtime prompt
         # Priority: context_paths (new) > context_path (deprecated) > empty list

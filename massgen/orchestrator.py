@@ -13472,7 +13472,10 @@ Your answer:"""
         tracer = get_tracer()
         current_round = self.coordination_tracker.get_agent_round(agent_id)
         context_labels = self.coordination_tracker.get_agent_context_labels(agent_id)
-        round_type = "voting" if answers else "initial_answer"
+        if self._is_decomposition_mode():
+            round_type = "decomposition_refinement" if answers else "decomposition_initial"
+        else:
+            round_type = "voting" if answers else "initial_answer"
 
         # Emit round_start event for UI display (round banners)
         # Use _agent_display_round (monotonically increasing per agent) so every
@@ -14764,6 +14767,21 @@ Your answer:"""
                             except Exception:
                                 pass  # Best-effort TUI notification
 
+                # Filter workflow tool calls that are not allowed in this round.
+                # This enforces vote-only/stop-only modes at execution time in case a model
+                # emits stale tool names from previous context.  Must run BEFORE vote
+                # deduplication so disallowed vote calls (e.g. from text-parsing fallback
+                # in decomposition mode) are removed before they pollute vote_calls.
+                (
+                    tool_calls,
+                    disallowed_workflow_calls,
+                    disallowed_workflow_names,
+                ) = self._split_disallowed_workflow_tool_calls(
+                    agent,
+                    tool_calls,
+                    internal_tool_names,
+                )
+
                 # Handle multiple vote calls - take the last vote (agent's final decision)
                 vote_calls = [tc for tc in tool_calls if agent.backend.extract_tool_name(tc) == "vote"]
                 if len(vote_calls) > 1:
@@ -14782,19 +14800,6 @@ Your answer:"""
                     logger.info(
                         f"[Orchestrator] Agent {agent_id} made {num_votes} votes - using last vote: {final_voted_agent}",
                     )
-
-                # Filter workflow tool calls that are not allowed in this round.
-                # This enforces vote-only/stop-only modes at execution time in case a model
-                # emits stale tool names from previous context.
-                (
-                    tool_calls,
-                    disallowed_workflow_calls,
-                    disallowed_workflow_names,
-                ) = self._split_disallowed_workflow_tool_calls(
-                    agent,
-                    tool_calls,
-                    internal_tool_names,
-                )
                 if disallowed_workflow_calls:
                     disallowed_unique = sorted(set(disallowed_workflow_names))
                     allowed_workflow_unique = sorted(name for name in internal_tool_names if name)

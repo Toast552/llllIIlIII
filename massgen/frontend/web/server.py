@@ -6046,10 +6046,12 @@ def _apply_agent_overrides(config: dict, overrides: dict) -> None:
 
 def _apply_docker_override(config: dict, use_docker: bool) -> None:
     """Toggle docker execution mode via per-agent backend keys."""
+    import copy
+
     for agent in config.get("agents", []):
         backend = agent.setdefault("backend", {})
         if use_docker:
-            backend.update(DOCKER_BACKEND_DEFAULTS)
+            backend.update(copy.deepcopy(DOCKER_BACKEND_DEFAULTS))
         else:
             for key in DOCKER_BACKEND_DEFAULTS:
                 backend.pop(key, None)

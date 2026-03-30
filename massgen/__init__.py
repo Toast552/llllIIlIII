@@ -537,6 +537,13 @@ async def run(
         if output_file:
             run_kwargs["output_file"] = output_file
 
+        # Extract timeout config from config dict (matches CLI path in cli.py)
+        timeout_settings = config_dict.get("timeout_settings", {}) if config_dict else {}
+        if timeout_settings:
+            from .agent_config import TimeoutConfig
+
+            run_kwargs["timeout_config"] = TimeoutConfig(**timeout_settings)
+
         # Run the query - use history-aware version if conversation history provided
         if conversation_history:
             # Use run_question_with_history for multi-turn context

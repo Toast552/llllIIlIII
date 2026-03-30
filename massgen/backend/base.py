@@ -1103,8 +1103,18 @@ def extract_structured_response(text: str) -> dict[str, Any] | None:
         return None
 
 
-def parse_workflow_tool_calls(text: str) -> list[dict[str, Any]]:
+def parse_workflow_tool_calls(
+    text: str,
+    allowed_tool_names: set[str] | None = None,
+) -> list[dict[str, Any]]:
     """Parse workflow tool calls from accumulated text output.
+
+    Args:
+        text: Accumulated text from the agent response.
+        allowed_tool_names: If provided, only tool calls whose name is in this
+            set are returned.  Calls for tools not in the set are silently
+            dropped.  When ``None`` (default), all parsed calls are returned
+            for backwards compatibility.
 
     Returns a list of tool-call dicts in the standard format expected by
     the orchestrator::
@@ -1118,6 +1128,8 @@ def parse_workflow_tool_calls(text: str) -> list[dict[str, Any]]:
         tool_name = structured.get("tool_name")
         arguments = structured.get("arguments", {})
         if tool_name and isinstance(arguments, dict):
+            if allowed_tool_names is not None and tool_name not in allowed_tool_names:
+                return []
             return [
                 {
                     "id": f"call_{uuid.uuid4().hex[:8]}",
@@ -1136,6 +1148,8 @@ def parse_workflow_tool_calls(text: str) -> list[dict[str, Any]]:
     for pattern in patterns:
         for match in re.finditer(pattern, text, re.IGNORECASE):
             tool_name = match.group(1)
+            if allowed_tool_names is not None and tool_name not in allowed_tool_names:
+                continue
             try:
                 arguments = json.loads(match.group(2))
                 sig = (tool_name, json.dumps(arguments, sort_keys=True))

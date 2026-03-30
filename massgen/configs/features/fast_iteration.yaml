@@ -1,4 +1,4 @@
-# uv run massgen --config @examples/features/fast_iteration.yaml "Write a website about gophers."
+# uv run massgen --config @examples/features/fast_iteration.yaml "Create an svg of an AI agent coding."
 
 agents:
 - id: agent_a
