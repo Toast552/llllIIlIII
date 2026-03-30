@@ -73,8 +73,8 @@ orchestrator:
     task_planning_filesystem_mode: true
     enable_memory_filesystem_mode: true
     # for pre-collab eval criteria generation
-    # evaluation_criteria_generator:
-    #    enabled: true
+    evaluation_criteria_generator:
+       enabled: true
     write_mode: auto
   context_paths: []
 timeout_settings:
