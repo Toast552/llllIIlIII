@@ -31,7 +31,7 @@ class TestDefaultCriteriaEPrefix:
         criteria = get_default_criteria(has_changedoc=True)
         for c in criteria:
             assert c.id.startswith("E")
-        assert criteria[-1].id == "E5"
+        assert criteria[-1].id == "E4"
 
 
 class TestItemCategoriesInState:
@@ -67,12 +67,13 @@ class TestItemCategoriesInState:
             assert _CHECKLIST_ITEM_CATEGORIES[c.id] == c.category
 
     def test_changedoc_categories_have_4_items(self):
-        """Changedoc categories must have 4 items, all 'standard'."""
+        """Changedoc categories must have 4 items with E3 as primary."""
         from massgen.system_prompt_sections import _CHECKLIST_ITEM_CATEGORIES_CHANGEDOC
 
         assert len(_CHECKLIST_ITEM_CATEGORIES_CHANGEDOC) == 4
+        assert _CHECKLIST_ITEM_CATEGORIES_CHANGEDOC["E3"] == "primary"
         standard_count = sum(1 for v in _CHECKLIST_ITEM_CATEGORIES_CHANGEDOC.values() if v == "standard")
-        assert standard_count == 4
+        assert standard_count == 3
 
 
 class TestDynamicCriteriaInToolSchema:
@@ -157,7 +158,7 @@ class TestCustomItemsInSystemMessage:
 
         content = section.build_content()
         # Should contain default GEPA items
-        assert "directly achieves what was asked for" in content or "requirements are met" in content
+        assert "requirements fidelity" in content.lower() or "requirements" in content.lower()
 
 
 class TestCriteriaCountValidation:
@@ -240,7 +241,7 @@ class TestAnalysisDynamicCriteriaLabels:
         from massgen.system_prompt_sections import _build_checklist_analysis
 
         analysis = _build_checklist_analysis()
-        assert "goal alignment" in analysis
+        assert "requirements fidelity" in analysis
         assert "correctness" in analysis
 
     def test_changedoc_analysis_uses_custom_items(self):
@@ -259,7 +260,7 @@ class TestAnalysisDynamicCriteriaLabels:
         from massgen.system_prompt_sections import _build_changedoc_checklist_analysis
 
         analysis = _build_changedoc_checklist_analysis()
-        assert "goal alignment" in analysis
+        assert "spec fidelity" in analysis
         assert "changedoc quality" not in analysis
 
     def test_evaluation_section_threads_custom_items_to_analysis(self):

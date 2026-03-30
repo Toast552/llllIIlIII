@@ -73,15 +73,48 @@ class GeneratedCriterion:
 
 # Static defaults inspired by GEPA's diagnostic structure.
 # These replace the legacy abstract T1-T4 items with concrete defaults
-# that work for any task type.
+# that work for any task type.  Designed following the same principles the
+# criteria generator prompt teaches:
+#   - Opinionated quality definitions, not dimension labels
+#   - One PRIMARY criterion (where default model behavior is weakest)
+#   - Distinct, non-overlapping dimensions
+#   - Per-part quality assessment (weakest part, not average)
 _DEFAULT_CRITERIA_TEXTS = [
-    ("The output directly achieves what was asked for — requirements are met," " not just approximated. Missing or partially implemented requirements" " count as failures."),
-    ("No broken functionality, errors, or obvious defects. Everything that's" " present works correctly. A working output with fewer features beats a" " broken one with more."),
-    ("The output is thorough — no significant gaps, thin sections, or" " placeholder content. Each component has enough depth to be genuinely" " useful, not just present."),
-    ("The output shows care beyond correctness — thoughtful choices," " consistent style, attention to edge cases, or creative elements that" " distinguish it from adequate work."),
+    (
+        "Requirements fidelity: The output achieves what was specifically asked"
+        " for — each stated requirement is met as described, not approximated or"
+        " reinterpreted. Missing requirements, partially implemented features, or"
+        " creative substitutions for what was actually requested count as failures."
+    ),
+    (
+        "Multi-level correctness: The output works correctly as experienced, not"
+        " just as inspected. Structural correctness (valid format, runnable code,"
+        " proper syntax), content correctness (accurate information, right"
+        " computations), and experiential correctness (renders properly,"
+        " interactions work, no visual defects) are all required. A file that"
+        " opens but displays incorrectly is wrong, not merely unpolished."
+    ),
+    (
+        "Per-part depth: Every significant component of the output independently"
+        " meets a quality bar — no section is filler, placeholder, or carried by"
+        " the strength of others. Evaluate the weakest part, not the average. A"
+        " brilliant introduction with thin body sections, or a strong"
+        " implementation with stub tests, fails this criterion."
+    ),
+    (
+        "Intentional craft: The output shows evidence of deliberate, thoughtful"
+        " choices — not minimum viable execution assembled from defaults."
+        " Structure, style, and detail reflect someone who cared about the"
+        " result, not someone who satisfied requirements and stopped. A"
+        " knowledgeable person in the domain would recognize quality, not just"
+        " correctness."
+    ),
 ]
 
-_DEFAULT_CATEGORIES = ["standard", "standard", "standard", "standard"]
+# E3 (per-part depth) is PRIMARY — this is where default model behavior is
+# weakest.  Models produce uneven output where some parts are strong and
+# others are filler, placeholder, or superficial.
+_DEFAULT_CATEGORIES = ["standard", "standard", "primary", "standard"]
 
 # ---------------------------------------------------------------------------
 # Domain-specific criteria presets
@@ -528,27 +561,15 @@ def get_criteria_for_preset(preset: str) -> list[GeneratedCriterion]:
     return [GeneratedCriterion(id=f"E{i + 1}", text=text, category=category) for i, (text, category) in enumerate(_CRITERIA_PRESETS[preset])]
 
 
-# Quality/craft criterion — always appended as the last criterion.
-# Ensures evaluators assess whether the output shows intentional, thoughtful
-# choices beyond functional correctness. Without this, agents satisfy all
-# requirements while producing output that feels like a minimum viable version.
-_QUALITY_CRAFT_TEXT = (
-    "The output reflects intentional, thoughtful choices — not just"
-    " minimum viable execution. A knowledgeable person in this domain"
-    " would recognize craft, not just correctness. The whole feels"
-    " cohesive and considered, not assembled from adequate parts."
-)
-
-
 def get_default_criteria(has_changedoc: bool = False) -> list[GeneratedCriterion]:
     """Return static default evaluation criteria.
 
     These are used when generation is disabled or fails. They are concrete,
-    GEPA-inspired defaults that work for any task type.
+    GEPA-inspired defaults that work for any task type: requirements fidelity,
+    multi-level correctness, per-part depth (primary), and intentional craft.
 
-    Always appends a quality/craft criterion. The ``has_changedoc`` flag is
-    retained for call-site compatibility but does not alter the fallback
-    defaults.
+    The ``has_changedoc`` flag is retained for call-site compatibility but
+    does not alter the fallback defaults.
 
     Args:
         has_changedoc: Retained for compatibility with existing call sites.
@@ -556,7 +577,7 @@ def get_default_criteria(has_changedoc: bool = False) -> list[GeneratedCriterion
     Returns:
         List of GeneratedCriterion with E-prefix IDs.
     """
-    criteria = [
+    return [
         GeneratedCriterion(
             id=f"E{i + 1}",
             text=text,
@@ -566,17 +587,6 @@ def get_default_criteria(has_changedoc: bool = False) -> list[GeneratedCriterion
             zip(_DEFAULT_CRITERIA_TEXTS, _DEFAULT_CATEGORIES),
         )
     ]
-
-    # Always append quality/craft criterion
-    criteria.append(
-        GeneratedCriterion(
-            id=f"E{len(criteria) + 1}",
-            text=_QUALITY_CRAFT_TEXT,
-            category="standard",
-        ),
-    )
-
-    return criteria
 
 
 def _parse_criteria_response(
@@ -959,6 +969,7 @@ Generate evaluation criteria now for the task above."""
         voting_sensitivity: str | None = None,
         voting_threshold: int | None = None,
         has_planning_spec_context: bool = False,
+        fast_iteration_mode: bool = False,
     ) -> list[GeneratedCriterion]:
         """Generate criteria via a subagent run.
 
@@ -1031,6 +1042,8 @@ Generate evaluation criteria now for the task above."""
                 coordination["voting_sensitivity"] = voting_sensitivity
             if voting_threshold is not None:
                 coordination["voting_threshold"] = voting_threshold
+            if fast_iteration_mode:
+                coordination["fast_iteration_mode"] = True
 
             subagent_config = SubagentOrchestratorConfig(
                 enabled=True,

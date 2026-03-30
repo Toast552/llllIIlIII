@@ -1000,6 +1000,7 @@ class ConfigValidator:
                     "orchestrator_managed_round_evaluator",
                     "round_evaluator_refine",
                     "round_evaluator_skip_synthesis",
+                    "fast_iteration_mode",
                 ]
                 for field_name in boolean_fields:
                     if field_name in coordination:

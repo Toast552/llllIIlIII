@@ -128,6 +128,7 @@ Requirements:
         voting_sensitivity: str | None = None,
         voting_threshold: int | None = None,
         has_planning_spec_context: bool = False,
+        fast_iteration_mode: bool = False,
     ) -> dict[str, str]:
         """Generate subtask assignments via a MassGen subagent call.
 
@@ -149,6 +150,8 @@ Requirements:
                 the pre-collaboration subagent coordination config.
             has_planning_spec_context: Whether planning/spec context is mounted
                 and should be explicitly referenced by prompt guidance.
+            fast_iteration_mode: Whether to enable fast iteration mode for
+                the pre-collaboration subagent coordination.
 
         Returns:
             Dictionary mapping agent_id to subtask description
@@ -232,6 +235,8 @@ Requirements:
                 coordination["voting_sensitivity"] = voting_sensitivity
             if voting_threshold is not None:
                 coordination["voting_threshold"] = voting_threshold
+            if fast_iteration_mode:
+                coordination["fast_iteration_mode"] = True
 
             subagent_orch_config = SubagentOrchestratorConfig(
                 enabled=True,

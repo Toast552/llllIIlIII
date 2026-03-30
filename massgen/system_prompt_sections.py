@@ -128,44 +128,85 @@ A good first draft is rarely perfect. Look for what can be *better*, not just wh
 # ---------------------------------------------------------------------------
 
 _CHECKLIST_ITEMS = [
-    ("The output directly achieves what was asked for — requirements are met," " not just approximated. Missing or partially implemented requirements" " count as failures."),
-    ("No broken functionality, errors, or obvious defects. Everything that's" " present works correctly. A working output with fewer features beats a" " broken one with more."),
-    ("The output is thorough — no significant gaps, thin sections, or" " placeholder content. Each component has enough depth to be genuinely" " useful, not just present."),
-    ("The output shows care beyond correctness — thoughtful choices," " consistent style, attention to edge cases, or creative elements that" " distinguish it from adequate work."),
     (
-        "The output reflects intentional, thoughtful choices — not just"
-        " minimum viable execution. A knowledgeable person in this domain"
-        " would recognize craft, not just correctness. The whole feels"
-        " cohesive and considered, not assembled from adequate parts."
+        "Requirements fidelity: The output achieves what was specifically asked"
+        " for — each stated requirement is met as described, not approximated or"
+        " reinterpreted. Missing requirements, partially implemented features, or"
+        " creative substitutions for what was actually requested count as failures."
+    ),
+    (
+        "Multi-level correctness: The output works correctly as experienced, not"
+        " just as inspected. Structural correctness (valid format, runnable code,"
+        " proper syntax), content correctness (accurate information, right"
+        " computations), and experiential correctness (renders properly,"
+        " interactions work, no visual defects) are all required. A file that"
+        " opens but displays incorrectly is wrong, not merely unpolished."
+    ),
+    (
+        "Per-part depth: Every significant component of the output independently"
+        " meets a quality bar — no section is filler, placeholder, or carried by"
+        " the strength of others. Evaluate the weakest part, not the average. A"
+        " brilliant introduction with thin body sections, or a strong"
+        " implementation with stub tests, fails this criterion."
+    ),
+    (
+        "Intentional craft: The output shows evidence of deliberate, thoughtful"
+        " choices — not minimum viable execution assembled from defaults."
+        " Structure, style, and detail reflect someone who cared about the"
+        " result, not someone who satisfied requirements and stopped. A"
+        " knowledgeable person in the domain would recognize quality, not just"
+        " correctness."
     ),
 ]
 
-# Category tags for default checklist items — all "standard" (must-pass).
+# Category tags for default checklist items.
+# E3 (per-part depth) is PRIMARY — this is where default model behavior is
+# weakest. Models produce uneven output where some parts are strong and others
+# are filler, placeholder, or superficial.
 _CHECKLIST_ITEM_CATEGORIES = {
     "E1": "standard",
     "E2": "standard",
-    "E3": "standard",
+    "E3": "primary",
     "E4": "standard",
-    "E5": "standard",
 }
 
 _CHECKLIST_ITEMS_CHANGEDOC = [
-    ("The output directly achieves what was asked for — requirements are met," " not just approximated. Missing or partially implemented requirements" " count as failures."),
-    ("No broken functionality, errors, or obvious defects. Everything that's" " present works correctly. A working output with fewer features beats a" " broken one with more."),
     (
-        "The output is complete enough to be genuinely useful — no major"
-        " missing pieces, placeholder-only sections, or obvious"
-        " unaddressed chunks remain. Further polish or expansion alone"
-        " is not a failure."
+        "Spec fidelity: The output implements what the changedoc specifies —"
+        " each goal and requirement is addressed as described, not approximated"
+        " or reinterpreted. Missing goals, partially implemented requirements,"
+        " or creative substitutions for what was specified count as failures."
     ),
-    ("The output shows care beyond correctness — thoughtful choices," " consistent style, attention to edge cases, or creative elements that" " distinguish it from adequate work."),
+    (
+        "Multi-level correctness: The output works correctly as experienced, not"
+        " just as inspected. Structural correctness (valid format, runnable code,"
+        " proper syntax), content correctness (accurate information, right"
+        " computations), and experiential correctness (renders properly,"
+        " interactions work, no visual defects) are all required. A deliverable"
+        " that passes structural checks but fails experientially is wrong, not"
+        " merely unpolished."
+    ),
+    (
+        "Per-part depth: Every significant component independently meets a"
+        " quality bar — no section is filler, placeholder, or carried by the"
+        " strength of others. Evaluate the weakest part, not the average. A"
+        " brilliant first section with thin remaining sections, or strong core"
+        " logic with stub supporting pieces, fails this criterion."
+    ),
+    (
+        "Intentional craft: The output shows evidence of deliberate choices —"
+        " not minimum viable execution assembled from defaults. Structure,"
+        " style, and detail reflect care about the result. A knowledgeable"
+        " person in the domain would recognize quality, not just correctness."
+    ),
 ]
 
-# Category tags for changedoc checklist items — all "standard" (must-pass).
+# Category tags for changedoc checklist items.
+# E3 (per-part depth) is PRIMARY — same rationale as the generic set.
 _CHECKLIST_ITEM_CATEGORIES_CHANGEDOC = {
     "E1": "standard",
     "E2": "standard",
-    "E3": "standard",
+    "E3": "primary",
     "E4": "standard",
 }
 
@@ -249,9 +290,11 @@ def _build_criteria_failure_bullets(
             lines.append(f"- **{eid}{primary} ({label}{vb_hint})**: Gaps or failures against this criterion?{anti_hint}")
         return "\n".join(lines)
     return (
-        "- **E1 (goal alignment)**: Requirements missing or only partially met?\n"
-        "- **E2 (correctness)**: Broken behavior, wrong results, regressions?\n"
-        "- **E3+ (remaining criteria)**: Quality gaps against each remaining criterion?"
+        "- **E1 (requirements fidelity)**: Requirements missing or only partially met?\n"
+        "- **E2 (multi-level correctness)**: Broken behavior, wrong results, experiential defects?\n"
+        "- **E3 [PRIMARY] (per-part depth)**: Any section that is filler, placeholder, or"
+        " significantly weaker than others?\n"
+        "- **E4 (intentional craft)**: Quality gaps — minimum viable execution vs deliberate choices?"
     )
 
 
@@ -268,17 +311,18 @@ def _build_changedoc_failure_bullets(
     if custom_checklist_items:
         return _build_criteria_failure_bullets(custom_checklist_items, item_verify_by)
     return (
-        "- **E1 (goal alignment)**: Output failures — what doesn't work? What produces wrong\n"
-        "  results? What would a demanding user be disappointed by?\n"
-        "- **E2 (correctness)**: Regression failures — does the deliverable actually work\n"
-        "  end-to-end? Are features from earlier rounds still functioning? A working output\n"
-        "  with fewer features beats a broken output with more.\n"
-        "- **E3 (output completeness)**: Where is the output still obviously partial,\n"
-        "  placeholder-heavy, or missing important chunks a demanding user would expect?\n"
+        "- **E1 (spec fidelity)**: Output failures — what doesn't match the changedoc spec?\n"
+        "  What goals are missing or only partially implemented?\n"
+        "- **E2 (multi-level correctness)**: Regression failures — does the deliverable\n"
+        "  actually work end-to-end as experienced? Structural, content, and experiential\n"
+        "  correctness all checked. A working output with fewer features beats a broken\n"
+        "  output with more.\n"
+        "- **E3 [PRIMARY] (per-part depth)**: Which sections are filler, placeholder, or\n"
+        "  significantly weaker than others? Evaluate the weakest part, not the average.\n"
         "- **Changedoc / alignment (supporting evidence)**: Which decisions have thin rationale?\n"
         "  Which Implementation fields are vague, incorrect, or fabricated? Where did the\n"
         "  code drift from documented decisions, or where were important choices never recorded?\n"
-        "- **E4+ (remaining criteria)**: Quality gaps against each remaining criterion?"
+        "- **E4 (intentional craft)**: Quality gaps — minimum viable execution vs deliberate choices?"
     )
 
 
@@ -824,6 +868,7 @@ def _build_checklist_gated_decision(
     specialized_subagents_available: bool = True,
     evaluator_available: bool = False,
     enable_evaluator_personas: bool = False,
+    fast_iteration_mode: bool = False,
 ) -> str:
     """Build checklist_gated decision section (tool-gated, hidden threshold).
 
@@ -1317,14 +1362,24 @@ qualitative analysis inline, but keep the same parent-owned checklist flow.
 present and use it in your reasoning. Round-evaluator evidence and packet
 fields directly affect your scores. Do NOT score without this evidence."""
 
-    return f"""---
+    # --- Build conditional sections based on fast_iteration_mode ---
 
-## Decision
+    if fast_iteration_mode:
+        _substantiveness_section = f"""\
+### Quick Impact Check
 
-Now decide: call `{iterate_action}` or `{terminate_action}`.
+Before iterating, ask: **is the improvement I'm planning a real gap fix, or polish \
+that the next round will catch anyway?**
 
-{_decision_intro}
+- If the answer is missing a core requirement or is broken → fix it and submit.
+- If the answer works but could be better → submit now and note the gap. The next \
+round will see gaps across all agents' answers and address them with full context.
+- Do not loop internally to move a score from 7 to 8. Submit and let the system iterate.
 
+If no planned changes fix a real gap, \
+{"stopping may be the better choice." if score_current_work_only else "voting may be the better choice."}"""
+    else:
+        _substantiveness_section = f"""\
 ### Substantiveness Test
 
 Classify each planned change as:
@@ -1353,8 +1408,34 @@ Classify each planned change as:
 
 If no planned changes are TRANSFORMATIVE or STRUCTURAL, seriously consider whether
 further iteration will produce meaningful improvement — or just accumulate incremental
-changes. {"Stopping may be the better choice." if score_current_work_only else "Voting may be the better choice."}
+changes. {"Stopping may be the better choice." if score_current_work_only else "Voting may be the better choice."}"""
 
+    if fast_iteration_mode:
+        _confidence_section = f"""\
+### Confidence Assessment
+
+Your goal is **excellence** — but excellence is achieved across rounds, not within one. \
+The question is not "is this perfect right now?" but "have I addressed the real gaps and \
+built something the next round can elevate further?"
+
+Rate your confidence (0-10) in each of the following statements.
+0 = completely disagree, 10 = fully agree, no reservations.
+Calibrate your scores against these anchors:
+- **9-10**: A professional would publish this as-is. No meaningful improvement possible.
+- **7-8**: Good with real gaps. You can name specific things a demanding user would improve.
+- **5-6**: Adequate but uninspired. Does what was asked but not well. Most first drafts belong here.
+- **3-4**: Significant problems. Approach may be sound but execution has clear failures.
+- **1-2**: Fundamentally wrong direction or non-functional.
+
+Calibration rule: your score for each criterion MUST be consistent with the
+weaknesses in your diagnostic analysis. If your analysis identified significant
+gaps but your scores are 8+, your scores are inflated — lower them to match.
+
+{numbered}
+
+{report_requirement}"""
+    else:
+        _confidence_section = f"""\
 ### Confidence Assessment
 
 Your goal is **excellence**, not minimum viability. The question is not "does this
@@ -1377,95 +1458,13 @@ gaps but your scores are 8+, your scores are inflated — lower them to match.
 
 {numbered}
 
-{report_requirement}
+{report_requirement}"""
 
-### Submit Your Scores
-
-{_submit_scores_intro}
-
-Each score entry MUST include `"reasoning"` explaining why you gave that score —
-reference specific evidence from your analysis.
-
-{_submit_scores_example}
-
-The tool will evaluate your scores and return a verdict telling you whether
-to call `{terminate_action}` or `{iterate_action}`. Follow the verdict.
-
-**Round lifecycle — full sequence:**
-
-**Phase 1 — Gather evidence. Do this BEFORE calling `submit_checklist`.**
-
-{_phase1_scope}
-
-**Phase 2 — Score and submit `submit_checklist`.**
-
-{_phase2_scoring}
-
-`submit_checklist` returns a verdict:
-- **`{iterate_action}`** — improvements needed; call `propose_improvements` next
-- **`{terminate_action}`** — output is sufficient; skip to Phase 5 to submit
-
-Follow the verdict. Do not call `submit_checklist` again after receiving it.
-
-{_proposal_review}
-
-Output quality takes precedence over documentation quality:
-- Do NOT treat missing/weak changedoc alone as proof an answer is worse.
-- If an answer is materially better for the user but weaker on changedoc,
-  still use its strengths as `sources`; then include explicit changedoc
-  repairs in `improvements`.
-
-You MUST call `propose_improvements` with:
-- **`improvements`**: plans for **every** failing criterion — each entry has a `plan`, \
-`sources` (which answers you're drawing from), and `impact` (how bold the change is)
-- **`preserve`**: what's already working and must not regress — each entry has `what` \
-(the specific strength) and `source` (which answer it comes from)
-
-**`impact` levels** (required on every improvement entry):
-- **`transformative`**: fundamentally different approach, architecture, or creative direction
-- **`structural`**: meaningful redesign, new capability, or significant quality lift; \
-fixing a crash or unblocking major functionality also counts as structural. \
-The bar is outcome-based: a rewrite achieving significantly better quality counts as \
-structural even with the same theme. *Quick test: "much better"? → structural. \
-"Nice touch"? → incremental.*
-- **`incremental`**: polish, formatting, small additions — important but not round-justifying alone
-
-If your plan for a criterion has multiple independent improvements (e.g., rewrite the copy AND \
-add a new section AND fix the CTA), list them as separate entries — each gets its own impact \
-level and sources.
-
-{impact_requirement}
-
-  propose_improvements(
-    improvements={{
-      "E2": [{{"plan": "rethink the feature cards with distinct visual identity", \
-"sources": ["agent2.1"], "impact": "structural"}}],
-      "E5": [{{"plan": "build a full signup form CTA", \
-"sources": ["agent2.1", "agent1.2"], "impact": "transformative"}}],
-    }},
-    preserve={{
-      "E1": {{"what": "hero section visual impact — gradient animation and typography", "source": "agent1.2"}},
-      "E2": {{"what": "section header and layout grid — preserve while reworking cards", "source": "agent1.2"}},
-      "E3": {{"what": "sci-fi color palette coherence — neon-on-dark theme unified", "source": "agent1.2"}},
-    }}
-  )
-
-- `improvements`: each entry names a `plan`, its `sources`, and an `impact` level. \
-This traces provenance and ambition of every change.
-- `preserve` forces you to articulate what's WORKING before changing anything. \
-A criterion can appear in BOTH — fix one part, protect another. \
-Preserved items are injected as a single verification checkpoint at the END of your \
-task plan — confirm they're intact before submitting.
-
-The tool validates all failing criteria are covered and auto-populates your \
-task plan. Call `get_task_plan` to review the items and proceed to Phase 3.
-
-**Phase 3 — Execute improvements (`{iterate_action}` verdict only).**
-
-Your `propose_improvements` call has pre-populated your task plan. Call \
-`get_task_plan` to review, then execute.
-
-{_phase3_execution}
+    # Phase 4 — only in normal mode
+    if fast_iteration_mode:
+        _phase4_section = ""
+    else:
+        _phase4_section = """\
 
 **Phase 4 — Targeted subagents (when criteria plateau).**
 
@@ -1477,7 +1476,82 @@ text, category, and full score history so subagents know exactly what's stuck
 and by how much). Meanwhile, proceed with `propose_improvements` and start
 implementing your own ideas. When the subagents return, integrate their
 proposals into your remaining work — their fresh perspective may suggest
-approaches you wouldn't have tried.
+approaches you wouldn't have tried."""
+
+    # Phase 5 — streamlined in fast mode, full in normal mode
+    if fast_iteration_mode:
+        _phase5_section = f"""\
+
+**Phase 4 — Verify, submit, note gaps.**
+
+After executing improvements:
+1. Verify no regressions — confirm features from prior rounds still work. A working
+   output with fewer features is always better than a broken output with more.
+2. One quick verification pass: does the output work end-to-end? If broken, fix. \
+If it works, proceed to submit.
+3. For each verification command you run, save its output to `.massgen_scratch/verification/`
+   as a plain text file named `output_<name>.txt` (e.g. `output_pytest.txt`). Use this format:
+
+   Command: uv run pytest ...
+   Exit code: 0
+   Output:
+   15 passed in 2.3s
+
+4. Write/update `memory/short_term/verification_latest.md` with a **verification replay**
+   summary for this answer. This memo must be replayable — a future agent should be able to
+   re-run verification from it without guessing. Use this section structure:
+   - `## Verification Contract` — stable method/context for replay: workspace path, artifact under
+     test, tools used, and any assumptions that define how this deliverable should be verified
+   - `## Inputs and Artifacts` — the output files, screenshots, logs, scripts, and current media map
+     relevant to verification, with paths relative to the workspace when possible
+   - `## Replay Steps` — exact commands or script paths used (for example
+     `python .massgen_scratch/verification/check.py` or `npx -y playwright@1.52.0 screenshot ...`);
+     scripts must live under `.massgen_scratch/verification/`
+   - `## Latest Verification Result` — for each script, its output file path and a one-line result
+     summary (for example `verification/output_pytest.txt — 15 passed, 0 failed`), plus overall
+     status and any known coverage gaps or skipped checks
+   - `## Stale If` — whether each key verification artifact is still current for the submitted answer
+     (`fresh`, `stale`, or `unknown`) and what would make the replay invalid or incomplete
+   Keep the stable sections current when the verification method changes; otherwise update the
+   latest result/staleness sections for the answer you are submitting now.
+   Absolute paths are allowed; they are normalized when replay memories are auto-injected in later rounds.
+   Write this memo after your final answer is complete — it must reflect the submitted state, not an intermediate one.
+   Before making new media calls, read `.massgen_scratch/verification/media_call_ledger.json` first.
+   Specifically, check it before making new `read_media` or `generate_media` calls.
+   This is advisory/informational provenance, not a hard block: you may still run fresh calls when
+   needed for better side-by-side comparisons. The ledger also tracks `CONTEXT.md` provenance snapshots
+   under `.massgen_scratch/verification/context_snapshots/` so you can see what context was active.
+5. Write `memory/short_term/essential_files_manifest.json` — a JSON manifest listing files the \
+next round's agent MUST read to continue your work. Format: \
+`{{"version": 1, "summary": "one-line state", "files": [...]}}` where each file has \
+`path` (relative), `why` (reason needed), `read_whole_file` (true/false), and \
+`how_to_read` (null if read_whole_file=true, otherwise natural language guidance for \
+efficiently reading — rg patterns, function names, section headers, etc.). \
+Include your main deliverable files, config/spec files, and changedoc. \
+Also include files that your verification found important — the goal is that the \
+next agent can evaluate your work immediately from the pre-loaded context without \
+re-discovering which files matter.
+6. Call `{iterate_action}` to submit your improved answer and end this round.
+
+**Known Gaps**: Before submitting, note what you deliberately deferred in your answer. \
+Add a brief `Known Gaps` section (or equivalent note) listing items the next round \
+should address. This tells the next round exactly where to focus instead of \
+rediscovering weaknesses from scratch. Example:
+
+Known Gaps (for next round):
+- E3: Error handling covers happy path only; edge cases need work
+- E5: Mobile layout not yet responsive below 480px
+
+Your answer should fix real gaps from the checklist — not polish what already works. \
+Submit and let the system iterate across rounds toward excellence.
+
+**What happens after `{iterate_action}`:** Your improved answer is submitted and this
+round ends. If another coordination round is needed, you will receive a new prompt and
+the lifecycle restarts at Phase 1 with all agents' updated answers. If the output is
+now sufficient, the session terminates. You do not need to do anything to trigger the
+next round — the system handles it."""
+    else:
+        _phase5_section = f"""\
 
 **Phase 5 — Integrate, verify, submit.**
 
@@ -1555,6 +1629,108 @@ round ends. If another coordination round is needed, you will receive a new prom
 the lifecycle restarts at Phase 1 with all agents' updated answers. If the output is
 now sufficient, the session terminates. You do not need to do anything to trigger the
 next round — the system handles it."""
+
+    return f"""---
+
+## Decision
+
+Now decide: call `{iterate_action}` or `{terminate_action}`.
+
+{_decision_intro}
+
+{_substantiveness_section}
+
+{_confidence_section}
+
+### Submit Your Scores
+
+{_submit_scores_intro}
+
+Each score entry MUST include `"reasoning"` explaining why you gave that score —
+reference specific evidence from your analysis.
+
+{_submit_scores_example}
+
+The tool will evaluate your scores and return a verdict telling you whether
+to call `{terminate_action}` or `{iterate_action}`. Follow the verdict.
+
+**Round lifecycle — full sequence:**
+
+**Phase 1 — Gather evidence. Do this BEFORE calling `submit_checklist`.**
+
+{_phase1_scope}
+
+**Phase 2 — Score and submit `submit_checklist`.**
+
+{_phase2_scoring}
+
+`submit_checklist` returns a verdict:
+- **`{iterate_action}`** — improvements needed; call `propose_improvements` next
+- **`{terminate_action}`** — output is sufficient; skip to Phase {"4" if fast_iteration_mode else "5"} to submit
+
+Follow the verdict. Do not call `submit_checklist` again after receiving it.
+
+{_proposal_review}
+
+Output quality takes precedence over documentation quality:
+- Do NOT treat missing/weak changedoc alone as proof an answer is worse.
+- If an answer is materially better for the user but weaker on changedoc,
+  still use its strengths as `sources`; then include explicit changedoc
+  repairs in `improvements`.
+
+You MUST call `propose_improvements` with:
+- **`improvements`**: plans for **every** failing criterion — each entry has a `plan`, \
+`sources` (which answers you're drawing from), and `impact` (how bold the change is)
+- **`preserve`**: what's already working and must not regress — each entry has `what` \
+(the specific strength) and `source` (which answer it comes from)
+
+**`impact` levels** (required on every improvement entry):
+- **`transformative`**: fundamentally different approach, architecture, or creative direction
+- **`structural`**: meaningful redesign, new capability, or significant quality lift; \
+fixing a crash or unblocking major functionality also counts as structural. \
+The bar is outcome-based: a rewrite achieving significantly better quality counts as \
+structural even with the same theme. *Quick test: "much better"? → structural. \
+"Nice touch"? → incremental.*
+- **`incremental`**: polish, formatting, small additions — important but not round-justifying alone
+
+If your plan for a criterion has multiple independent improvements (e.g., rewrite the copy AND \
+add a new section AND fix the CTA), list them as separate entries — each gets its own impact \
+level and sources.
+
+{impact_requirement}
+
+  propose_improvements(
+    improvements={{
+      "E2": [{{"plan": "rethink the feature cards with distinct visual identity", \
+"sources": ["agent2.1"], "impact": "structural"}}],
+      "E5": [{{"plan": "build a full signup form CTA", \
+"sources": ["agent2.1", "agent1.2"], "impact": "transformative"}}],
+    }},
+    preserve={{
+      "E1": {{"what": "hero section visual impact — gradient animation and typography", "source": "agent1.2"}},
+      "E2": {{"what": "section header and layout grid — preserve while reworking cards", "source": "agent1.2"}},
+      "E3": {{"what": "sci-fi color palette coherence — neon-on-dark theme unified", "source": "agent1.2"}},
+    }}
+  )
+
+- `improvements`: each entry names a `plan`, its `sources`, and an `impact` level. \
+This traces provenance and ambition of every change.
+- `preserve` forces you to articulate what's WORKING before changing anything. \
+A criterion can appear in BOTH — fix one part, protect another. \
+Preserved items are injected as a single verification checkpoint at the END of your \
+task plan — confirm they're intact before submitting.
+
+The tool validates all failing criteria are covered and auto-populates your \
+task plan. Call `get_task_plan` to review the items and proceed to Phase 3.
+
+**Phase 3 — Execute improvements (`{iterate_action}` verdict only).**
+
+Your `propose_improvements` call has pre-populated your task plan. Call \
+`get_task_plan` to review, then execute.
+
+{_phase3_execution}
+{_phase4_section}
+{_phase5_section}"""
 
 
 class Priority(IntEnum):
@@ -3429,6 +3605,7 @@ class TaskPlanningSection(SystemPromptSection):
         decomposition_mode: bool = False,
         specialized_subagents=None,
         checkpoint_mode: bool = False,
+        fast_iteration_mode: bool = False,
     ):
         super().__init__(
             title="Task Planning",
@@ -3439,6 +3616,7 @@ class TaskPlanningSection(SystemPromptSection):
         self.decomposition_mode = decomposition_mode
         self.specialized_subagents = specialized_subagents or []
         self.checkpoint_mode = checkpoint_mode
+        self.fast_iteration_mode = fast_iteration_mode
 
     def _build_subagent_classification_step(self) -> str:
         """Build STEP 2 when subagents or checkpoint mode are available."""
@@ -3613,7 +3791,7 @@ Instead, verify in logical groups — when a meaningful chunk of related work is
 it makes sense to check the integrated result. For example:
 - After completing all layout/styling tasks, verify the visual result once
 - After completing all logic/routing tasks, test the flows together
-- After completing all tasks, do a final comprehensive verification pass
+- After completing all tasks, do a final {"quick" if self.fast_iteration_mode else "comprehensive"} verification pass
 
 Mark tasks `verified` when you've confirmed they work as part of a verification group.
 A couple of verification passes per round is fine — but each should cover multiple tasks,
@@ -3727,6 +3905,7 @@ class EvaluationSection(SystemPromptSection):
         evaluator_available: bool = False,
         enable_evaluator_personas: bool = False,
         auto_trace_analysis: bool = False,
+        fast_iteration_mode: bool = False,
     ):
         super().__init__(
             title="MassGen Coordination",
@@ -3758,6 +3937,7 @@ class EvaluationSection(SystemPromptSection):
         self.evaluator_available = evaluator_available
         self.enable_evaluator_personas = enable_evaluator_personas
         self.auto_trace_analysis = auto_trace_analysis
+        self.fast_iteration_mode = fast_iteration_mode
 
     def build_content(self) -> str:
         # Vote-only mode: agent has exhausted their answer limit
@@ -3930,6 +4110,7 @@ Your goal is to iteratively refine answers until they meet the quality bar.
                     specialized_subagents_available=self.specialized_subagents_available,
                     evaluator_available=self.evaluator_available,
                     enable_evaluator_personas=self.enable_evaluator_personas,
+                    fast_iteration_mode=self.fast_iteration_mode,
                 )
                 evaluation_section = f"""{analysis}
 
@@ -4024,6 +4205,17 @@ from the previous round. Read its findings — they contain specific DO/DON'T \
 guidance based on what worked and what was wasted effort. Apply those learnings \
 to this round's execution strategy."""
 
+        if self.fast_iteration_mode:
+            _iteration_guidance = (
+                "Each iteration costs time and resources. Focus on fixing real gaps — " "not polishing what already works. Submit and let the system iterate " "across rounds toward excellence."
+            )
+        else:
+            _iteration_guidance = (
+                "Each iteration costs time and resources. When you produce a `new_answer`, the result must be\n"
+                "**obviously and substantially better** — a user should immediately see the improvement.\n"
+                "Identify concrete improvements, then actually implement them — do not just acknowledge gaps."
+            )
+
         return f"""You are evaluating answers from multiple agents for final response to a message.
 Different agents may have different builtin tools and capabilities.
 {phase_context}{evaluation_section}
@@ -4038,9 +4230,7 @@ You have two strategies:
   approach for the weakest parts. Explain what you're keeping and what you're replacing.
 Both are valid. If all existing answers are converging on the same approach, rethinking
 is especially valuable.
-Each iteration costs time and resources. When you produce a `new_answer`, the result must be
-**obviously and substantially better** — a user should immediately see the improvement.
-Identify concrete improvements, then actually implement them — do not just acknowledge gaps.{novelty_section}
+{_iteration_guidance}{novelty_section}
 **ANSWER FORMAT GUIDELINES:**
 When calling `new_answer`, your content should be HIGH-LEVEL and concise:
 ✓ DO:
@@ -4104,6 +4294,7 @@ class DecompositionSection(SystemPromptSection):
         item_verify_by: dict[str, str] | None = None,
         item_anti_patterns: dict[str, list[str]] | None = None,
         improvements_cfg: dict | None = None,
+        fast_iteration_mode: bool = False,
     ):
         super().__init__(
             title="MassGen Decomposition Coordination",
@@ -4123,6 +4314,7 @@ class DecompositionSection(SystemPromptSection):
         self.item_verify_by = item_verify_by
         self.item_anti_patterns = item_anti_patterns
         self.improvements_cfg = improvements_cfg
+        self.fast_iteration_mode = fast_iteration_mode
 
     def _build_decision_block(self) -> str:
         """Build the new_answer vs stop decision block, threshold-aware if set."""
@@ -4180,6 +4372,7 @@ Both are terminal actions that end your round.
                     regression_guard_enabled=getattr(self, "regression_guard_enabled", False),
                     improvements_cfg=self.improvements_cfg,
                     score_current_work_only=True,
+                    fast_iteration_mode=self.fast_iteration_mode,
                 )
                 return f"""**CHOOSING THE RIGHT TOOL — `new_answer` vs `stop`:**
 Both are terminal actions that end your round.
@@ -5743,22 +5936,35 @@ class OutputFirstVerificationSection(SystemPromptSection):
     Always included regardless of tools available.
     """
 
-    def __init__(self, decomposition_mode: bool = False):
+    def __init__(self, decomposition_mode: bool = False, fast_iteration_mode: bool = False):
         super().__init__(
             title="Output-First Iteration",
             priority=Priority.CRITICAL,  # TODO: Change back to 'HIGH' ?
             xml_tag="output_first_iteration",
         )
         self.decomposition_mode = decomposition_mode
+        self.fast_iteration_mode = fast_iteration_mode
 
     def build_content(self) -> str:
-        base = """## Output-First Iteration
+        if self.fast_iteration_mode:
+            _loop_intro = """\
+## Output-First Verification
+
+**Core Principle: Experience your work exactly as a user would - through dynamic interaction, not just static observation.**
+
+Verify your output works, then submit. Fix anything broken, but do not loop to polish — \
+submit with Known Gaps and let the next round handle refinements."""
+        else:
+            _loop_intro = """\
+## Output-First Iteration
 
 **Core Principle: Experience your work exactly as a user would - through dynamic interaction, not just static observation.**
 
 This is an **improvement loop**, not just a verification step:
 1. Implement a group of improvements → 2. Run/view the integrated output → 3. **Interact as a user would** \
-→ 4. Identify remaining gaps → 5. Implement fixes → 6. Verify again when ready → 7. Submit when excellent
+→ 4. Identify remaining gaps → 5. Implement fixes → 6. Verify again when ready → 7. Submit when excellent"""
+
+        base = f"""{_loop_intro}
 
 ### Dynamic Verification: Think Like a User
 
@@ -5831,6 +6037,13 @@ Before considering any interactive artifact complete, ask:
             base += "\n- Use `stop` only when you have reviewed everything and are satisfied with your deliverables as-is. If you improved your deliverable work this round, use `new_answer` instead."
         else:
             base += "\n- Use `vote` only when an existing answer already meets the bar after **testing as a user would**."
+
+        if self.fast_iteration_mode:
+            base += (
+                "\n\n**Fast iteration**: Verify your output works end-to-end, fix anything broken, "
+                "then submit. Do not loop through multiple improve→verify cycles within one round — "
+                "note remaining improvements as Known Gaps and let the next round handle them."
+            )
 
         return base
 

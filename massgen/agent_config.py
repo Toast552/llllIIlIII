@@ -260,6 +260,7 @@ class CoordinationConfig:
     checkpoint_guidance: str = ""  # Appended to main agent system prompt
     checkpoint_gated_patterns: list[str] = field(default_factory=list)  # fnmatch patterns for gated tools
     web_review: bool = False  # Enable change review modal in WebUI (requires --web)
+    fast_iteration_mode: bool = False  # Streamline post-candidate phases to submit faster and iterate across rounds
 
     def __post_init__(self):
         """Validate configuration after initialization."""
@@ -1207,6 +1208,7 @@ class AgentConfig:
             "checkpoint_guidance": self.coordination_config.checkpoint_guidance,
             "checkpoint_gated_patterns": self.coordination_config.checkpoint_gated_patterns,
             "web_review": self.coordination_config.web_review,
+            "fast_iteration_mode": self.coordination_config.fast_iteration_mode,
         }
 
         # Handle debug fields

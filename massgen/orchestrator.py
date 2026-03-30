@@ -3485,6 +3485,14 @@ class Orchestrator(ChatAgent):
             threshold = getattr(self.config, "voting_threshold", None)
         return threshold
 
+    def _get_fast_iteration_mode(self) -> bool:
+        """Return whether fast iteration mode is enabled."""
+        return getattr(
+            getattr(self.config, "coordination_config", None),
+            "fast_iteration_mode",
+            False,
+        )
+
     def _make_precollab_started_callback(
         self,
         anchor_agent: str | None,
@@ -3614,6 +3622,7 @@ class Orchestrator(ChatAgent):
                 voting_sensitivity=getattr(self.config, "voting_sensitivity", None),
                 voting_threshold=self._get_pre_collab_voting_threshold(),
                 has_planning_spec_context=bool(self._plan_session_id),
+                fast_iteration_mode=self._get_fast_iteration_mode(),
             )
 
             source = getattr(generator, "last_generation_source", "unknown")
@@ -3728,6 +3737,7 @@ class Orchestrator(ChatAgent):
                 voting_sensitivity=getattr(self.config, "voting_sensitivity", None),
                 voting_threshold=self._get_pre_collab_voting_threshold(),
                 has_planning_spec_context=bool(self._plan_session_id),
+                fast_iteration_mode=self._get_fast_iteration_mode(),
             )
 
             self._generated_evaluation_criteria = criteria
@@ -3809,6 +3819,7 @@ class Orchestrator(ChatAgent):
                 ),
                 voting_sensitivity=getattr(self.config, "voting_sensitivity", None),
                 voting_threshold=self._get_pre_collab_voting_threshold(),
+                fast_iteration_mode=self._get_fast_iteration_mode(),
             )
 
             self._prompt_improved = True
@@ -5617,6 +5628,7 @@ Your answer:"""
                     voting_sensitivity=getattr(self.config, "voting_sensitivity", None),
                     voting_threshold=pre_collab_voting_threshold,
                     has_planning_spec_context=bool(self._plan_session_id),
+                    fast_iteration_mode=self._get_fast_iteration_mode(),
                 )
                 self._agent_subtask_criteria = {}
                 subtask_specs = getattr(decomposer, "last_subtask_specs", {}) or {}
@@ -13490,6 +13502,27 @@ Your answer:"""
         if self.config.coordination_config:
             write_mode = getattr(self.config.coordination_config, "write_mode", None)
         if write_mode and write_mode != "legacy" and agent.backend.filesystem_manager:
+            # Defensive cleanup: if a previous round's isolation manager was
+            # never cleaned up (e.g. the generator's finally block didn't run),
+            # do it now before creating a new one.
+            prev_iso = self._round_isolation_managers.pop(agent_id, None)
+            if prev_iso is not None:
+                for ctx_info in list(prev_iso.list_contexts()):
+                    ctx_path = ctx_info.get("original_path") if ctx_info else None
+                    if not ctx_path:
+                        continue
+                    try:
+                        prev_iso.move_scratch_to_workspace(ctx_path)
+                        prev_iso.cleanup_round(ctx_path)
+                    except Exception as _err:
+                        logger.warning(
+                            f"[Orchestrator] Defensive round cleanup failed for {agent_id}: {_err}",
+                        )
+                self._round_worktree_paths.pop(agent_id, None)
+                logger.info(
+                    f"[Orchestrator] Cleaned up previous round isolation for {agent_id}",
+                )
+
             try:
                 from .filesystem_manager import IsolationContextManager
 
@@ -15501,14 +15534,17 @@ Your answer:"""
                 )
 
             # Close the agent execution span for hierarchical tracing
-            # Wrap in try/except to handle OpenTelemetry context issues in async generators
+            # Wrap in broad try/except so span-exit errors cannot prevent
+            # round-isolation cleanup below from executing.
             try:
                 _agent_span_cm.__exit__(None, None, None)
-            except ValueError as e:
-                # Context detach failures are expected in async generators - safe to ignore
-                # The span is still closed, just the context token can't be detached
-                if "context" not in str(e).lower() and "detach" not in str(e).lower():
-                    logger.debug(f"Unexpected ValueError closing agent span: {e}")
+            except Exception as e:
+                # Context detach failures are expected in async generators.
+                # Any other error is logged but must not block cleanup.
+                if isinstance(e, ValueError) and ("context" in str(e).lower() or "detach" in str(e).lower()):
+                    pass
+                else:
+                    logger.debug(f"Error closing agent span (non-fatal): {e}")
 
             # Per-round worktree cleanup: move scratch, remove worktree, keep branch
             if agent_id in self._round_isolation_managers:

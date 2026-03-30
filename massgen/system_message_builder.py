@@ -270,7 +270,16 @@ class SystemMessageBuilder:
 
         # PRIORITY 1 (HIGH): Output-First Verification - verify outcomes, not implementations
         is_decomposition = coordination_mode == "decomposition"
-        builder.add_section(OutputFirstVerificationSection(decomposition_mode=is_decomposition))
+        builder.add_section(
+            OutputFirstVerificationSection(
+                decomposition_mode=is_decomposition,
+                fast_iteration_mode=getattr(
+                    getattr(self.config, "coordination_config", None),
+                    "fast_iteration_mode",
+                    False,
+                ),
+            ),
+        )
         enable_subagents = bool(getattr(getattr(self.config, "coordination_config", None), "enable_subagents", False))
         # Check if agent-spawnable subagent types exist (None = defaults, [] = none)
         _subagent_types_cfg = getattr(
@@ -298,6 +307,11 @@ class SystemMessageBuilder:
                     item_categories=item_categories,
                     item_verify_by=item_verify_by,
                     item_anti_patterns=item_anti_patterns,
+                    fast_iteration_mode=getattr(
+                        getattr(self.config, "coordination_config", None),
+                        "fast_iteration_mode",
+                        False,
+                    ),
                 ),
             )
         else:
@@ -360,6 +374,11 @@ class SystemMessageBuilder:
                     auto_trace_analysis=getattr(
                         getattr(self.config, "coordination_config", None),
                         "auto_trace_analysis",
+                        False,
+                    ),
+                    fast_iteration_mode=getattr(
+                        getattr(self.config, "coordination_config", None),
+                        "fast_iteration_mode",
                         False,
                     ),
                 ),
@@ -623,6 +642,11 @@ class SystemMessageBuilder:
                     decomposition_mode=is_decomposition,
                     specialized_subagents=_tp_subagents,
                     checkpoint_mode=_checkpoint_enabled,
+                    fast_iteration_mode=getattr(
+                        getattr(self.config, "coordination_config", None),
+                        "fast_iteration_mode",
+                        False,
+                    ),
                 ),
             )
 

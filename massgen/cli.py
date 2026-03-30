@@ -3639,6 +3639,7 @@ def _parse_coordination_config(coord_cfg: dict[str, Any]) -> "CoordinationConfig
         checkpoint_guidance=coord_cfg.get("checkpoint_guidance", ""),
         checkpoint_gated_patterns=coord_cfg.get("checkpoint_gated_patterns", []),
         web_review=coord_cfg.get("web_review", False),
+        fast_iteration_mode=coord_cfg.get("fast_iteration_mode", False),
     )
 
 

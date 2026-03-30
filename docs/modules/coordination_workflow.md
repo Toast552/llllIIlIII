@@ -437,6 +437,14 @@ Enforcement loop behavior:
 Checklist mode is policy, not the core coordination primitive:
 
 - enabled with `voting_sensitivity: checklist_gated`
+- **fast iteration mode** (`fast_iteration_mode: true`): streamlines the post-candidate phases so agents submit faster and iterate across rounds instead of over-polishing within one round. When enabled:
+  - Phases 1-3 (evidence gathering, scoring, executing improvements) remain at full depth
+  - Phase 4 (spawning subagents for plateaued criteria) is skipped — the next round handles plateaus
+  - Phase 5 is streamlined: one quick verification pass, then submit with a "Known Gaps" note listing what the next round should address. Verification replay and essential files manifest are preserved (they help next rounds start faster)
+  - The Substantiveness Test is replaced with a Quick Impact Check ("is this a real gap fix, or polish the next round will catch?")
+  - The Confidence Assessment still targets excellence, but frames it as achieved across rounds, not within one
+  - "Obviously and substantially better" language is removed — agents submit when they've fixed real gaps
+  - Also threads to pre-collab subagent runs (persona generation, evaluation criteria, decomposition, prompt improvement)
 - default behavior blocks checklist before first answer unless `checklist_first_answer: true`
 - when `defer_peer_updates_until_restart: true`, peer updates wait for restart unless `allow_midstream_peer_updates_before_checklist_submit` keeps the pre-submit window open
 - common flow:

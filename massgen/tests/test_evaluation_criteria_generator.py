@@ -31,43 +31,44 @@ class TestDefaultCriteria:
             assert c.id.startswith("E"), f"Expected E-prefix, got {c.id}"
 
     def test_default_criteria_count(self):
-        """Default criteria should have exactly 5 items (4 base + quality/craft)."""
+        """Default criteria should have exactly 4 items."""
         criteria = get_default_criteria(has_changedoc=False)
-        assert len(criteria) == 5
+        assert len(criteria) == 4
 
-    def test_default_criteria_all_standard(self):
-        """Default criteria should all be 'standard' (must-pass)."""
+    def test_default_criteria_have_one_primary(self):
+        """Default criteria should have E3 as primary (per-part depth)."""
         criteria = get_default_criteria(has_changedoc=False)
-        for c in criteria:
-            assert c.category == "standard", f"{c.id} has category '{c.category}', expected 'standard'"
+        primary = [c for c in criteria if c.category == "primary"]
+        assert len(primary) == 1
+        assert primary[0].id == "E3"
 
-    def test_default_criteria_includes_quality_craft(self):
-        """Default criteria must include the quality/craft criterion."""
+    def test_default_criteria_includes_intentional_craft(self):
+        """Default criteria must include the intentional craft criterion."""
         criteria = get_default_criteria(has_changedoc=False)
         craft_criteria = [c for c in criteria if "craft" in c.text or "intentional" in c.text]
         assert len(craft_criteria) == 1
-        assert craft_criteria[0].category == "standard"
+        assert craft_criteria[0].id == "E4"
 
     def test_default_criteria_sequential_ids(self):
-        """Default criteria should have sequential E1-E5 IDs."""
+        """Default criteria should have sequential E1-E4 IDs."""
         criteria = get_default_criteria(has_changedoc=False)
         ids = [c.id for c in criteria]
-        assert ids == ["E1", "E2", "E3", "E4", "E5"]
+        assert ids == ["E1", "E2", "E3", "E4"]
 
 
 class TestChangedocDefaults:
     """Tests for changedoc mode defaults."""
 
-    def test_changedoc_no_longer_adds_extra_criterion(self):
+    def test_changedoc_uses_same_count(self):
         """Changedoc mode should use the same default count as non-changedoc mode."""
         criteria = get_default_criteria(has_changedoc=True)
-        assert len(criteria) == 5
+        assert len(criteria) == 4
 
     def test_changedoc_defaults_keep_sequential_ids(self):
-        """Changedoc mode should keep the same sequential E1-E5 defaults."""
+        """Changedoc mode should keep the same sequential E1-E4 defaults."""
         criteria = get_default_criteria(has_changedoc=True)
         ids = [c.id for c in criteria]
-        assert ids == ["E1", "E2", "E3", "E4", "E5"]
+        assert ids == ["E1", "E2", "E3", "E4"]
 
     def test_changedoc_defaults_do_not_mention_changedoc_traceability(self):
         """Changedoc mode defaults should not append a changedoc-specific criterion."""
@@ -77,10 +78,10 @@ class TestChangedocDefaults:
         assert "traceable" not in joined
 
     def test_changedoc_preserves_base_criteria(self):
-        """Changedoc mode should preserve all 5 base criteria unchanged."""
+        """Changedoc mode should preserve all 4 base criteria unchanged."""
         base = get_default_criteria(has_changedoc=False)
         changedoc = get_default_criteria(has_changedoc=True)
-        for i in range(5):
+        for i in range(4):
             assert base[i].text == changedoc[i].text
 
 

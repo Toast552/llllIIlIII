@@ -68,15 +68,15 @@ class TestRationalePreservation:
 class TestE4StretchDefinition:
     """Tests for E4 stretch checklist item covering polish/craft."""
 
-    def test_e4_covers_care_beyond_correctness(self):
-        """E4 item must address quality beyond mere correctness."""
+    def test_e4_covers_intentional_craft(self):
+        """E4 item must address intentional craft beyond correctness."""
         e4_item = _CHECKLIST_ITEMS_CHANGEDOC[3]
-        assert "beyond correctness" in e4_item.lower() or "care" in e4_item.lower()
+        assert "craft" in e4_item.lower() or "deliberate" in e4_item.lower()
 
-    def test_e4_mentions_creative_elements(self):
-        """E4 item must mention creative or distinguishing elements."""
+    def test_e4_mentions_quality_recognition(self):
+        """E4 item must mention recognizable quality."""
         e4_item = _CHECKLIST_ITEMS_CHANGEDOC[3]
-        assert "creative" in e4_item.lower() or "distinguish" in e4_item.lower()
+        assert "quality" in e4_item.lower() or "knowledgeable" in e4_item.lower()
 
     def test_changedoc_checklist_has_4_items(self):
         """Changedoc checklist must have exactly 4 items."""

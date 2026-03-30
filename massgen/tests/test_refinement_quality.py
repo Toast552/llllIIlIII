@@ -414,28 +414,31 @@ class TestCriteriaTierSystem:
 class TestDefaultCriteriaTiers:
     """Tests for default criteria using new tier names."""
 
-    def test_default_categories_all_standard(self):
-        """Default categories are all 'standard'."""
+    def test_default_categories_have_one_primary(self):
+        """Default categories have exactly one 'primary' (E3 per-part depth)."""
         from massgen.evaluation_criteria_generator import _DEFAULT_CATEGORIES
 
-        assert all(c == "standard" for c in _DEFAULT_CATEGORIES)
+        assert _DEFAULT_CATEGORIES.count("primary") == 1
+        assert _DEFAULT_CATEGORIES[2] == "primary"  # E3
+        assert all(c == "standard" for i, c in enumerate(_DEFAULT_CATEGORIES) if i != 2)
 
-    def test_default_criteria_all_standard(self):
-        """get_default_criteria returns criteria all with category 'standard'."""
+    def test_default_criteria_have_one_primary(self):
+        """get_default_criteria returns criteria with E3 as primary."""
         from massgen.evaluation_criteria_generator import get_default_criteria
 
         criteria = get_default_criteria(has_changedoc=False)
-        for c in criteria:
-            assert c.category == "standard", f"{c.id} has category '{c.category}'"
+        primary = [c for c in criteria if c.category == "primary"]
+        assert len(primary) == 1
+        assert primary[0].id == "E3"
 
-    def test_default_criteria_include_quality_craft(self):
-        """Default criteria always include a quality/craft criterion."""
+    def test_default_criteria_include_intentional_craft(self):
+        """Default criteria include an intentional craft criterion."""
         from massgen.evaluation_criteria_generator import get_default_criteria
 
         criteria = get_default_criteria(has_changedoc=False)
         craft = [c for c in criteria if "intentional" in c.text or "craft" in c.text]
         assert len(craft) == 1
-        assert craft[0].category == "standard"
+        assert craft[0].id == "E4"
 
 
 class TestPresetsTiers:

@@ -582,4 +582,4 @@ class TestChecklistCriteriaDisplayBackfill:
         source = call.kwargs.get("source")
 
         assert source == "generic"
-        assert [c["id"] for c in criteria] == ["E1", "E2", "E3", "E4", "E5"]
+        assert [c["id"] for c in criteria] == ["E1", "E2", "E3", "E4"]

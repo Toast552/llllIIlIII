@@ -227,11 +227,11 @@ class TestChangedocChecklist:
         assert len(_CHECKLIST_ITEMS_CHANGEDOC) == 4
 
     def test_changedoc_checklist_items_content(self):
-        """Changedoc checklist items stay output-focused, not changedoc-focused."""
+        """Changedoc checklist items reference spec fidelity and output quality."""
         joined = " ".join(_CHECKLIST_ITEMS_CHANGEDOC).lower()
-        assert "changedoc" not in joined
         assert "traceab" not in joined  # traceability or traceable
-        assert "complete enough to be genuinely useful" in joined
+        assert "spec fidelity" in joined
+        assert "per-part depth" in joined
 
     def test_changedoc_analysis_has_decision_audit(self):
         """_build_changedoc_checklist_analysis() mentions key steps."""
@@ -592,11 +592,11 @@ class TestAntiGlazingAndSynthesis:
         assert "synthesized from" in prompt
 
     def test_e4_polish_and_craft(self):
-        """E4 checklist item covers care beyond correctness."""
+        """E4 checklist item covers intentional craft."""
         from massgen.system_prompt_sections import _CHECKLIST_ITEMS_CHANGEDOC
 
         e4_text = _CHECKLIST_ITEMS_CHANGEDOC[3]  # 0-indexed, E4 is the 4th item
-        assert "beyond correctness" in e4_text.lower() or "creative" in e4_text.lower()
+        assert "craft" in e4_text.lower() or "deliberate" in e4_text.lower()
 
     def test_subsequent_prompt_has_rationale_preservation_rule(self):
         """Subsequent-round prompt must contain Rationale Preservation Rule."""
@@ -610,14 +610,14 @@ class TestAntiGlazingAndSynthesis:
         prompt = _build_changedoc_subsequent_round_prompt()
         assert "this was the best prior answer" in prompt
 
-    def test_changedoc_t3_emphasizes_output_completeness(self):
-        """Changedoc-mode E3 should gate substantive output completeness, not changedoc truthfulness."""
+    def test_changedoc_e3_emphasizes_per_part_depth(self):
+        """Changedoc-mode E3 should gate per-part depth, not changedoc truthfulness."""
         from massgen.system_prompt_sections import _CHECKLIST_ITEMS_CHANGEDOC
 
-        t3_text = _CHECKLIST_ITEMS_CHANGEDOC[2]  # 0-indexed, T3 is the 3rd item
-        lower = t3_text.lower()
-        assert "complete enough" in lower or "genuinely useful" in lower, f"T3 should focus on output completeness. Got: {t3_text}"
-        assert "changedoc" not in lower, f"T3 should not focus on changedoc quality. Got: {t3_text}"
+        e3_text = _CHECKLIST_ITEMS_CHANGEDOC[2]  # 0-indexed, E3 is the 3rd item
+        lower = e3_text.lower()
+        assert "per-part" in lower or "weakest part" in lower, f"E3 should focus on per-part depth. Got: {e3_text}"
+        assert "changedoc" not in lower, f"E3 should not focus on changedoc quality. Got: {e3_text}"
 
     def test_first_round_changedoc_verification_step(self):
         """First-round changedoc workflow must include a verification step."""
@@ -663,11 +663,11 @@ class TestAntiGlazingAndSynthesis:
 class TestOutputIntegrityPrinciple:
     """Tests that system prompts emphasize working output over feature accumulation."""
 
-    def test_e1_requires_goal_alignment(self):
-        """E1 checklist item must require the output achieves what was asked for."""
+    def test_e1_requires_spec_fidelity(self):
+        """E1 checklist item must require spec fidelity."""
         e1_text = _CHECKLIST_ITEMS_CHANGEDOC[0]  # 0-indexed, E1 is the 1st item
         lower = e1_text.lower()
-        assert "achieves" in lower or "requirements" in lower or "asked for" in lower, f"E1 must require goal alignment. Got: {e1_text}"
+        assert "spec fidelity" in lower or "requirements" in lower, f"E1 must require spec fidelity. Got: {e1_text}"
 
     def test_decision_section_verify_before_extend(self):
         """Decision/improvement section must instruct verifying existing before adding new."""
