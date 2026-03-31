@@ -397,6 +397,135 @@ class TestGenerationPrompt:
         # Must say not to merge with craft
         assert "craft" in prompt.lower() and ("separate" in prompt.lower() or "not merge" in prompt.lower())
 
+    def test_prompt_includes_deep_investigation_section(self):
+        """Prompt must include a deep investigation section before criteria generation."""
+        prompt = self._make_prompt(task="Write a website about gophers")
+        lower = prompt.lower()
+        # Must instruct the model to investigate what excellence looks like
+        assert "investigation" in lower or "investigate" in lower
+        # Must ask about exemplars or what excellent output looks like
+        assert "excellent" in lower or "exemplar" in lower
+        # Must ask about domain-specific failure modes
+        assert "failure" in lower or "fail" in lower
+        # Must ask about what distinguishes great from good
+        assert "distinguish" in lower or "mediocre" in lower
+
+    def test_prompt_requires_score_anchors(self):
+        """Prompt must require score_anchors in the output JSON format."""
+        prompt = self._make_prompt()
+        assert "score_anchors" in prompt
+        # Must describe what score levels look like
+        assert '"3"' in prompt or "'3'" in prompt or "score of 3" in prompt.lower()
+        assert '"9"' in prompt or "'9'" in prompt or "score of 9" in prompt.lower()
+
+
+class TestScoreAnchors:
+    """Tests for score_anchors on GeneratedCriterion and parsing."""
+
+    def test_generated_criterion_has_score_anchors_field(self):
+        """GeneratedCriterion should have an optional score_anchors field."""
+        from massgen.evaluation_criteria_generator import GeneratedCriterion
+
+        c = GeneratedCriterion(
+            id="E1",
+            text="Test criterion",
+            category="standard",
+            score_anchors={"3": "Fundamentally broken", "5": "Works but generic", "7": "Good with gaps", "9": "Excellent"},
+        )
+        assert c.score_anchors is not None
+        assert c.score_anchors["3"] == "Fundamentally broken"
+        assert c.score_anchors["9"] == "Excellent"
+
+    def test_generated_criterion_score_anchors_default_none(self):
+        """score_anchors should default to None."""
+        from massgen.evaluation_criteria_generator import GeneratedCriterion
+
+        c = GeneratedCriterion(id="E1", text="Test", category="standard")
+        assert c.score_anchors is None
+
+    def test_parse_criteria_with_score_anchors(self):
+        """Score anchors in JSON response should be parsed into GeneratedCriterion."""
+        from massgen.evaluation_criteria_generator import _parse_criteria_response
+
+        response = json.dumps(
+            {
+                "aspiration": "A website a designer would screenshot for their portfolio",
+                "criteria": [
+                    {
+                        "text": "Visual craft: Design feels authored, not assembled",
+                        "category": "primary",
+                        "anti_patterns": ["unmodified library defaults"],
+                        "score_anchors": {
+                            "3": "Generic template with no custom styling",
+                            "5": "Some custom colors but layout is cookie-cutter",
+                            "7": "Cohesive color system and typography but spacing is default",
+                            "9": "Every visual choice is intentional — color, type, spacing, rhythm",
+                        },
+                    },
+                    {
+                        "text": "Content depth",
+                        "category": "standard",
+                        "score_anchors": {
+                            "3": "Thin paragraphs restating obvious facts",
+                            "5": "Covers basics but nothing a quick search wouldn't find",
+                            "7": "Includes specific details and interesting angles",
+                            "9": "Reader learns something genuinely surprising",
+                        },
+                    },
+                    {"text": "Navigation", "category": "standard"},
+                    {"text": "Responsiveness", "category": "standard"},
+                ],
+            },
+        )
+        criteria, aspiration = _parse_criteria_response(response, min_criteria=4, max_criteria=10)
+        assert criteria is not None
+        assert criteria[0].score_anchors is not None
+        assert "3" in criteria[0].score_anchors
+        assert "9" in criteria[0].score_anchors
+        assert criteria[1].score_anchors is not None
+        assert criteria[2].score_anchors is None  # Not provided
+
+    def test_parse_criteria_ignores_invalid_score_anchors(self):
+        """Non-dict score_anchors should be ignored (set to None)."""
+        from massgen.evaluation_criteria_generator import _parse_criteria_response
+
+        response = json.dumps(
+            {
+                "criteria": [
+                    {"text": "C1", "category": "standard", "score_anchors": "not a dict"},
+                    {"text": "C2", "category": "standard", "score_anchors": 42},
+                    {"text": "C3", "category": "standard"},
+                    {"text": "C4", "category": "standard"},
+                ],
+            },
+        )
+        criteria, _ = _parse_criteria_response(response, min_criteria=4, max_criteria=10)
+        assert criteria is not None
+        assert criteria[0].score_anchors is None
+        assert criteria[1].score_anchors is None
+
+    def test_inline_criteria_with_score_anchors(self):
+        """criteria_from_inline should handle score_anchors."""
+        from massgen.evaluation_criteria_generator import criteria_from_inline
+
+        inline = [
+            {
+                "text": "Visual craft",
+                "category": "primary",
+                "score_anchors": {
+                    "3": "Generic",
+                    "5": "Some effort",
+                    "7": "Good",
+                    "9": "Exceptional",
+                },
+            },
+            {"text": "Content", "category": "standard"},
+        ]
+        criteria = criteria_from_inline(inline)
+        assert criteria[0].score_anchors is not None
+        assert criteria[0].score_anchors["7"] == "Good"
+        assert criteria[1].score_anchors is None
+
 
 @pytest.mark.asyncio
 async def test_subagent_criteria_generation_passes_voting_sensitivity(monkeypatch, tmp_path):

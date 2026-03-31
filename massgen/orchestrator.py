@@ -874,22 +874,23 @@ class Orchestrator(ChatAgent):
     def _get_active_criteria(
         self,
         agent_id: str | None = None,
-    ) -> tuple[list[str] | None, dict[str, str] | None, dict[str, str] | None, dict[str, list[str]] | None]:
-        """Return (items, categories, verify_by, anti_patterns) using the criteria priority waterfall.
+    ) -> tuple[list[str] | None, dict[str, str] | None, dict[str, str] | None, dict[str, list[str]] | None, dict[str, dict[str, str]] | None]:
+        """Return (items, categories, verify_by, anti_patterns, score_anchors) using the criteria priority waterfall.
 
         Priority: inline > decomposition-agent > generated > preset > None.
-        Returns (None, None, None, None) when no custom criteria source is configured.
+        Returns (None, None, None, None, None) when no custom criteria source is configured.
         This is used by both _init_checklist_tool and the system prompt builder
         to ensure criteria are consistent across the checklist MCP tool and
         the system prompt shown to the model.
         """
 
-        def _to_tuple(criteria: list) -> tuple[list[str], dict[str, str], dict[str, str] | None, dict[str, list[str]] | None]:
+        def _to_tuple(criteria: list) -> tuple[list[str], dict[str, str], dict[str, str] | None, dict[str, list[str]] | None, dict[str, dict[str, str]] | None]:
             texts = [c.text for c in criteria]
             cats = {c.id: c.category for c in criteria}
             vby = {c.id: c.verify_by for c in criteria if c.verify_by}
             anti = {c.id: c.anti_patterns for c in criteria if getattr(c, "anti_patterns", None)}
-            return texts, cats, vby or None, anti or None
+            anchors = {c.id: c.score_anchors for c in criteria if getattr(c, "score_anchors", None)}
+            return texts, cats, vby or None, anti or None, anchors or None
 
         inline = getattr(
             getattr(self.config, "coordination_config", None),
@@ -918,16 +919,16 @@ class Orchestrator(ChatAgent):
 
             return _to_tuple(get_criteria_for_preset(preset))
 
-        return None, None, None, None
+        return None, None, None, None, None
 
     def _resolve_effective_checklist_criteria(
         self,
         agent_id: str | None = None,
-    ) -> tuple[list[str], dict[str, str], dict[str, str] | None, str, dict[str, list[str]] | None]:
+    ) -> tuple[list[str], dict[str, str], dict[str, str] | None, str, dict[str, list[str]] | None, dict[str, dict[str, str]] | None]:
         """Return checklist criteria with changedoc/generic fallback plus source.
 
         Returns:
-            (items, categories, verify_by, source, anti_patterns)
+            (items, categories, verify_by, source, anti_patterns, score_anchors)
         """
         from massgen.system_prompt_sections import (
             _CHECKLIST_ITEM_CATEGORIES,
@@ -936,7 +937,7 @@ class Orchestrator(ChatAgent):
             _CHECKLIST_ITEMS_CHANGEDOC,
         )
 
-        custom_items, item_categories, item_verify_by, item_anti_patterns = self._get_active_criteria(agent_id)
+        custom_items, item_categories, item_verify_by, item_anti_patterns, item_score_anchors = self._get_active_criteria(agent_id)
         if custom_items is not None:
             inline = getattr(
                 getattr(self.config, "coordination_config", None),
@@ -951,7 +952,7 @@ class Orchestrator(ChatAgent):
                 source = "generated"
             else:
                 source = "preset"
-            return custom_items, item_categories or {}, item_verify_by, source, item_anti_patterns
+            return custom_items, item_categories or {}, item_verify_by, source, item_anti_patterns, item_score_anchors
 
         if self._is_changedoc_enabled():
             return (
@@ -960,9 +961,10 @@ class Orchestrator(ChatAgent):
                 None,
                 "changedoc",
                 None,
+                None,
             )
 
-        return list(_CHECKLIST_ITEMS), dict(_CHECKLIST_ITEM_CATEGORIES), None, "generic", None
+        return list(_CHECKLIST_ITEMS), dict(_CHECKLIST_ITEM_CATEGORIES), None, "generic", None, None
 
     def _push_cached_criteria_to_display(self, *, force: bool = False) -> None:
         """Push cached evaluation criteria to the active display when available."""
@@ -1012,7 +1014,7 @@ class Orchestrator(ChatAgent):
         for agent_id, agent in self.agents.items():
             backend = agent.backend
             criteria_agent_id = agent_id if self._is_decomposition_mode() else None
-            items, item_categories, item_verify_by, criteria_source, _anti = self._resolve_effective_checklist_criteria(
+            items, item_categories, item_verify_by, criteria_source, _anti, item_score_anchors = self._resolve_effective_checklist_criteria(
                 criteria_agent_id,
             )
 
@@ -1103,6 +1105,7 @@ class Orchestrator(ChatAgent):
                 # Dynamic core/stretch categories for convergence off-ramp
                 "item_categories": item_categories,
                 "item_verify_by": item_verify_by or {},
+                "item_score_anchors": item_score_anchors or {},
                 "criteria_source": criteria_source,
                 # Novelty subagent guidance only when novelty type is available
                 "novelty_subagent_enabled": "novelty" in _lowered_types,
@@ -1882,7 +1885,7 @@ class Orchestrator(ChatAgent):
         state = agent.backend._checklist_state
         agent_state = self.agent_states.get(agent_id)
         criteria_agent_id = agent_id if self._is_decomposition_mode() else None
-        active_items, active_categories, active_verify_by, criteria_source, _anti = self._resolve_effective_checklist_criteria(
+        active_items, active_categories, active_verify_by, criteria_source, _anti, _score_anchors = self._resolve_effective_checklist_criteria(
             criteria_agent_id,
         )
         current_items = getattr(agent.backend, "_checklist_items", None)
@@ -11868,7 +11871,7 @@ Your answer:"""
     ) -> str:
         """Build the orchestrator-owned round_evaluator task brief."""
         criteria_agent_id = parent_agent_id if self._is_decomposition_mode() else None
-        checklist_items, _, verify_by, _, _anti = self._resolve_effective_checklist_criteria(criteria_agent_id)
+        checklist_items, _, verify_by, _, _anti, _score_anchors = self._resolve_effective_checklist_criteria(criteria_agent_id)
 
         criteria_lines: list[str] = []
         for idx, item in enumerate(checklist_items or [], start=1):
@@ -13683,7 +13686,7 @@ Your answer:"""
 
             # Resolve active criteria once for both system prompt and checklist tool state.
             criteria_agent_id = agent_id if self._is_decomposition_mode() else None
-            _active_items, _active_categories, _active_verify_by, _criteria_source, _active_anti_patterns = self._resolve_effective_checklist_criteria(
+            _active_items, _active_categories, _active_verify_by, _criteria_source, _active_anti_patterns, _active_score_anchors = self._resolve_effective_checklist_criteria(
                 criteria_agent_id,
             )
 
@@ -13768,6 +13771,7 @@ Your answer:"""
                 item_categories=_active_categories,
                 item_verify_by=_active_verify_by,
                 item_anti_patterns=_active_anti_patterns,
+                item_score_anchors=_active_score_anchors,
                 builder_enabled=self._is_builder_subagent_enabled(),
                 regression_guard_enabled=self._is_regression_guard_subagent_enabled(),
                 essential_files_active=_essential_files_active,

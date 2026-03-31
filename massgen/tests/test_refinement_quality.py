@@ -55,6 +55,30 @@ class TestScoreCalibration:
         )
         assert "MUST be consistent with" in result
 
+    def test_scored_decision_displays_score_anchors(self):
+        """Score anchors should appear in the scored decision prompt."""
+        items = ["Visual craft: Design feels authored", "Content depth"]
+        anchors = {
+            "E1": {
+                "3": "Generic template with no custom styling",
+                "5": "Some custom colors but layout is cookie-cutter",
+                "7": "Cohesive color system and typography",
+                "9": "Every visual choice is intentional",
+            },
+        }
+        result = _build_checklist_scored_decision(
+            threshold=5,
+            remaining=3,
+            total=5,
+            checklist_items=items,
+            item_score_anchors=anchors,
+        )
+        assert "Score anchors:" in result
+        assert "3/10: Generic template" in result
+        assert "9/10: Every visual choice is intentional" in result
+        # E2 has no anchors, should not show anchor section for it
+        assert result.count("Score anchors:") == 1
+
     def test_gated_decision_has_recalibrated_anchors(self):
         """Gated decision also has recalibrated score anchors."""
         items = ["E1 criterion", "E2 criterion"]

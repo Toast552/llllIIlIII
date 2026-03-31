@@ -650,6 +650,7 @@ def _build_checklist_scored_decision(
     iterate_action: str = "new_answer",
     item_categories: dict[str, str] | None = None,
     item_anti_patterns: dict[str, list[str]] | None = None,
+    item_score_anchors: dict[str, dict[str, str]] | None = None,
 ) -> str:
     """Build checklist_scored decision section (0-10 confidence, visible cutoff)."""
     effective_t = _checklist_effective_threshold(threshold, remaining, total)
@@ -657,14 +658,22 @@ def _build_checklist_scored_decision(
     cutoff = _checklist_confidence_cutoff(effective_t)
     budget = _checklist_budget_context(remaining, total)
 
-    # Build numbered checklist with confidence instructions, E-prefix, PRIMARY marker, and anti-patterns
+    # Build numbered checklist with confidence instructions, E-prefix, PRIMARY marker,
+    # anti-patterns, and score anchors
     numbered_lines = []
     for i, item in enumerate(checklist_items):
         eid = f"E{i + 1}"
         primary = " **[PRIMARY]**" if (item_categories or {}).get(eid) == "primary" else ""
         anti = (item_anti_patterns or {}).get(eid)
         anti_line = f"\n    Anti-patterns: {', '.join(anti)}" if anti else ""
-        numbered_lines.append(f"  {eid}.{primary} {item}  → **___/10**{anti_line}")
+        anchors = (item_score_anchors or {}).get(eid)
+        anchor_lines = ""
+        if anchors:
+            anchor_lines = "\n    Score anchors:"
+            for level in ("3", "5", "7", "9"):
+                if level in anchors:
+                    anchor_lines += f"\n      {level}/10: {anchors[level]}"
+        numbered_lines.append(f"  {eid}.{primary} {item}  → **___/10**{anti_line}{anchor_lines}")
     numbered = "\n".join(numbered_lines)
 
     force_terminate = ""
@@ -3821,6 +3830,7 @@ class EvaluationSection(SystemPromptSection):
         item_categories: dict[str, str] | None = None,
         item_verify_by: dict[str, str] | None = None,
         item_anti_patterns: dict[str, list[str]] | None = None,
+        item_score_anchors: dict[str, dict[str, str]] | None = None,
         has_existing_answers: bool = True,
         builder_enabled: bool = True,
         regression_guard_enabled: bool = False,
@@ -3853,6 +3863,7 @@ class EvaluationSection(SystemPromptSection):
         self.item_categories = item_categories
         self.item_verify_by = item_verify_by
         self.item_anti_patterns = item_anti_patterns
+        self.item_score_anchors = item_score_anchors
         self.has_existing_answers = has_existing_answers
         self.builder_enabled = builder_enabled
         self.regression_guard_enabled = regression_guard_enabled
@@ -3990,6 +4001,7 @@ Your goal is to iteratively refine answers until they meet the quality bar.
                     items,
                     item_categories=self.item_categories,
                     item_anti_patterns=self.item_anti_patterns,
+                    item_score_anchors=self.item_score_anchors,
                 )
             evaluation_section = f"""{analysis}
 
@@ -4215,6 +4227,7 @@ class DecompositionSection(SystemPromptSection):
         item_categories: dict[str, str] | None = None,
         item_verify_by: dict[str, str] | None = None,
         item_anti_patterns: dict[str, list[str]] | None = None,
+        item_score_anchors: dict[str, dict[str, str]] | None = None,
         improvements_cfg: dict | None = None,
         fast_iteration_mode: bool = False,
     ):
@@ -4235,6 +4248,7 @@ class DecompositionSection(SystemPromptSection):
         self.item_categories = item_categories
         self.item_verify_by = item_verify_by
         self.item_anti_patterns = item_anti_patterns
+        self.item_score_anchors = item_score_anchors
         self.improvements_cfg = improvements_cfg
         self.fast_iteration_mode = fast_iteration_mode
 
@@ -4270,6 +4284,7 @@ class DecompositionSection(SystemPromptSection):
                         iterate_action="new_answer",
                         item_categories=self.item_categories,
                         item_anti_patterns=self.item_anti_patterns,
+                        item_score_anchors=self.item_score_anchors,
                     )
                 return f"""**CHOOSING THE RIGHT TOOL — `new_answer` vs `stop`:**
 Both are terminal actions that end your round.

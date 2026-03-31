@@ -62,6 +62,11 @@ class GeneratedCriterion:
         anti_patterns: Specific failure modes that should tank the score for this
             criterion. Concrete, not abstract — e.g. "heart/fire/ocean metaphors"
             not "avoid cliches". None when not applicable.
+        score_anchors: Concrete descriptions of what specific score levels look like
+            for THIS criterion on THIS task. Keys are score strings ("3", "5", "7", "9")
+            mapping to brief behavioral descriptions. These calibrate evaluators by
+            grounding abstract scores in observable output characteristics.
+            None when not provided.
     """
 
     id: str
@@ -69,6 +74,7 @@ class GeneratedCriterion:
     category: str  # "primary", "standard", or "stretch"
     verify_by: str | None = None
     anti_patterns: list[str] | None = None
+    score_anchors: dict[str, str] | None = None
 
 
 # Static defaults inspired by GEPA's diagnostic structure.
@@ -495,6 +501,8 @@ def criteria_from_inline(inline_list: list[dict[str, str]]) -> list[GeneratedCri
             cat = "standard"
         raw_anti = item.get("anti_patterns")
         anti = raw_anti if isinstance(raw_anti, list) else None
+        raw_anchors = item.get("score_anchors")
+        anchors = raw_anchors if isinstance(raw_anchors, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in raw_anchors.items()) else None
         criteria.append(
             GeneratedCriterion(
                 id=f"E{i + 1}",
@@ -502,6 +510,7 @@ def criteria_from_inline(inline_list: list[dict[str, str]]) -> list[GeneratedCri
                 category=cat,
                 verify_by=verify_by,
                 anti_patterns=anti,
+                score_anchors=anchors,
             ),
         )
     return criteria
@@ -683,6 +692,9 @@ def _parse_criteria_response(
             # Extract anti-patterns
             raw_anti = item.get("anti_patterns")
             anti = raw_anti if isinstance(raw_anti, list) and all(isinstance(a, str) for a in raw_anti) else None
+            # Extract score anchors — must be a dict with string keys and string values
+            raw_anchors = item.get("score_anchors")
+            anchors = raw_anchors if isinstance(raw_anchors, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in raw_anchors.items()) else None
             criteria.append(
                 GeneratedCriterion(
                     id=f"E{i + 1}",
@@ -690,6 +702,7 @@ def _parse_criteria_response(
                     category=cat,
                     verify_by=verify_by,
                     anti_patterns=anti,
+                    score_anchors=anchors,
                 ),
             )
 
@@ -785,9 +798,46 @@ to score — it is a quality principle that shapes how agents approach the work.
 A strong criterion takes a position on what "good" means and explicitly rejects \
 common ways outputs go wrong.
 
-## Aspiration Level
+## Step 1: Deep Investigation (REQUIRED — do this BEFORE writing criteria)
 
-Before writing criteria, identify the aspiration level for this task in 1-2 phrases. \
+Before generating any criteria, you MUST conduct a structured investigation of \
+what excellence looks like for this specific task. Do not skip this. Generic criteria \
+produce generic outputs — the investigation is what makes criteria genuinely specific.
+
+Answer each of the following questions in your thinking. Be concrete and specific \
+to THIS task, not generic:
+
+1. **What does excellent output look like for this task type?** Think of the best \
+examples you know in this domain. What specifically makes them excellent? Not "it's \
+well-designed" — what observable properties distinguish excellent from merely competent?
+
+2. **Where do AI models typically fail on this type of task?** Think about the specific \
+ways default model behavior produces mediocre results. What patterns do AI outputs \
+exhibit that human experts would immediately recognize as machine-generated or \
+uninspired? These become your anti-patterns.
+
+3. **What would a domain expert notice first?** If someone deeply knowledgeable in this \
+domain reviewed the output, what would they praise in an excellent version? What \
+would make them wince in a mediocre one? What distinguishes "clearly knows the domain" \
+from "surface-level understanding"?
+
+4. **What separates "adequate" from "remarkable" here?** Adequate meets requirements. \
+Remarkable makes someone stop and pay attention. What specific qualities create that \
+gap for THIS task? This should inform your aspiration level and your PRIMARY criterion.
+
+5. **What are the task-specific failure modes?** Not generic problems like "unclear writing" \
+but the specific ways THIS kind of output goes wrong. For a recipe website: bland stock \
+photography, missing cooking times, generic "season to taste" instructions. For a data \
+visualization: misleading axis scales, chartjunk, color palettes that fail for \
+colorblindness. Be THIS specific.
+
+Your investigation findings should directly inform every criterion you generate. If a \
+criterion could apply equally to any task, it is too generic — ground it in your \
+investigation.
+
+## Step 2: Aspiration Level
+
+Based on your investigation, identify the aspiration level for this task in 1-2 phrases. \
 What would genuinely excellent output look like? Not "correct and complete" — that \
 is the floor. What would make someone say "this is remarkably good"? \
 Examples: "publishable in a literary journal", "a senior engineer would merge this \
@@ -872,16 +922,20 @@ angle create physical plausibility. A pelican floating above a bicycle or \
 statically posed with no sense of motion fails."
   anti_patterns: ["character and vehicle as separate non-interacting elements", \
 "static T-pose on seat", "missing pedal/handlebar engagement"]
+  score_anchors: {{"3": "Pelican and bicycle are separate shapes placed near each \
+other with no interaction", "5": "Pelican is on the bicycle but looks pasted on — \
+no weight, no motion, stiff posture", "7": "Believable riding pose with contact \
+points, but motion feels frozen rather than dynamic", "9": "The pelican's weight \
+shifts into the pedals, body leans into a turn — you believe it's actually riding"}}
 - "Pelican accuracy: Immediately recognizable as a pelican from silhouette \
 alone — beak with throat pouch, proportional body, correct wing structure. A \
 generic bird with a long beak is not a pelican."
   anti_patterns: ["cartoon-simplified shapes that lose species identity", \
 "anatomically impossible joint positions"]
-- "Visual craft: The illustration evidences a considered aesthetic — not just \
-accurate rendering. Color palette, line weight variation, and composition feel \
-intentional."
-  anti_patterns: ["flat uniform line weight", "white/empty background as default", \
-"over-reliance on gradients as only visual interest"]
+  score_anchors: {{"3": "Generic bird shape — could be any long-beaked species", \
+"5": "Has a pouch-like beak but body proportions are wrong for a pelican", \
+"7": "Clearly a pelican but some anatomical details simplified or incorrect", \
+"9": "Immediately recognizable as a pelican from silhouette alone"}}
 
 For a task "Write a poem about love":
 - **[PRIMARY]** "Earned emotion: The poem makes the reader feel something through \
@@ -889,10 +943,19 @@ specific imagery and situation, not through stating feelings. Every emotional be
 grounded in something concrete enough to see, hear, or touch."
   anti_patterns: ["abstract declarations ('my heart aches')", \
 "greeting-card resolution", "emotional escalation without corresponding specificity"]
+  score_anchors: {{"3": "States emotions directly — 'I feel so much love' — with no \
+grounding image", "5": "Has some imagery but defaults to stock metaphors (heart, \
+fire, stars) rather than specific observations", "7": "Most emotional beats anchored \
+in concrete images, but 1-2 lines slip into abstraction", "9": "Every feeling earned \
+through specific, surprising imagery — reader feels before they understand why"}}
 - "Surprise and originality: At least one moment the reader could not have predicted. \
 Resistance to the gravitational pull of cliche on the subject of love."
   anti_patterns: ["heart/fire/ocean/stars as primary metaphors", \
 "list-of-beautiful-things structure", "ending that restates the opening sentiment"]
+  score_anchors: {{"3": "Every image and turn is predictable — reads like a greeting \
+card", "5": "Competent but nothing you haven't read before", "7": "One genuinely \
+surprising moment but the rest follows expected patterns", "9": "Multiple moments of \
+genuine surprise — approaches the subject from an angle you didn't expect"}}
 
 Criteria name a quality axis with an opinion — they do NOT prescribe specific \
 quantities, thresholds, or implementation choices.
@@ -905,6 +968,8 @@ GOOD (per-part): "Per-section quality: each significant section independently \
 demonstrates craft — no section is carried by the strength of others. Evaluate the \
 weakest section, not the average."
 
+## Step 3: Generate Criteria with Score Anchors
+
 ## Output Format
 Return JSON with this structure:
 {{
@@ -914,15 +979,41 @@ Return JSON with this structure:
             "text": "[Aspect]: [opinionated quality definition].",
             "category": "primary",
             "anti_patterns": ["specific failure mode 1", "specific failure mode 2"],
-            "verify_by": "evidence gathering instructions if needed"
+            "verify_by": "evidence gathering instructions if needed",
+            "score_anchors": {{
+                "3": "[What a 3/10 looks like for THIS criterion on THIS task — concrete, observable]",
+                "5": "[What a 5/10 looks like — the 'adequate but uninspired' level]",
+                "7": "[What a 7/10 looks like — good with specific nameable gaps]",
+                "9": "[What a 9/10 looks like — a professional would be impressed]"
+            }}
         }},
         {{
             "text": "[Aspect]: [opinionated quality definition].",
             "category": "standard",
-            "anti_patterns": ["failure mode 1", "failure mode 2"]
+            "anti_patterns": ["failure mode 1", "failure mode 2"],
+            "score_anchors": {{
+                "3": "[Concrete description of poor performance on this dimension]",
+                "5": "[Concrete description of adequate performance]",
+                "7": "[Concrete description of good performance]",
+                "9": "[Concrete description of excellent performance]"
+            }}
         }}
     ]
 }}
+
+**`score_anchors` field**: REQUIRED for every criterion. Each criterion must include \
+concrete descriptions of what scores 3, 5, 7, and 9 look like for THAT criterion \
+on THIS specific task. These anchors calibrate evaluators by grounding abstract \
+numbers in observable output characteristics. Without anchors, all scores drift to \
+7-8 regardless of actual quality.
+
+Rules for score anchors:
+- Each anchor must be specific to THIS task, not generic (bad: "poor quality"; \
+good: "uses only stock imagery with no custom illustrations")
+- Anchors must be observable — describe what you would SEE, not what you would infer
+- The gap between adjacent levels should be clear — a reader should be able to \
+distinguish a 5 from a 7 by reading the anchors
+- The 9 anchor should match your aspiration level for this dimension
 
 **`verify_by` field**: Required whenever the criterion involves experiential correctness \
 or craft that cannot be assessed by reading the source alone. Describe WHAT EVIDENCE to \
