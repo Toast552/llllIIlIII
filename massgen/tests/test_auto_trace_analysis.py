@@ -349,6 +349,68 @@ async def test_run_trace_analyzer_copies_authoritative_artifact_to_memory(
 
 
 @pytest.mark.asyncio
+async def test_run_trace_analyzer_queues_artifact_content_for_midstream_injection(
+    tmp_path: Path,
+):
+    """Trace analyzer should queue the actual guidance and schedule wait interruption."""
+    from massgen.subagent.models import SubagentResult
+
+    orch = _make_orchestrator(tmp_path, restart_count=1)
+    orch._emit_round_evaluator_spawn_event = lambda **kwargs: None
+
+    scheduled: list[tuple[str, str]] = []
+
+    def _schedule_interrupt(agent_id: str, trigger: str = "background_subagent_complete") -> None:
+        scheduled.append((agent_id, trigger))
+
+    orch._schedule_background_wait_interrupt_for_agent = _schedule_interrupt
+
+    trace_path = tmp_path / "execution_trace.md"
+    trace_path.write_text("# Trace", encoding="utf-8")
+
+    subagent_workspace = tmp_path / "subagent_workspace"
+    deliverable_dir = subagent_workspace / "deliverable"
+    deliverable_dir.mkdir(parents=True, exist_ok=True)
+    artifact_path = deliverable_dir / "trace_analysis_round_2.md"
+    artifact_text = (
+        "---\n"
+        "name: execution_trace_round_2\n"
+        "description: Process learnings from round 2 execution trace analysis\n"
+        "tier: short_term\n"
+        "---\n\n"
+        "### DO (repeat only if clearly confirmed)\n"
+        "- Run targeted verification immediately after edits.\n\n"
+        "### DON'T (avoid these)\n"
+        "- Re-run the same failing command without new evidence.\n"
+    )
+    artifact_path.write_text(artifact_text, encoding="utf-8")
+
+    async def _fake_direct_spawn(*args, **kwargs):
+        result = SubagentResult.create_success(
+            subagent_id="trace_analyzer_agent_a_r2",
+            answer="Created deliverable/trace_analysis_round_2.md",
+            workspace_path=str(subagent_workspace),
+            execution_time_seconds=1.0,
+        )
+        return {"success": True, "results": [result.to_dict()]}
+
+    orch._direct_spawn_subagents = _fake_direct_spawn  # type: ignore[assignment]
+
+    await orch._run_trace_analyzer("agent_a", 2, trace_path)
+
+    pending = orch._pending_subagent_results["agent_a"]
+    assert len(pending) == 1
+    queued_subagent_id, queued_result = pending[0]
+    assert queued_subagent_id == "trace_analyzer_agent_a_r2"
+    assert queued_result.answer is not None
+    assert "Trace analysis completed" in queued_result.answer
+    assert "### DO (repeat only if clearly confirmed)" in queued_result.answer
+    assert "### DON'T (avoid these)" in queued_result.answer
+    assert "Created deliverable/trace_analysis_round_2.md" not in queued_result.answer
+    assert scheduled == [("agent_a", "background_subagent_complete")]
+
+
+@pytest.mark.asyncio
 async def test_run_trace_analyzer_falls_back_to_answer_when_artifact_missing(
     tmp_path: Path,
 ):

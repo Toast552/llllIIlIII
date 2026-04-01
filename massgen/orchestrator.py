@@ -7158,6 +7158,116 @@ Your answer:"""
         )
         return items_restored > 0
 
+    def _sync_applied_context_files_into_final_artifacts(
+        self,
+        agent_id: str,
+        target_path: str,
+        relative_paths: list[str],
+    ) -> None:
+        """Mirror approved context-path changes into saved final artifacts.
+
+        Final presentation snapshots the agent workspace before isolated
+        context-path changes are reviewed and copied back to the real target.
+        After apply, overlay the delivered files into the persisted final
+        artifacts so logs and snapshot_storage reflect what actually landed.
+        """
+        if not relative_paths:
+            return
+
+        agent = self.agents.get(agent_id)
+        if not agent or not hasattr(agent, "backend"):
+            return
+
+        filesystem_manager = getattr(agent.backend, "filesystem_manager", None)
+        if filesystem_manager is None:
+            return
+
+        source_root = Path(target_path)
+        normalized_rel_paths: list[str] = []
+        seen_rel_paths: set[str] = set()
+        for rel_path in relative_paths:
+            if not isinstance(rel_path, str):
+                continue
+            normalized = rel_path.replace("\\", "/").strip()
+            if not normalized:
+                normalized = source_root.name
+            rel_obj = Path(normalized)
+            if rel_obj.is_absolute() or ".." in rel_obj.parts:
+                logger.warning(
+                    "[Orchestrator] Skipping unsafe applied context path %r for %s",
+                    rel_path,
+                    agent_id,
+                )
+                continue
+            rel_key = rel_obj.as_posix()
+            if rel_key in seen_rel_paths:
+                continue
+            seen_rel_paths.add(rel_key)
+            normalized_rel_paths.append(rel_key)
+
+        if not normalized_rel_paths:
+            return
+
+        destination_roots: list[Path] = []
+        log_session_dir = get_log_session_dir()
+        if log_session_dir:
+            destination_roots.append(Path(log_session_dir) / "final" / agent_id / "workspace")
+
+        snapshot_storage = getattr(filesystem_manager, "snapshot_storage", None)
+        if snapshot_storage:
+            destination_roots.append(Path(snapshot_storage))
+
+        if not destination_roots:
+            return
+
+        copied_count = 0
+        removed_count = 0
+        for destination_root in destination_roots:
+            destination_root.mkdir(parents=True, exist_ok=True)
+
+            for normalized in normalized_rel_paths:
+                rel_obj = Path(normalized)
+                source_path = source_root if source_root.is_file() else source_root / rel_obj
+                destination_path = destination_root / rel_obj
+
+                try:
+                    if source_path.exists():
+                        destination_path.parent.mkdir(parents=True, exist_ok=True)
+                        if source_path.is_file():
+                            shutil.copy2(source_path, destination_path)
+                        elif source_path.is_dir():
+                            shutil.copytree(
+                                source_path,
+                                destination_path,
+                                dirs_exist_ok=True,
+                                symlinks=True,
+                                ignore_dangling_symlinks=True,
+                            )
+                        copied_count += 1
+                    else:
+                        if destination_path.is_file() or destination_path.is_symlink():
+                            destination_path.unlink()
+                            removed_count += 1
+                        elif destination_path.is_dir():
+                            shutil.rmtree(destination_path)
+                            removed_count += 1
+                except Exception as exc:
+                    logger.warning(
+                        "[Orchestrator] Failed to sync applied context file %s into %s for %s: %s",
+                        normalized,
+                        destination_root,
+                        agent_id,
+                        exc,
+                    )
+
+        logger.info(
+            "[Orchestrator] Synced applied context files into final artifacts for %s: copied=%d removed=%d paths=%s",
+            agent_id,
+            copied_count,
+            removed_count,
+            normalized_rel_paths,
+        )
+
     async def _save_agent_snapshot(
         self,
         agent_id: str,
@@ -8059,6 +8169,41 @@ Your answer:"""
         logger.info(
             f"[Orchestrator] Background subagent {subagent_id} completed for {parent_agent_id} " f"(status={result.status}, success={result.success})",
         )
+        self._schedule_background_wait_interrupt_for_agent(
+            parent_agent_id,
+            trigger="background_subagent_complete",
+        )
+
+    def _on_background_subagent_complete(
+        self,
+        parent_agent_id: str,
+        subagent_id: str,
+        result: "SubagentResult",
+    ) -> None:
+        """Compatibility wrapper for orchestrator-owned background subagent completions."""
+        self._on_subagent_complete(
+            parent_agent_id,
+            subagent_id,
+            result,
+        )
+
+    def _schedule_background_wait_interrupt_for_agent(
+        self,
+        agent_id: str,
+        trigger: str = "background_subagent_complete",
+    ) -> None:
+        """Best-effort scheduling for runtime wait interruption delivery."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        loop.create_task(
+            self._maybe_interrupt_background_wait_for_agent(
+                agent_id,
+                trigger=trigger,
+            ),
+        )
 
     async def _get_pending_subagent_results_async(
         self,
@@ -8149,6 +8294,30 @@ Your answer:"""
         except Exception as e:
             logger.error(f"[Orchestrator] Error polling for completed subagents: {e}", exc_info=True)
             return []
+
+    async def _collect_pending_subagent_results_async(
+        self,
+        agent_id: str,
+    ) -> list[tuple[str, "SubagentResult"]]:
+        """Return deduplicated pending subagent results from local and MCP queues."""
+        pending_subagent_results: list[tuple[str, "SubagentResult"]] = []
+
+        local_pending = list(self._pending_subagent_results.get(agent_id, []))
+        if local_pending:
+            pending_subagent_results.extend(local_pending)
+
+        polled_pending = await self._get_pending_subagent_results_async(agent_id)
+        if polled_pending:
+            pending_subagent_results.extend(polled_pending)
+
+        if not pending_subagent_results:
+            return []
+
+        deduped_results: dict[str, "SubagentResult"] = {}
+        for subagent_id, result in pending_subagent_results:
+            deduped_results[subagent_id] = result
+
+        return list(deduped_results.items())
 
     async def _cancel_running_subagents_for_agent(
         self,
@@ -8634,6 +8803,7 @@ Your answer:"""
             return
 
         injection_parts: list[str] = []
+        wrote_subagent_payload = False
 
         # 0. Poll runtime inbox for messages from parent (subagent mode)
         self._poll_runtime_inbox()
@@ -8667,12 +8837,13 @@ Your answer:"""
                     self._codex_pending_inject_confirmation[agent_id] = result.inject["content"]
 
         # 2. Check for subagent completions
-        if self._background_subagents_enabled and self._pending_subagent_results.get(agent_id):
-            pending = await self._get_pending_subagent_results_async(agent_id)
+        if self._background_subagents_enabled:
+            pending = await self._collect_pending_subagent_results_async(agent_id)
             if pending:
                 from massgen.subagent.result_formatter import format_batch_results
 
                 injection_parts.append(format_batch_results(pending))
+                wrote_subagent_payload = True
 
         # 3. Check for background tool completions
         if hasattr(agent.backend, "get_pending_background_tool_results"):
@@ -8763,6 +8934,8 @@ Your answer:"""
         if injection_parts:
             combined = "\n".join(injection_parts)
             agent.backend.write_post_tool_use_hook(combined)
+            if wrote_subagent_payload:
+                self._pending_subagent_results.pop(agent_id, None)
             logger.info(
                 "[Orchestrator] Wrote %d chars to hook file for %s (%d parts)",
                 len(combined),
@@ -8860,23 +9033,10 @@ Your answer:"""
                     )
 
         # 2) Background subagent completions
-        pending_subagent_results: list[tuple[str, "SubagentResult"]] = []
-        # Peek (copy) instead of pop — only clear after successful delivery.
-        local_pending = list(self._pending_subagent_results.get(agent_id, []))
-        if local_pending:
-            pending_subagent_results.extend(local_pending)
-        polled_pending = await self._get_pending_subagent_results_async(agent_id)
-        if polled_pending:
-            pending_subagent_results.extend(polled_pending)
-
+        pending_subagent_results = await self._collect_pending_subagent_results_async(agent_id)
         if pending_subagent_results:
-            # De-duplicate by subagent id while preserving latest payload.
-            deduped_results: dict[str, "SubagentResult"] = {}
-            for subagent_id, result in pending_subagent_results:
-                deduped_results[subagent_id] = result
-
             subagent_hook = SubagentCompleteHook(
-                get_pending_results=lambda: list(deduped_results.items()),
+                get_pending_results=lambda: list(pending_subagent_results),
                 injection_strategy=self._background_subagent_injection_strategy,
             )
             subagent_result = await subagent_hook.execute(
@@ -12682,6 +12842,83 @@ Your answer:"""
         return f"{frontmatter}\n{report_text}"
 
     @staticmethod
+    def _strip_memory_frontmatter(content: str) -> str:
+        """Return the body of a memory file, dropping YAML frontmatter when present."""
+        normalized = content.strip()
+        if not normalized.startswith("---"):
+            return normalized
+
+        lines = normalized.splitlines()
+        if not lines or lines[0].strip() != "---":
+            return normalized
+
+        for index in range(1, len(lines)):
+            if lines[index].strip() == "---":
+                body = "\n".join(lines[index + 1 :]).strip()
+                return body or normalized
+
+        return normalized
+
+    def _build_trace_analysis_injection_text(
+        self,
+        round_number: int,
+        content: str,
+    ) -> str | None:
+        """Build the mid-stream injection payload for trace-analysis guidance."""
+        body = self._strip_memory_frontmatter(content)
+        if not body:
+            return None
+
+        return f"Trace analysis completed for round {round_number - 1}. " f"Apply this execution-process guidance immediately in round {round_number}.\n\n" f"{body}"
+
+    def _build_trace_analysis_injection_result(
+        self,
+        trace_result: "SubagentResult",
+        round_number: int,
+        artifact_path: Path | None,
+    ) -> Optional["SubagentResult"]:
+        """Build the result payload queued for background injection."""
+        injection_text: str | None = None
+
+        if artifact_path is not None:
+            try:
+                artifact_content = artifact_path.read_text(encoding="utf-8")
+            except OSError as exc:
+                logger.warning(
+                    "[Orchestrator] Failed to read trace analysis artifact for injection %s: %s",
+                    artifact_path,
+                    exc,
+                )
+            else:
+                injection_text = self._build_trace_analysis_injection_text(
+                    round_number,
+                    artifact_content,
+                )
+
+        if not injection_text and trace_result.answer:
+            injection_text = self._build_trace_analysis_injection_text(
+                round_number,
+                trace_result.answer,
+            )
+
+        if not injection_text:
+            return None
+
+        return trace_result.__class__(
+            subagent_id=trace_result.subagent_id,
+            status=trace_result.status,
+            success=trace_result.success,
+            answer=injection_text,
+            workspace_path=trace_result.workspace_path,
+            execution_time_seconds=trace_result.execution_time_seconds,
+            error=trace_result.error,
+            token_usage=copy.deepcopy(trace_result.token_usage),
+            log_path=trace_result.log_path,
+            completion_percentage=trace_result.completion_percentage,
+            warning=trace_result.warning,
+        )
+
+    @staticmethod
     def _get_trace_analysis_memory_filename(round_number: int) -> str:
         """Return the canonical short-term memory filename for trace analysis."""
         return f"trace_analysis_round_{round_number}.md"
@@ -13117,12 +13354,18 @@ Your answer:"""
                     memory_block,
                 )
 
-        # Enqueue for SubagentCompleteHook injection
-        if trace_result.answer and trace_result.answer.strip():
+        # Enqueue the completed guidance so the running parent can receive it
+        # immediately via the existing subagent-completion injection path.
+        injection_result = self._build_trace_analysis_injection_result(
+            trace_result,
+            round_number,
+            artifact_path=artifact_path,
+        )
+        if injection_result is not None:
             self._on_background_subagent_complete(
                 parent_agent_id,
                 subagent_id,
-                trace_result,
+                injection_result,
             )
 
     async def _spawn_trace_analyzer_background(
@@ -17962,6 +18205,12 @@ INSTRUCTIONS FOR NEXT ATTEMPT:
                         blocked_files=blocked_files,
                         combined_diff=plan_entry["combined_diff"],
                     )
+                    if files:
+                        self._sync_applied_context_files_into_final_artifacts(
+                            agent_id=selected_agent_id,
+                            target_path=plan_entry["target_path"],
+                            relative_paths=files,
+                        )
                     applied_files.extend(files)
 
             if applied_files:
