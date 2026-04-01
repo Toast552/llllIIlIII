@@ -2506,8 +2506,11 @@ class MemorySection(SystemPromptSection):
             content_parts.append("\n### Verification Replay Memories (Auto-Injected)\n")
             content_parts.append(
                 "These memories capture how the prior answer was verified — they reflect the state at submission. "
-                "Use them as your baseline and generally trust their results. Only run additional verification "
-                "if you spot an error or omission in the prior check, or need evidence for a new comparison.\n\n"
+                "Use them as your baseline and trust their results. The prior round already rendered, captured, "
+                "and analyzed these artifacts — do NOT re-render or re-capture them unless you spot a gap "
+                "(e.g. the memo says rendering was not attempted, or a specific aspect was not checked). "
+                "Use the existing artifacts in `.massgen_scratch/verification/` — screenshots, recordings, "
+                "test outputs, logs — directly for your own evaluation.\n\n"
                 "**Reuse verification scripts.** When evaluating a prior answer, run its existing "
                 "verification script directly — it has working selectors, timing, and patterns that "
                 "cost multiple iterations to get right. Review the results critically (prior verification "
@@ -3034,7 +3037,10 @@ class CommandExecutionSection(SystemPromptSection):
         )
         parts.append("- Block until next completion (when idle): `custom_tool__wait_for_background_tool`")
         parts.append(
-            "If no meaningful work remains while waiting on background jobs, " "call `custom_tool__wait_for_background_tool` instead of tight polling loops.",
+            "After starting a background job (especially `read_media`), continue with your next task — "
+            "do NOT immediately call `wait_for_background_tool`. Write files, run commands, start "
+            "other analysis. Only call `wait_for_background_tool` when you have exhausted all "
+            "other productive work and genuinely need the result to proceed.",
         )
         parts.append(
             "The wait call may return early with `interrupted: true` and `injected_content` " "when runtime input or completion updates are ready; treat that payload as new context and continue.",
@@ -3368,6 +3374,14 @@ class FilesystemBestPracticesSection(SystemPromptSection):
             "outputs alongside the existing ones. "
             "Save your own verification evidence to `.massgen_scratch/verification/{agentN}/` "
             "(create subdirs as needed per agent you're evaluating).\n"
+            "- **Reuse existing verification artifacts**: When evaluating a peer answer in a "
+            "non-initial round, check their `.massgen_scratch/verification/` first. If screenshots, "
+            "renders, or test outputs already exist from the prior round, use those directly "
+            "rather than re-rendering from scratch. Only re-capture if: (a) the prior "
+            "round's verification memo indicates the artifact was NOT rendered/captured, (b) you've "
+            "made changes to the deliverable and need to verify your modifications, (c) the prior "
+            "verification missed an important mechanism or was done incorrectly, or (d) you need "
+            "a specific comparison the prior evidence doesn't cover.\n"
             "- **Focus verification**: Prioritize critical functionality and substantial differences "
             "rather than exhaustively reviewing every file\n"
             "- **Don't rely solely on answer text**: Ensure the actual work matches their claims\n"
